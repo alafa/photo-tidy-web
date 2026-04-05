@@ -22,3 +22,7 @@ npm run test      # run tests (once added)
 - **EXIF writing**: modify DateTimeOriginal (and related tags) to reflect drag & drop order
 - **State**: photo list is ordered by EXIF timestamp; drag & drop reordering reassigns timestamps to persist the new order
 - **File handling**: all image processing happens in the browser — no server-side storage
+
+## Documented Solutions
+
+`docs/solutions/` — past bugs and best practices organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.
