@@ -187,6 +187,7 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
   function makeEntry(name: string, index: number) {
     const file = makeFile(name)
     return {
+      id: `${name}-${index}`,
       file,
       filename: name,
       capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
@@ -195,7 +196,7 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
   }
 
   function photoId(entry: ReturnType<typeof makeEntry>) {
-    return `${entry.filename}-${entry.file.lastModified}-${entry.uploadIndex}`
+    return entry.id
   }
 
   it('calls reorderPhotos with correct indices on dragEnd', () => {

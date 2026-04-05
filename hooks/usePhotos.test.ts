@@ -122,55 +122,61 @@ describe('usePhotos — reorderPhotos', () => {
     return result
   }
 
-  it('moves photo from index 2 to index 0 and reassigns timestamps', async () => {
+  it('moves photo from index 2 to index 0 and slots its timestamp before its new neighbor', async () => {
     const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
-    // All start with same timestamp so sort order = upload order
     const d = new Date('2025-01-01T10:00:00Z')
     const result = await setupPhotos([a, b, c], [d, d, d])
 
     act(() => result.current.reorderPhotos(2, 0))
 
+    // Order after move: [c, a, b]
     const filenames = result.current.photos.map((p) => p.filename)
     expect(filenames[0]).toBe('c.jpg')
     expect(filenames[1]).toBe('a.jpg')
     expect(filenames[2]).toBe('b.jpg')
 
-    // timestamps are 1-second sequential
+    // slotTimestamp: c moved to index 0, no prev neighbor, next neighbor = a (d)
+    // → c gets d - 1000ms; a and b keep d unchanged
     const times = result.current.photos.map((p) => p.capturedAt!.getTime())
-    expect(times[1] - times[0]).toBe(1000)
-    expect(times[2] - times[1]).toBe(1000)
+    expect(times[0]).toBe(d.getTime() - 1000)
+    expect(times[1]).toBe(d.getTime())
+    expect(times[2]).toBe(d.getTime())
   })
 
-  it('uses earliest non-null capturedAt as anchor', async () => {
-    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
-    const early = new Date('2020-01-01T00:00:00Z')
-    const late = new Date('2025-06-15T10:00:00Z')
-    mockGetPhotoDate.mockImplementation(async (file: File) =>
-      file === a ? late : early
-    )
-    const { result } = renderHook(() => usePhotos())
-    await act(() => result.current.processFiles(makeFileList([a, b])))
+  it('slots moved photo between its new neighbors via midpoint timestamp', async () => {
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    const t1 = new Date('2025-01-01T10:00:00Z')
+    const t2 = new Date('2025-01-01T10:00:10Z')
+    const t3 = new Date('2025-01-01T10:00:20Z')
+    const result = await setupPhotos([a, b, c], [t1, t2, t3])
 
-    // After processFiles: sorted oldest-first → [b (early), a (late)]
-    act(() => result.current.reorderPhotos(0, 0)) // no-op reorder, just reassigns
+    // Move c (index 2) to index 1 — between a (t1) and b (t2)
+    act(() => result.current.reorderPhotos(2, 1))
 
-    const anchor = result.current.photos[0].capturedAt!.getTime()
-    expect(anchor).toBe(early.getTime())
+    // Order after move: [a, c, b]
+    const filenames = result.current.photos.map((p) => p.filename)
+    expect(filenames[0]).toBe('a.jpg')
+    expect(filenames[1]).toBe('c.jpg')
+    expect(filenames[2]).toBe('b.jpg')
+
+    // c gets midpoint of t1 and t2; a and b unchanged
+    const expectedMidpoint = Math.round((t1.getTime() + t2.getTime()) / 2)
+    expect(result.current.photos[1].capturedAt!.getTime()).toBe(expectedMidpoint)
+    expect(result.current.photos[0].capturedAt!.getTime()).toBe(t1.getTime())
+    expect(result.current.photos[2].capturedAt!.getTime()).toBe(t2.getTime())
   })
 
-  it('uses new Date() as anchor when all capturedAt are null', async () => {
+  it('keeps capturedAt null when all neighbors have null timestamps', async () => {
     const files = [makeFile('a.jpg'), makeFile('b.jpg')]
     mockGetPhotoDate.mockResolvedValue(null)
     const { result } = renderHook(() => usePhotos())
     await act(() => result.current.processFiles(makeFileList(files)))
 
-    const before = Date.now()
     act(() => result.current.reorderPhotos(1, 0))
-    const after = Date.now()
 
-    const anchor = result.current.photos[0].capturedAt!.getTime()
-    expect(anchor).toBeGreaterThanOrEqual(before)
-    expect(anchor).toBeLessThanOrEqual(after + 1000)
+    // Both photos have null timestamps — moved photo stays null
+    expect(result.current.photos[0].capturedAt).toBeNull()
+    expect(result.current.photos[1].capturedAt).toBeNull()
   })
 
   it('does not mutate original PhotoEntry objects', async () => {

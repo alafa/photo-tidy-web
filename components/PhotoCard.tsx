@@ -130,7 +130,6 @@ export default function PhotoCard({
       <div
         className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''}`}
         onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(!checked) } : undefined}
-        onPointerDown={onSelect ? (e) => e.stopPropagation() : undefined}
       >
         {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
         <img
