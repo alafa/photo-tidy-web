@@ -7,19 +7,25 @@ type Props = {
   photos: PhotoEntry[]
   getObjectUrl: (file: File) => string
   onReorder?: (from: number, to: number) => void
+  onNameChange?: (id: string, newName: string) => void
+  onTimestampChange?: (id: string, newDate: Date | null) => void
+  selectedIds?: Set<string>
+  onSelect?: (id: string, checked: boolean) => void
 }
 
-function photoId(entry: PhotoEntry): string {
-  return `${entry.filename}-${entry.file.lastModified}-${entry.uploadIndex}`
-}
-
-export { photoId }
-
-export default function PhotoGrid({ photos, getObjectUrl, onReorder }: Props) {
+export default function PhotoGrid({
+  photos,
+  getObjectUrl,
+  onReorder,
+  onNameChange,
+  onTimestampChange,
+  selectedIds,
+  onSelect,
+}: Props) {
   const grid = (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
       {photos.map((entry) => {
-        const id = photoId(entry)
+        const id = entry.id
         if (onReorder) {
           return (
             <SortablePhotoCard
@@ -27,6 +33,10 @@ export default function PhotoGrid({ photos, getObjectUrl, onReorder }: Props) {
               id={id}
               entry={entry}
               objectUrl={getObjectUrl(entry.file)}
+              onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
+              onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
+              onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
+              checked={selectedIds?.has(id)}
             />
           )
         }
@@ -35,6 +45,10 @@ export default function PhotoGrid({ photos, getObjectUrl, onReorder }: Props) {
             key={id}
             entry={entry}
             objectUrl={getObjectUrl(entry.file)}
+            onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
+            onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
+            onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
+            checked={selectedIds?.has(id)}
           />
         )
       })}
@@ -43,7 +57,7 @@ export default function PhotoGrid({ photos, getObjectUrl, onReorder }: Props) {
 
   if (onReorder) {
     return (
-      <SortableContext items={photos.map(photoId)} strategy={rectSortingStrategy}>
+      <SortableContext items={photos.map((p) => p.id)} strategy={rectSortingStrategy}>
         {grid}
       </SortableContext>
     )

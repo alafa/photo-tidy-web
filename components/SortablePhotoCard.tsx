@@ -7,9 +7,21 @@ type Props = {
   id: string
   entry: PhotoEntry
   objectUrl: string
+  onNameChange?: (newName: string) => void
+  onTimestampChange?: (newDate: Date | null) => void
+  onSelect?: (checked: boolean) => void
+  checked?: boolean
 }
 
-export default function SortablePhotoCard({ id, entry, objectUrl }: Props) {
+export default function SortablePhotoCard({
+  id,
+  entry,
+  objectUrl,
+  onNameChange,
+  onTimestampChange,
+  onSelect,
+  checked,
+}: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
 
@@ -17,12 +29,19 @@ export default function SortablePhotoCard({ id, entry, objectUrl }: Props) {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.4 : 1,
-    cursor: 'grab',
   }
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <PhotoCard entry={entry} objectUrl={objectUrl} />
+    // listeners are on the wrapper; inputs/checkboxes inside PhotoCard stop propagation
+    <div ref={setNodeRef} style={{ ...style, cursor: 'grab' }} {...attributes} {...listeners}>
+      <PhotoCard
+        entry={entry}
+        objectUrl={objectUrl}
+        onNameChange={onNameChange}
+        onTimestampChange={onTimestampChange}
+        onSelect={onSelect}
+        checked={checked}
+      />
     </div>
   )
 }
