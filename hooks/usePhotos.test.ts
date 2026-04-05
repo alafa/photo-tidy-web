@@ -111,6 +111,99 @@ describe('usePhotos', () => {
   })
 })
 
+describe('usePhotos — reorderPhotos', () => {
+  async function setupPhotos(files: File[], dates: (Date | null)[]) {
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      const i = files.indexOf(file)
+      return dates[i] ?? null
+    })
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+    return result
+  }
+
+  it('moves photo from index 2 to index 0 and reassigns timestamps', async () => {
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    // All start with same timestamp so sort order = upload order
+    const d = new Date('2025-01-01T10:00:00Z')
+    const result = await setupPhotos([a, b, c], [d, d, d])
+
+    act(() => result.current.reorderPhotos(2, 0))
+
+    const filenames = result.current.photos.map((p) => p.filename)
+    expect(filenames[0]).toBe('c.jpg')
+    expect(filenames[1]).toBe('a.jpg')
+    expect(filenames[2]).toBe('b.jpg')
+
+    // timestamps are 1-second sequential
+    const times = result.current.photos.map((p) => p.capturedAt!.getTime())
+    expect(times[1] - times[0]).toBe(1000)
+    expect(times[2] - times[1]).toBe(1000)
+  })
+
+  it('uses earliest non-null capturedAt as anchor', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    const early = new Date('2020-01-01T00:00:00Z')
+    const late = new Date('2025-06-15T10:00:00Z')
+    mockGetPhotoDate.mockImplementation(async (file: File) =>
+      file === a ? late : early
+    )
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+
+    // After processFiles: sorted oldest-first → [b (early), a (late)]
+    act(() => result.current.reorderPhotos(0, 0)) // no-op reorder, just reassigns
+
+    const anchor = result.current.photos[0].capturedAt!.getTime()
+    expect(anchor).toBe(early.getTime())
+  })
+
+  it('uses new Date() as anchor when all capturedAt are null', async () => {
+    const files = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockResolvedValue(null)
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+
+    const before = Date.now()
+    act(() => result.current.reorderPhotos(1, 0))
+    const after = Date.now()
+
+    const anchor = result.current.photos[0].capturedAt!.getTime()
+    expect(anchor).toBeGreaterThanOrEqual(before)
+    expect(anchor).toBeLessThanOrEqual(after + 1000)
+  })
+
+  it('does not mutate original PhotoEntry objects', async () => {
+    const [a] = [makeFile('a.jpg')]
+    const d = new Date('2025-01-01T10:00:00Z')
+    const result = await setupPhotos([a], [d])
+    const original = result.current.photos[0]
+
+    act(() => result.current.reorderPhotos(0, 0))
+
+    expect(result.current.photos[0]).not.toBe(original)
+  })
+
+  it('processFiles after reorderPhotos replaces state with EXIF-sorted order', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    const early = new Date('2020-01-01T00:00:00Z')
+    const late = new Date('2025-06-15T10:00:00Z')
+    mockGetPhotoDate.mockImplementation(async (file: File) =>
+      file === a ? late : early
+    )
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+
+    // reorder to put 'a' first
+    act(() => result.current.reorderPhotos(1, 0))
+    expect(result.current.photos[0].filename).toBe('a.jpg')
+
+    // re-upload restores EXIF order: b (early) before a (late)
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+    expect(result.current.photos[0].filename).toBe('b.jpg')
+  })
+})
+
 // --- useObjectUrls ---
 
 describe('useObjectUrls', () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
 import PhotoUploadPage from './PhotoUploadPage'
 
 afterEach(cleanup)
@@ -10,6 +10,46 @@ vi.mock('@/hooks/usePhotos', () => ({
 }))
 vi.mock('@/hooks/useObjectUrls', () => ({
   useObjectUrls: vi.fn(),
+}))
+
+// Capture dnd-kit callbacks so tests can invoke them directly
+let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
+let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
+
+vi.mock('@dnd-kit/core', () => ({
+  DndContext: ({
+    children,
+    onDragStart,
+    onDragEnd,
+  }: {
+    children: React.ReactNode
+    onDragStart: (e: { active: { id: string } }) => void
+    onDragEnd: (e: { active: { id: string }; over: { id: string } | null }) => void
+  }) => {
+    capturedOnDragStart = onDragStart
+    capturedOnDragEnd = onDragEnd
+    return <>{children}</>
+  },
+  DragOverlay: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="drag-overlay">{children}</div>
+  ),
+  closestCenter: vi.fn(),
+  PointerSensor: vi.fn(),
+  useSensor: vi.fn(),
+  useSensors: vi.fn(() => []),
+}))
+
+vi.mock('@dnd-kit/sortable', () => ({
+  SortableContext: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useSortable: () => ({
+    attributes: {},
+    listeners: {},
+    setNodeRef: vi.fn(),
+    transform: null,
+    transition: null,
+    isDragging: false,
+  }),
+  rectSortingStrategy: vi.fn(),
 }))
 
 import { usePhotos } from '@/hooks/usePhotos'
@@ -23,6 +63,8 @@ function makeFile(name: string): File {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  capturedOnDragStart = null
+  capturedOnDragEnd = null
   mockUseObjectUrls.mockReturnValue((file: File) => `blob:${file.name}`)
 })
 
@@ -31,6 +73,7 @@ describe('PhotoUploadPage', () => {
     mockUsePhotos.mockReturnValue({
       photos: [],
       processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
     })
 
     render(<PhotoUploadPage />)
@@ -44,7 +87,7 @@ describe('PhotoUploadPage', () => {
 
     // Start empty, then simulate photos being set after processFiles resolves
     mockUsePhotos
-      .mockReturnValueOnce({ photos: [], processFiles: processFilesMock })
+      .mockReturnValueOnce({ photos: [], processFiles: processFilesMock, reorderPhotos: vi.fn() })
       .mockReturnValue({
         photos: [
           {
@@ -67,6 +110,7 @@ describe('PhotoUploadPage', () => {
           },
         ],
         processFiles: processFilesMock,
+      reorderPhotos: vi.fn(),
       })
 
     const { rerender } = render(<PhotoUploadPage />)
@@ -92,6 +136,7 @@ describe('PhotoUploadPage', () => {
         },
       ],
       processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
     })
 
     render(<PhotoUploadPage />)
@@ -101,7 +146,7 @@ describe('PhotoUploadPage', () => {
 
   it('calls processFiles when files are selected', async () => {
     const processFilesMock = vi.fn()
-    mockUsePhotos.mockReturnValue({ photos: [], processFiles: processFilesMock })
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: processFilesMock, reorderPhotos: vi.fn() })
 
     render(<PhotoUploadPage />)
 
@@ -115,7 +160,7 @@ describe('PhotoUploadPage', () => {
 
   it('calls processFiles when files are dropped onto the drop zone', () => {
     const processFilesMock = vi.fn()
-    mockUsePhotos.mockReturnValue({ photos: [], processFiles: processFilesMock })
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: processFilesMock, reorderPhotos: vi.fn() })
 
     render(<PhotoUploadPage />)
 
@@ -129,11 +174,87 @@ describe('PhotoUploadPage', () => {
   })
 
   it('hides the grid when photos array is empty', () => {
-    mockUsePhotos.mockReturnValue({ photos: [], processFiles: vi.fn() })
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: vi.fn(), reorderPhotos: vi.fn() })
 
     render(<PhotoUploadPage />)
 
     // No img elements rendered
     expect(screen.queryAllByRole('img')).toHaveLength(0)
+  })
+})
+
+describe('PhotoUploadPage — drag and drop reorder', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function photoId(entry: ReturnType<typeof makeEntry>) {
+    return `${entry.filename}-${entry.file.lastModified}-${entry.uploadIndex}`
+  }
+
+  it('calls reorderPhotos with correct indices on dragEnd', () => {
+    const reorderPhotosMock = vi.fn()
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: reorderPhotosMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    act(() => {
+      capturedOnDragEnd?.({
+        active: { id: photoId(photos[2]) },
+        over: { id: photoId(photos[0]) },
+      })
+    })
+
+    expect(reorderPhotosMock).toHaveBeenCalledWith(2, 0)
+  })
+
+  it('does not call reorderPhotos when dropped outside the grid (over is null)', () => {
+    const reorderPhotosMock = vi.fn()
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: reorderPhotosMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    act(() => {
+      capturedOnDragEnd?.({
+        active: { id: photoId(photos[0]) },
+        over: null,
+      })
+    })
+
+    expect(reorderPhotosMock).not.toHaveBeenCalled()
+  })
+
+  it('renders a floating PhotoCard in DragOverlay when drag is active', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photoId(photos[0]) } })
+    })
+
+    const overlay = document.querySelector('[data-testid="drag-overlay"]')
+    expect(overlay?.textContent).toContain('a.jpg')
   })
 })

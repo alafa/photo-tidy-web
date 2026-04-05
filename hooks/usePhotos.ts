@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
+import { arrayMove } from '@dnd-kit/sortable'
 import { getPhotoDate } from '@/lib/exif'
 
 export type PhotoEntry = {
@@ -22,6 +23,20 @@ function sortPhotos(photos: PhotoEntry[]): PhotoEntry[] {
   })
 }
 
+function assignTimestamps(photos: PhotoEntry[]): PhotoEntry[] {
+  const nonNull = photos
+    .map((p) => p.capturedAt)
+    .filter((d): d is Date => d !== null)
+  const anchor =
+    nonNull.length > 0
+      ? new Date(Math.min(...nonNull.map((d) => d.getTime())))
+      : new Date()
+  return photos.map((p, i) => ({
+    ...p,
+    capturedAt: new Date(anchor.getTime() + i * 1000),
+  }))
+}
+
 export function usePhotos() {
   const [photos, setPhotos] = useState<PhotoEntry[]>([])
 
@@ -37,5 +52,9 @@ export function usePhotos() {
     setPhotos(sortPhotos(entries))
   }, [])
 
-  return { photos, processFiles }
+  const reorderPhotos = useCallback((from: number, to: number) => {
+    setPhotos((prev) => assignTimestamps(arrayMove(prev, from, to)))
+  }, [])
+
+  return { photos, processFiles, reorderPhotos }
 }

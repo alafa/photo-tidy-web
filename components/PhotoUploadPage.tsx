@@ -1,12 +1,28 @@
 'use client'
 
+import { useState } from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
 import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
-import PhotoGrid from './PhotoGrid'
+import PhotoCard from './PhotoCard'
+import PhotoGrid, { photoId } from './PhotoGrid'
+import { downloadAll } from '@/lib/download'
 
 export default function PhotoUploadPage() {
-  const { photos, processFiles } = usePhotos()
+  const { photos, processFiles, reorderPhotos } = usePhotos()
   const getObjectUrl = useObjectUrls()
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const sensors = useSensors(useSensor(PointerSensor))
+
+  const activeEntry = activeId ? photos.find((p) => photoId(p) === activeId) : null
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
@@ -14,16 +30,31 @@ export default function PhotoUploadPage() {
     }
   }
 
-  function handleDragOver(e: React.DragEvent) {
+  function handleDragOver(e: React.DragEvent<HTMLLabelElement>) {
     e.preventDefault()
     e.stopPropagation()
   }
 
-  function handleDrop(e: React.DragEvent) {
+  function handleDrop(e: React.DragEvent<HTMLLabelElement>) {
     e.preventDefault()
     e.stopPropagation()
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       processFiles(e.dataTransfer.files)
+    }
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveId(String(event.active.id))
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    setActiveId(null)
+    if (!over || active.id === over.id) return
+    const from = photos.findIndex((p) => photoId(p) === active.id)
+    const to = photos.findIndex((p) => photoId(p) === over.id)
+    if (from !== -1 && to !== -1) {
+      reorderPhotos(from, to)
     }
   }
 
@@ -55,7 +86,37 @@ export default function PhotoUploadPage() {
         </label>
 
         {photos.length > 0 && (
-          <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />
+          <>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
+              <PhotoGrid
+                photos={photos}
+                getObjectUrl={getObjectUrl}
+                onReorder={reorderPhotos}
+              />
+              <DragOverlay>
+                {activeEntry && (
+                  <PhotoCard
+                    entry={activeEntry}
+                    objectUrl={getObjectUrl(activeEntry.file)}
+                  />
+                )}
+              </DragOverlay>
+            </DndContext>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => downloadAll(photos)}
+                className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              >
+                Download all
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>
