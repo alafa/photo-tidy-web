@@ -113,6 +113,21 @@ describe('PhotoUploadPage', () => {
     expect(processFilesMock).toHaveBeenCalled()
   })
 
+  it('calls processFiles when files are dropped onto the drop zone', () => {
+    const processFilesMock = vi.fn()
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: processFilesMock })
+
+    render(<PhotoUploadPage />)
+
+    const label = document.querySelector('label') as HTMLLabelElement
+    const file = makeFile('dropped.jpg')
+    fireEvent.drop(label, {
+      dataTransfer: { files: [file] },
+    })
+
+    expect(processFilesMock).toHaveBeenCalled()
+  })
+
   it('hides the grid when photos array is empty', () => {
     mockUsePhotos.mockReturnValue({ photos: [], processFiles: vi.fn() })
 

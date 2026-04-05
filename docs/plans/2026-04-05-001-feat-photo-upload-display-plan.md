@@ -1,7 +1,7 @@
 ---
 title: "feat: Photo Upload & EXIF Display"
 type: feat
-status: active
+status: completed
 date: 2026-04-05
 origin: docs/brainstorms/2026-04-05-photo-upload-display-requirements.md
 ---
