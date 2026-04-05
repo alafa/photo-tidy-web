@@ -151,7 +151,7 @@ export default function PhotoUploadPage() {
                 </button>
               )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
-                Click name or date on any card to edit
+                Click image to select · click name or date to edit
               </span>
             </div>
 

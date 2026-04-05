@@ -126,28 +126,28 @@ export default function PhotoCard({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* Checkbox */}
-      {onSelect && (
-        <label
-          className="flex items-center gap-1.5 cursor-pointer"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <input
-            type="checkbox"
-            checked={checked ?? false}
-            onChange={(e) => onSelect(e.target.checked)}
-            className="w-3.5 h-3.5 accent-zinc-900 dark:accent-zinc-100"
-          />
-        </label>
-      )}
-
-      {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
-      <img
-        src={objectUrl}
-        alt={filename}
-        loading="lazy"
-        className="w-full aspect-square object-cover rounded-md bg-zinc-100"
-      />
+      {/* Image — click to toggle selection when selectable */}
+      <div
+        className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''}`}
+        onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(!checked) } : undefined}
+        onPointerDown={onSelect ? (e) => e.stopPropagation() : undefined}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
+        <img
+          src={objectUrl}
+          alt={filename}
+          loading="lazy"
+          className="w-full aspect-square object-cover bg-zinc-100"
+        />
+        {/* Selected checkmark overlay */}
+        {checked && (
+          <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center">
+            <svg className="w-3 h-3 text-white dark:text-zinc-900" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
+            </svg>
+          </div>
+        )}
+      </div>
 
       {/* Filename */}
       {isEditingName ? (
