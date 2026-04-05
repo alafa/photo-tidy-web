@@ -1,6 +1,7 @@
 ---
-title: "Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with 1-Second Intervals"
+title: "Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with Slot-Based Assignment"
 date: 2026-04-05
+last_updated: 2026-04-05
 category: best-practices
 module: photo-reorder
 problem_type: best_practice
@@ -21,7 +22,7 @@ tags:
   - next-js
 ---
 
-# Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with 1-Second Intervals
+# Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with Slot-Based Assignment
 
 ## Context
 
@@ -29,17 +30,26 @@ Photos uploaded from multiple cameras, phones, or sources frequently arrive with
 
 ## Guidance
 
-On every drag-and-drop reorder, immediately reassign `DateTimeOriginal`, `DateTime`, and `DateTimeDigitized` across the entire photo set using 1-second intervals. The anchor for the sequence is the earliest non-null `capturedAt` timestamp found in the pre-reorder set; if all timestamps are null, `new Date()` at reorder time is used. Every photo in the new grid order gets `anchor + (index * 1000ms)`, making the position-to-timestamp mapping gapless regardless of file type.
+On every drag-and-drop reorder, update only the moved photo's `capturedAt` timestamp so it slots chronologically between its new neighbors. Do **not** reassign timestamps for unmoved photos — that would discard their original EXIF dates. The moved photo gets:
 
-The reassignment happens in two places:
+- **Midpoint** between its new previous and next neighbors if both exist
+- **Previous neighbor + 1 second** if moved to the last position
+- **Next neighbor − 1 second** if moved to the first position
+- **Unchanged** if no neighbors have timestamps
 
-1. **State (`hooks/usePhotos.ts`)** — `assignTimestamps()` computes new `capturedAt` values in memory and `reorderPhotos(from, to)` applies them immediately so the UI reflects the assigned date.
+This slotting strategy (called `slotTimestamp`) is O(1) per drag and preserves all other photos' timestamps intact.
+
+> **Supersedes earlier approach**: An earlier version used `assignTimestamps()` which recalculated ALL photos' timestamps as `anchor + index * 1000ms` after every drag. That approach destroyed original EXIF timestamps of every untouched photo and caused all photos to receive the same timestamp if dragged in rapid succession. Replace any `assignTimestamps` usage with `slotTimestamp`.
+
+The timestamp update happens in two places:
+
+1. **State (`hooks/usePhotos.ts`)** — `slotTimestamp()` computes the new `capturedAt` for the moved photo and `reorderPhotos(from, to)` applies it immediately so the UI reflects the slotted date.
 
 2. **File (`lib/exif-write.ts`)** — `writeTimestamp(file, newDate)` physically writes `DateTimeOriginal`, `DateTime`, and `DateTimeDigitized` into the JPEG's EXIF segment at download time using `piexif-ts`. PNG/TIFF files pass through unchanged (no writable EXIF format for those types).
 
 Key decisions baked into the implementation:
 - All three date tags are written for maximum gallery-app compatibility.
-- `capturedAt` in state is updated after every reorder so card labels show the assigned timestamp, not the original EXIF date.
+- `capturedAt` in state is updated after every reorder so card labels show the slotted timestamp.
 - `sortPhotos` is never called after `reorderPhotos` — the manual order becomes authoritative until the user re-uploads.
 - `piexif-ts` operates on base64 DataURLs. If `load()` throws (JPEG with no pre-existing EXIF), the code catches and seeds an empty EXIF object before writing.
 - Downloads are triggered sequentially with ~60ms delay to avoid browser throttling from rapid programmatic anchor clicks.
@@ -58,29 +68,51 @@ Persisting order in EXIF timestamps rather than application state means the corr
 
 ## Examples
 
-**`assignTimestamps` — state-level reassignment (`hooks/usePhotos.ts`):**
+**`slotTimestamp` — state-level slot assignment (`hooks/usePhotos.ts`):**
 
 ```ts
-function assignTimestamps(photos: PhotoEntry[]): PhotoEntry[] {
-  const nonNull = photos
-    .map((p) => p.capturedAt)
-    .filter((d): d is Date => d !== null)
-  const anchor =
-    nonNull.length > 0
-      ? new Date(Math.min(...nonNull.map((d) => d.getTime())))
-      : new Date()
-  return photos.map((p, i) => ({
-    ...p,
-    capturedAt: new Date(anchor.getTime() + i * 1000),
-  }))
+function slotTimestamp(photos: PhotoEntry[], toIndex: number): PhotoEntry[] {
+  const prevTs = photos[toIndex - 1]?.capturedAt ?? null
+  const nextTs = photos[toIndex + 1]?.capturedAt ?? null
+
+  let newTimestamp: Date | null
+  if (prevTs !== null && nextTs !== null) {
+    // Midpoint between neighbours
+    newTimestamp = new Date(Math.round((prevTs.getTime() + nextTs.getTime()) / 2))
+  } else if (prevTs !== null) {
+    // Moved to the end — one second after the previous photo
+    newTimestamp = new Date(prevTs.getTime() + 1000)
+  } else if (nextTs !== null) {
+    // Moved to the start — one second before the next photo
+    newTimestamp = new Date(nextTs.getTime() - 1000)
+  } else {
+    // Only photo, or all neighbours have null timestamps — keep as-is
+    newTimestamp = photos[toIndex].capturedAt
+  }
+
+  return photos.map((p, i) => (i === toIndex ? { ...p, capturedAt: newTimestamp } : p))
 }
 
 const reorderPhotos = useCallback((from: number, to: number) => {
-  setPhotos((prev) => assignTimestamps(arrayMove(prev, from, to)))
+  // arrayMove first, then slotTimestamp with the destination index in the moved array
+  setPhotos((prev) => slotTimestamp(arrayMove(prev, from, to), to))
+  // reorderPhotos does NOT set hasEdits — drag is not treated as a user text edit
 }, [])
 ```
 
-After drag: photo at index 0 gets `anchor`, index 1 gets `anchor + 1s`, index 2 gets `anchor + 2s`, etc. The original timestamps are discarded; the drag order is now the canonical order.
+After drag: only the moved photo's timestamp changes. All other photos keep their original `capturedAt`. The moved photo is chronologically positioned between its new neighbors.
+
+**❌ Old approach (do not use):**
+
+```ts
+// assignTimestamps — REPLACED because it destroyed all timestamps on every drag
+function assignTimestamps(photos: PhotoEntry[]): PhotoEntry[] {
+  const nonNull = photos.map((p) => p.capturedAt).filter((d): d is Date => d !== null)
+  const anchor = nonNull.length > 0 ? new Date(Math.min(...nonNull.map((d) => d.getTime()))) : new Date()
+  return photos.map((p, i) => ({ ...p, capturedAt: new Date(anchor.getTime() + i * 1000) }))
+}
+// Bug: every photo got a new timestamp, not just the moved one
+```
 
 **`writeTimestamp` — file-level EXIF write (`lib/exif-write.ts`):**
 
