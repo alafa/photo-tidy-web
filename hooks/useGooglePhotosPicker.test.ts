@@ -205,8 +205,26 @@ describe('useGooglePhotosPicker', () => {
   })
 
   describe('edge case: session creation fails', () => {
-    it('sets status=error with message', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 })
+    let consoleWarn: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      // describeApiError uses console.warn (not console.error) so Next.js's dev-mode
+      // error overlay doesn't hijack this recoverable, in-app error state.
+      consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      consoleWarn.mockRestore()
+    })
+
+    it('sets status=error with the real Google error detail and logs it', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          error: { code: 403, message: 'Photos Picker API has not been used in this project', status: 'PERMISSION_DENIED' },
+        }),
+      })
 
       const addPhotos = vi.fn().mockResolvedValue(undefined)
       const { result } = renderHook(() =>
@@ -219,7 +237,106 @@ describe('useGooglePhotosPicker', () => {
       })
 
       expect(result.current.status).toBe('error')
-      expect(result.current.error).toBe('Failed to create import session')
+      expect(result.current.error).toContain('Photos Picker API has not been used in this project')
+      expect(result.current.error).not.toBe('Failed to create import session')
+      expect(consoleWarn).toHaveBeenCalled()
+    })
+
+    it('falls back to a status-qualified message when the error body has no detail', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) })
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toContain('500')
+    })
+
+    it('falls back to a status-qualified message when the error body is not valid JSON', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => {
+          throw new SyntaxError('Unexpected token')
+        },
+      })
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toContain('500')
+    })
+
+    it('sets a generic network-failure message when fetch itself rejects', async () => {
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toBeTruthy()
+    })
+  })
+
+  describe('edge case: fetch selected photos fails', () => {
+    let consoleWarn: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      consoleWarn.mockRestore()
+    })
+
+    it('sets status=error with the real Google error detail', async () => {
+      const session = makeSession()
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { code: 400, message: 'sessionId is invalid', status: 'INVALID_ARGUMENT' } }),
+        })
+        .mockResolvedValue({ ok: true }) // DELETE cleanup
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toContain('sessionId is invalid')
+      expect(result.current.error).not.toBe('Failed to fetch selected photos')
     })
   })
 

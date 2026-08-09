@@ -62,3 +62,11 @@ export interface Album {
   id: string
   title: string
 }
+
+export interface GooglePhotosApiError {
+  error?: {
+    code?: number
+    message?: string
+    status?: string
+  }
+}

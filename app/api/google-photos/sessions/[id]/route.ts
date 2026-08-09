@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { extractBearer } from '@/lib/google-photos-server'
+import { extractBearer, upstreamErrorBody } from '@/lib/google-photos-server'
 
 export async function GET(
   request: Request,
@@ -18,11 +18,21 @@ export async function GET(
     ? `https://photospicker.googleapis.com/v1/mediaItems?sessionId=${encodeURIComponent(id)}`
     : `https://photospicker.googleapis.com/v1/sessions/${encodeURIComponent(id)}`
 
-  const upstream = await fetch(url, {
-    headers: { Authorization: authHeader },
-  })
+  let upstream: Response
+  try {
+    upstream = await fetch(url, {
+      headers: { Authorization: authHeader },
+    })
+  } catch {
+    return NextResponse.json(
+      upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
+      { status: 502 },
+    )
+  }
 
-  const data = await upstream.json()
+  const data = await upstream
+    .json()
+    .catch(() => upstreamErrorBody('Upstream returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'))
 
   if (!upstream.ok) {
     return NextResponse.json(data, { status: upstream.status })
@@ -42,13 +52,23 @@ export async function DELETE(
 
   const { id } = await params
 
-  const upstream = await fetch(`https://photospicker.googleapis.com/v1/sessions/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers: { Authorization: authHeader },
-  })
+  let upstream: Response
+  try {
+    upstream = await fetch(`https://photospicker.googleapis.com/v1/sessions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: authHeader },
+    })
+  } catch {
+    return NextResponse.json(
+      upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
+      { status: 502 },
+    )
+  }
 
   if (!upstream.ok) {
-    const data = await upstream.json().catch(() => ({ error: 'Delete failed' }))
+    const data = await upstream
+      .json()
+      .catch(() => upstreamErrorBody('Delete failed', 'INVALID_UPSTREAM_RESPONSE'))
     return NextResponse.json(data, { status: upstream.status })
   }
 

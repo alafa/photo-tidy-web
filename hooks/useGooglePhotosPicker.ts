@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { PickerSession, PickedMediaItem, MediaItemsResponse } from '@/lib/google-photos-types'
+import type { PickerSession, PickedMediaItem, MediaItemsResponse, GooglePhotosApiError } from '@/lib/google-photos-types'
 
 export type PickerStatus = 'idle' | 'session-open' | 'picking' | 'downloading' | 'error'
 
@@ -18,6 +18,27 @@ const MIME_TO_EXT: Record<string, string> = {
 function parseDurationSeconds(value: string, fallback: number): number {
   const match = /^(\d+)s$/.exec(value)
   return match ? parseInt(match[1], 10) : fallback
+}
+
+async function parseErrorBody(res: Response): Promise<GooglePhotosApiError | null> {
+  try {
+    return await res.json() as GooglePhotosApiError
+  } catch {
+    return null
+  }
+}
+
+function describeApiError(prefix: string, res: Response, data: GooglePhotosApiError | null): string {
+  const detail = data?.error?.message
+  // console.warn, not console.error: Next.js dev mode surfaces console.error as a
+  // blocking full-screen overlay, which would hijack this recoverable, in-app error state.
+  console.warn(prefix, {
+    httpStatus: res.status,
+    code: data?.error?.code,
+    status: data?.error?.status,
+    message: detail,
+  })
+  return detail ? `${prefix}: ${detail}` : `${prefix} (HTTP ${res.status})`
 }
 
 function deriveFilename(item: PickedMediaItem): string {
@@ -124,20 +145,32 @@ export function useGooglePhotosPicker(opts: {
 
     // Step 1: Create picker session
     let session: PickerSession
-    try {
-      const res = await fetch('/api/google-photos/sessions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal: abortControllerRef.current.signal,
-      })
-      if (!res.ok) throw new Error(`Session creation failed: ${res.status}`)
-      session = await res.json() as PickerSession
-    } catch {
-      if (!cancelledRef.current) {
-        setStatus('error')
-        setError('Failed to create import session')
+    {
+      let res: Response
+      try {
+        res = await fetch('/api/google-photos/sessions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: abortControllerRef.current.signal,
+        })
+      } catch {
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError('Failed to create import session: unable to reach the server')
+        }
+        return
       }
-      return
+
+      if (!res.ok) {
+        const data = await parseErrorBody(res)
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError(describeApiError('Failed to create import session', res, data))
+        }
+        return
+      }
+
+      session = await res.json() as PickerSession
     }
 
     sessionIdRef.current = session.id
@@ -208,21 +241,35 @@ export function useGooglePhotosPicker(opts: {
 
     // Step 4: Fetch media items
     let mediaItemsResponse: MediaItemsResponse
-    try {
-      const res = await fetch(`/api/google-photos/sessions/${session.id}?items=true`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal: abortControllerRef.current?.signal,
-      })
-      if (!res.ok) throw new Error(`Fetch items failed: ${res.status}`)
-      mediaItemsResponse = await res.json() as MediaItemsResponse
-    } catch {
-      if (!cancelledRef.current) {
-        setStatus('error')
-        setError('Failed to fetch selected photos')
-        cleanupSession(session.id)
-        sessionIdRef.current = null
+    {
+      let res: Response
+      try {
+        res = await fetch(`/api/google-photos/sessions/${session.id}?items=true`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: abortControllerRef.current?.signal,
+        })
+      } catch {
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError('Failed to fetch selected photos: unable to reach the server')
+          cleanupSession(session.id)
+          sessionIdRef.current = null
+        }
+        return
       }
-      return
+
+      if (!res.ok) {
+        const data = await parseErrorBody(res)
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError(describeApiError('Failed to fetch selected photos', res, data))
+          cleanupSession(session.id)
+          sessionIdRef.current = null
+        }
+        return
+      }
+
+      mediaItemsResponse = await res.json() as MediaItemsResponse
     }
 
     if (cancelledRef.current) return
