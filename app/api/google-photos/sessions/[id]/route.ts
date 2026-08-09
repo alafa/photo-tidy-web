@@ -7,7 +7,10 @@ export async function GET(
 ): Promise<NextResponse> {
   const authHeader = extractBearer(request)
   if (!authHeader) {
-    return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 })
+    return NextResponse.json(
+      upstreamErrorBody('Missing or invalid Authorization header', 'UNAUTHENTICATED'),
+      { status: 401 },
+    )
   }
 
   const { id } = await params
@@ -30,9 +33,15 @@ export async function GET(
     )
   }
 
-  const data = await upstream
-    .json()
-    .catch(() => upstreamErrorBody('Upstream returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'))
+  let data: unknown
+  try {
+    data = await upstream.json()
+  } catch {
+    return NextResponse.json(
+      upstreamErrorBody('Upstream returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'),
+      { status: upstream.ok ? 502 : upstream.status },
+    )
+  }
 
   if (!upstream.ok) {
     return NextResponse.json(data, { status: upstream.status })
@@ -47,7 +56,10 @@ export async function DELETE(
 ): Promise<NextResponse> {
   const authHeader = extractBearer(request)
   if (!authHeader) {
-    return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 })
+    return NextResponse.json(
+      upstreamErrorBody('Missing or invalid Authorization header', 'UNAUTHENTICATED'),
+      { status: 401 },
+    )
   }
 
   const { id } = await params

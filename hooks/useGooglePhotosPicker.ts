@@ -170,7 +170,15 @@ export function useGooglePhotosPicker(opts: {
         return
       }
 
-      session = await res.json() as PickerSession
+      try {
+        session = await res.json() as PickerSession
+      } catch {
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError('Failed to create import session: server returned an invalid response')
+        }
+        return
+      }
     }
 
     sessionIdRef.current = session.id
@@ -269,7 +277,17 @@ export function useGooglePhotosPicker(opts: {
         return
       }
 
-      mediaItemsResponse = await res.json() as MediaItemsResponse
+      try {
+        mediaItemsResponse = await res.json() as MediaItemsResponse
+      } catch {
+        if (!cancelledRef.current) {
+          setStatus('error')
+          setError('Failed to fetch selected photos: server returned an invalid response')
+          cleanupSession(session.id)
+          sessionIdRef.current = null
+        }
+        return
+      }
     }
 
     if (cancelledRef.current) return

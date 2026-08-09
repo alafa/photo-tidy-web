@@ -1,7 +1,7 @@
 ---
 title: "fix: Surface real Google Photos import-session error instead of generic failure message"
 type: fix
-status: active
+status: completed
 date: 2026-08-09
 ---
 
@@ -119,8 +119,11 @@ matrix for how each is diagnosed and fixed).
 
 - **Surface the error client-side, don't just log server-side**: the proxy route already has the
   correct detail in its response body; the fix is to make `useGooglePhotosPicker` actually read
-  and use it, both via `console.error` (for developer diagnosis) and in the user-facing `error`
-  string (so a user can report something more useful than "Failed to create import session").
+  and use it, both via `console.warn` (for developer diagnosis — not `console.error`, since
+  Next.js's dev-mode error overlay intercepts `console.error` calls and shows them as a blocking
+  full-screen overlay, which would hijack this recoverable, in-app error state; discovered during
+  Unit 3's live reproduction) and in the user-facing `error` string (so a user can report
+  something more useful than "Failed to create import session").
 - **Harden both proxy routes to always return valid JSON**: mirroring the `DELETE` handler's
   existing `.catch()` pattern in `sessions/[id]/route.ts` and adding the same defensive shape to
   `sessions/route.ts`'s `POST` and the `GET` handler. This guarantees the client-side fix in the
@@ -196,11 +199,16 @@ the client — every response, success or failure, is valid JSON the client can 
   identically regardless of whether the body came from Google or from this fallback.
 - Preserve existing behavior for the success path and for upstream responses that are already
   valid JSON (this is purely a defensive fallback for the cases that currently fall through).
+- The `DELETE` handler in `sessions/[id]/route.ts` is not left untouched: it also gets the same
+  outer-`fetch()` try/catch it was missing, and its fallback shape is normalized from the
+  original flat `{ error: 'Delete failed' }` string to the same shared nested shape as `POST` and
+  `GET` (via a small shared helper, e.g. in `lib/google-photos-server.ts`, so all three handlers
+  build the fallback body the same way instead of duplicating the object literal three times).
 
 **Patterns to follow:**
-- The existing `DELETE` handler in `app/api/google-photos/sessions/[id]/route.ts` (lines 34-56)
-  for the `.catch()` fallback shape — apply the same defensive pattern to `POST` and `GET` in
-  both files.
+- The existing `DELETE` handler's `.catch()` fallback in `app/api/google-photos/sessions/[id]/route.ts`
+  (lines 34-56) is the starting reference for the defensive pattern, but its own fallback shape
+  is upgraded to match the shared nested shape as part of this unit — not left as-is.
 
 **Test scenarios:**
 - Happy path: `POST /sessions` with a valid Bearer token and a 200 upstream response → returns
@@ -213,6 +221,8 @@ the client — every response, success or failure, is valid JSON the client can 
   `GET /sessions/{id}?items=true` both retain existing success-path behavior.
 - Error path: same network-failure and non-JSON-body cases as above, applied to the `GET` handler
   for both poll and fetch-items modes.
+- Error path: same network-failure and non-JSON-body cases, applied to the `DELETE` handler,
+  which previously had neither guard on its outer `fetch()` call.
 
 **Verification:**
 - `npm run lint` passes with no new errors.
@@ -245,17 +255,18 @@ Unit 1), logged to the console and reflected in the user-facing `error` state.
   standard `{ error: { code, message, status } }` envelope (now guaranteed present in that shape
   by Unit 1's fallback), and set `error` to a message that includes the detail — falling back to
   a status-code-qualified generic message (e.g. `` `Failed to create import session (HTTP
-  ${res.status})` ``) only when no `message` is present. `console.error` only the narrow,
-  known-safe fields (`res.status`, `data?.error?.code`, `data?.error?.status`,
-  `data?.error?.message`) — not the full parsed body, which may carry additional fields (e.g.
-  Google's `error.details`) not vetted for what they contain.
+  ${res.status})` ``) only when no `message` is present. `console.warn` (not `console.error` —
+  see Key Technical Decisions) only the narrow, known-safe fields (`res.status`,
+  `data?.error?.code`, `data?.error?.status`, `data?.error?.message`) — not the full parsed body,
+  which may carry additional fields (e.g. Google's `error.details`) not vetted for what they
+  contain.
 - Apply the identical treatment (including the same control-flow restructuring) to the
   fetch-items step (`hooks/useGooglePhotosPicker.ts:218-231`, currently `'Failed to fetch
   selected photos'`) — same bug class, same file, same fix shape.
 - Leave the poll-loop catch block untouched — it is an intentional silent-retry, not a terminal
   error path (see Scope Boundaries).
 - Keep the `status = 'error'` state transition and cleanup calls (`cleanupSession`) unchanged;
-  only the content of the `error` string and the addition of `console.error` change.
+  only the content of the `error` string and the addition of `console.warn` change.
 
 **Patterns to follow:**
 - `hooks/useGooglePhotosPicker.ts`'s existing `downloadBatch` function, which already logs
@@ -266,7 +277,7 @@ Unit 1), logged to the console and reflected in the user-facing `error` state.
 - Happy path: session creation fails with a structured Google error body (e.g.
   `{ error: { code: 403, message: 'Photos Picker API has not been used...', status:
   'PERMISSION_DENIED' } }`) → `result.current.error` includes that message text, not the old
-  hardcoded string; `console.error` is called with the detail.
+  hardcoded string; `console.warn` is called with the detail.
 - Edge case: session creation fails with `!res.ok` but a non-JSON or empty body → `error` falls
   back to a status-code-qualified generic message; no unhandled exception.
 - Edge case: the `fetch()` call itself rejects (client-side network failure, e.g. offline) before
@@ -374,7 +385,7 @@ matching row once the real error is observed)*
 | Risk | Mitigation |
 |------|------------|
 | Root cause turns out to require a Google Cloud Console change the implementer can't make (no project access) | Unit 3's operational rows are called out explicitly so this is surfaced as a blocker to communicate, not silently worked around in code |
-| Error message from Google may contain detail not meant for end users (e.g. internal project identifiers) | Show Google's `message` field only (already user-facing text in Google's API design), not the full raw JSON body, in the UI-facing string; full detail goes to `console.error` only |
+| Error message from Google may contain detail not meant for end users (e.g. internal project identifiers) | Show Google's `message` field only (already user-facing text in Google's API design), not the full raw JSON body, in the UI-facing string; full detail goes to `console.warn` only. Note: for the `403 SERVICE_DISABLED` case specifically, Google's `message` text itself embeds a GCP project number and Cloud Console URL — this mitigation doesn't strip that. Accepted as-is (reviewed 2026-08-09): a project number isn't highly sensitive and this is a locally-run app with a single user. |
 | Fix for Unit 3's malformed-request row (if applicable) could be masked by Unit 1's defensive JSON wrapping if not tested carefully | Unit 1's tests explicitly assert the success path is unchanged; Unit 3 adds a request-shape assertion if that row is the one that applies |
 
 ## Documentation / Operational Notes

@@ -298,6 +298,30 @@ describe('useGooglePhotosPicker', () => {
       expect(result.current.status).toBe('error')
       expect(result.current.error).toBeTruthy()
     })
+
+    it('sets status=error when the response is ok but the body is not valid JSON', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected token')
+        },
+      })
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toBeTruthy()
+      expect(mockWindowOpen).not.toHaveBeenCalled()
+    })
   })
 
   describe('edge case: fetch selected photos fails', () => {
@@ -337,6 +361,36 @@ describe('useGooglePhotosPicker', () => {
       expect(result.current.status).toBe('error')
       expect(result.current.error).toContain('sessionId is invalid')
       expect(result.current.error).not.toBe('Failed to fetch selected photos')
+    })
+
+    it('sets status=error when the response is ok but the body is not valid JSON', async () => {
+      const session = makeSession()
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError('Unexpected token')
+          },
+        })
+        .mockResolvedValue({ ok: true }) // DELETE cleanup
+
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('error')
+      expect(result.current.error).toBeTruthy()
+      expect(addPhotos).not.toHaveBeenCalled()
     })
   })
 

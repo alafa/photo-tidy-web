@@ -23,6 +23,8 @@ describe('GET /api/google-photos/sessions/[id]', () => {
     const res = await GET(makeRequest('http://localhost/api/google-photos/sessions/abc'), makeParams('abc'))
     expect(res.status).toBe(401)
     expect(mockFetch).not.toHaveBeenCalled()
+    const body = await res.json()
+    expect(body.error.status).toBe('UNAUTHENTICATED')
   })
 
   it('polls session status when no items query param is present', async () => {
@@ -78,6 +80,22 @@ describe('GET /api/google-photos/sessions/[id]', () => {
     const body = await res.json()
     expect(body.error.status).toBe('INVALID_UPSTREAM_RESPONSE')
   })
+
+  it('returns a structured 502 error, not a 200, when Google responds ok but with a non-JSON body', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token')
+      },
+    })
+
+    const res = await GET(makeRequest('http://localhost/api/google-photos/sessions/abc', 'Bearer tok'), makeParams('abc'))
+
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body.error.status).toBe('INVALID_UPSTREAM_RESPONSE')
+  })
 })
 
 describe('DELETE /api/google-photos/sessions/[id]', () => {
@@ -85,6 +103,8 @@ describe('DELETE /api/google-photos/sessions/[id]', () => {
     const res = await DELETE(makeRequest('http://localhost/api/google-photos/sessions/abc'), makeParams('abc'))
     expect(res.status).toBe(401)
     expect(mockFetch).not.toHaveBeenCalled()
+    const body = await res.json()
+    expect(body.error.status).toBe('UNAUTHENTICATED')
   })
 
   it('returns 204 on successful delete', async () => {

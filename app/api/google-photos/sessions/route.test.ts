@@ -22,6 +22,9 @@ describe('POST /api/google-photos/sessions', () => {
     const res = await POST(makeRequest())
     expect(res.status).toBe(401)
     expect(mockFetch).not.toHaveBeenCalled()
+    const body = await res.json()
+    expect(body.error.status).toBe('UNAUTHENTICATED')
+    expect(typeof body.error.message).toBe('string')
   })
 
   it('forwards the Bearer token and returns the upstream session on success', async () => {
@@ -74,5 +77,21 @@ describe('POST /api/google-photos/sessions', () => {
     const body = await res.json()
     expect(body.error.status).toBe('INVALID_UPSTREAM_RESPONSE')
     expect(typeof body.error.message).toBe('string')
+  })
+
+  it('returns a structured 502 error, not a 200, when Google responds ok but with a non-JSON body', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token')
+      },
+    })
+
+    const res = await POST(makeRequest('Bearer token-abc'))
+
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body.error.status).toBe('INVALID_UPSTREAM_RESPONSE')
   })
 })
