@@ -12,9 +12,14 @@ import {
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
 import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
+import { useGoogleAuth } from '@/hooks/useGoogleAuth'
+import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
+import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import BatchEditPanel from './BatchEditPanel'
+import GoogleAuthStatus from './GoogleAuthStatus'
+import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
 import { downloadAll } from '@/lib/download'
 
 export default function PhotoUploadPage() {
@@ -22,6 +27,7 @@ export default function PhotoUploadPage() {
     photos,
     hasEdits,
     processFiles,
+    addPhotos,
     reorderPhotos,
     updatePhotoName,
     updatePhotoTimestamp,
@@ -29,8 +35,17 @@ export default function PhotoUploadPage() {
     batchSetTimestamps,
   } = usePhotos()
   const getObjectUrl = useObjectUrls()
+  const { isSignedIn, accountEmail, isExpiringSoon, accessToken, signIn, signOut } = useGoogleAuth()
+  const {
+    status: pickerStatus,
+    error: pickerError,
+    startImport,
+    cancelImport,
+  } = useGooglePhotosPicker({ accessToken, addPhotos })
+  const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [albumName, setAlbumName] = useState('')
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -47,6 +62,7 @@ export default function PhotoUploadPage() {
       if (!maybeConfirm()) return
       setSelectedIds(new Set())
       processFiles(e.target.files)
+      reset()
     }
   }
 
@@ -62,6 +78,7 @@ export default function PhotoUploadPage() {
       if (!maybeConfirm()) return
       setSelectedIds(new Set())
       processFiles(e.dataTransfer.files)
+      reset()
     }
   }
 
@@ -112,6 +129,14 @@ export default function PhotoUploadPage() {
           photo-tidy
         </h1>
 
+        <GoogleAuthStatus
+          isSignedIn={isSignedIn}
+          accountEmail={accountEmail}
+          isExpiringSoon={isExpiringSoon}
+          signIn={signIn}
+          signOut={signOut}
+        />
+
         <label
           className="flex flex-col items-center justify-center w-full border-2 border-dashed border-zinc-300 rounded-xl p-10 cursor-pointer hover:border-zinc-400 transition-colors mb-8 bg-white dark:bg-zinc-900 dark:border-zinc-700"
           onDragOver={handleDragOver}
@@ -131,6 +156,33 @@ export default function PhotoUploadPage() {
             className="sr-only"
           />
         </label>
+
+        {isSignedIn && (
+          <div className="flex flex-col items-start gap-2 mb-8">
+            <button
+              onClick={pickerStatus === 'idle' ? startImport : cancelImport}
+              disabled={pickerStatus === 'downloading'}
+              className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {pickerStatus === 'idle' ? 'Import from Google Photos' : 'Cancel import'}
+            </button>
+            {(pickerStatus === 'session-open' || pickerStatus === 'picking') && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                {pickerStatus === 'session-open' ? 'Opening Google Photos…' : 'Waiting for selection…'}
+              </span>
+            )}
+            {pickerStatus === 'downloading' && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Downloading photos…
+              </span>
+            )}
+            {pickerStatus === 'error' && pickerError && (
+              <span className="text-xs text-red-500 dark:text-red-400">
+                {pickerError}
+              </span>
+            )}
+          </div>
+        )}
 
         {photos.length > 0 && (
           <>
@@ -154,6 +206,20 @@ export default function PhotoUploadPage() {
                 Click image to select · click name or date to edit
               </span>
             </div>
+
+            {/* Upload panel */}
+            {isSignedIn && (
+              <GooglePhotosUploadPanel
+                photos={photos}
+                accessToken={accessToken}
+                uploadState={uploadState}
+                photoStates={photoStates}
+                albumName={albumName}
+                onAlbumNameChange={setAlbumName}
+                onStartUpload={() => startUpload(photos, albumName, accessToken ?? '')}
+                onRetryFailed={() => retryFailed(photos, accessToken ?? '')}
+              />
+            )}
 
             {/* Batch panel */}
             {selectedIds.size > 0 && (

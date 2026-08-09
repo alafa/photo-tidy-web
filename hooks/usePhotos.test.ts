@@ -109,6 +109,85 @@ describe('usePhotos', () => {
 
     expect(result.current.photos).toEqual([])
   })
+
+  it('processFiles produces entries with source="local"', async () => {
+    const [a] = [makeFile('a.jpg')]
+    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a])))
+
+    expect(result.current.photos[0].source).toBe('local')
+  })
+
+  it('processFiles accepts a plain File[] (not FileList)', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      if (file === a) return new Date('2025-03-01')
+      if (file === b) return new Date('2024-01-15')
+      return null
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles([a, b]))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['b.jpg', 'a.jpg'])
+    expect(result.current.photos[0].source).toBe('local')
+  })
+})
+
+describe('usePhotos — addPhotos', () => {
+  it('appends google-photos entries in sorted order to an existing grid', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    const [c, d] = [makeFile('c.jpg'), makeFile('d.jpg')]
+
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      if (file === a) return new Date('2025-01-01')
+      if (file === b) return new Date('2025-06-01')
+      if (file === c) return new Date('2025-03-15') // between a and b
+      if (file === d) return new Date('2025-09-01') // after b
+      return null
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+    await act(() => result.current.addPhotos([c, d], 'google-photos'))
+
+    const filenames = result.current.photos.map((p) => p.filename)
+    expect(filenames).toEqual(['a.jpg', 'c.jpg', 'b.jpg', 'd.jpg'])
+    expect(result.current.photos.find((p) => p.filename === 'c.jpg')?.source).toBe('google-photos')
+    expect(result.current.photos.find((p) => p.filename === 'd.jpg')?.source).toBe('google-photos')
+  })
+
+  it('adds and sorts entries on an empty grid', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      if (file === a) return new Date('2025-06-01')
+      if (file === b) return new Date('2025-01-01')
+      return null
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.addPhotos([a, b], 'google-photos'))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['b.jpg', 'a.jpg'])
+    expect(result.current.photos[0].source).toBe('google-photos')
+  })
+
+  it('does not reset hasEdits when called after edits exist', async () => {
+    const [a] = [makeFile('a.jpg')]
+    const [b] = [makeFile('b.jpg')]
+    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a])))
+    act(() => result.current.updatePhotoName(result.current.photos[0].id, 'renamed.jpg'))
+    expect(result.current.hasEdits).toBe(true)
+
+    await act(() => result.current.addPhotos([b], 'google-photos'))
+
+    expect(result.current.hasEdits).toBe(true)
+  })
 })
 
 describe('usePhotos — reorderPhotos', () => {

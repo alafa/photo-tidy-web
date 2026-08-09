@@ -10,6 +10,7 @@ export type PhotoEntry = {
   filename: string
   capturedAt: Date | null
   uploadIndex: number
+  source: 'local' | 'google-photos'
 }
 
 function sortPhotos(photos: PhotoEntry[]): PhotoEntry[] {
@@ -55,7 +56,7 @@ export function usePhotos() {
   const [photos, setPhotos] = useState<PhotoEntry[]>([])
   const [hasEdits, setHasEdits] = useState(false)
 
-  const processFiles = useCallback(async (fileList: FileList) => {
+  const processFiles = useCallback(async (fileList: FileList | File[]) => {
     const entries: PhotoEntry[] = []
 
     for (let i = 0; i < fileList.length; i++) {
@@ -67,6 +68,7 @@ export function usePhotos() {
         filename: file.name,
         capturedAt,
         uploadIndex: i,
+        source: 'local',
       })
     }
 
@@ -125,10 +127,40 @@ export function usePhotos() {
     setHasEdits(true)
   }, [])
 
+  const addPhotos = useCallback(async (
+    files: File[],
+    source: 'google-photos',
+    capturedAts?: (Date | null)[],
+  ) => {
+    const entries: PhotoEntry[] = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const capturedAt =
+        capturedAts && capturedAts[i] != null
+          ? capturedAts[i]
+          : await getPhotoDate(file)
+      entries.push({
+        id: crypto.randomUUID(),
+        file,
+        filename: file.name,
+        capturedAt,
+        source,
+        uploadIndex: 0, // placeholder; corrected in setPhotos below
+      })
+    }
+    setPhotos((prev) => {
+      const maxIndex = prev.length > 0 ? Math.max(...prev.map((p) => p.uploadIndex)) : -1
+      const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
+      return sortPhotos([...prev, ...withIndex])
+    })
+    // addPhotos is not a user edit — does NOT set hasEdits
+  }, [])
+
   return {
     photos,
     hasEdits,
     processFiles,
+    addPhotos,
     reorderPhotos,
     updatePhotoName,
     updatePhotoTimestamp,

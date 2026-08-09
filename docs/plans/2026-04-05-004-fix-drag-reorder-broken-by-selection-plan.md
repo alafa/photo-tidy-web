@@ -1,7 +1,7 @@
 ---
 title: "fix: Restore drag-reorder timestamp slotting broken by image selection"
 type: fix
-status: active
+status: completed
 date: 2026-04-05
 ---
 

@@ -13,6 +13,7 @@ function makeEntry(overrides: Partial<PhotoEntry> = {}): PhotoEntry {
     filename: 'test.jpg',
     capturedAt: null,
     uploadIndex: 0,
+    source: 'local',
     ...overrides,
   }
 }
@@ -58,6 +59,25 @@ describe('PhotoCard', () => {
     const img = container.querySelector('img')
     expect(img?.getAttribute('src')).toBe('blob:photo')
     expect(img?.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('renders origin badge when entry.source is google-photos', () => {
+    const entry = makeEntry({ source: 'google-photos' })
+
+    const { container } = render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+    const badge = container.querySelector('.bg-blue-600')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toBe('G')
+  })
+
+  it('renders no origin badge when entry.source is local', () => {
+    const entry = makeEntry({ source: 'local' })
+
+    const { container } = render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+    const badge = container.querySelector('.bg-blue-600')
+    expect(badge).toBeNull()
   })
 })
 

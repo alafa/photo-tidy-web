@@ -138,6 +138,12 @@ export default function PhotoCard({
           loading="lazy"
           className="w-full aspect-square object-cover bg-zinc-100"
         />
+        {/* Google Photos origin badge */}
+        {entry.source === 'google-photos' && (
+          <div className="absolute top-1.5 left-1.5 bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full leading-none">
+            G
+          </div>
+        )}
         {/* Selected checkmark overlay */}
         {checked && (
           <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center">
