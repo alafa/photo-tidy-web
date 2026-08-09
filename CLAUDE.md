@@ -26,3 +26,5 @@ npm run test      # run tests (once added)
 ## Documented Solutions
 
 `docs/solutions/` — past bugs and best practices organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.
+
+`CONCEPTS.md` — shared domain vocabulary (entities, named processes, status concepts) — relevant when orienting to the codebase or discussing domain concepts.
