@@ -46,6 +46,8 @@ export default function PhotoUploadPage() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
+  const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
+  const [namePromptValue, setNamePromptValue] = useState('')
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -122,6 +124,22 @@ export default function PhotoUploadPage() {
     batchSetTimestamps(Array.from(selectedIds), anchor)
   }
 
+  function handleImportClick() {
+    setNamePromptValue(albumName)
+    setIsNamePromptOpen(true)
+  }
+
+  function handleNamePromptContinue() {
+    setAlbumName(namePromptValue)
+    setIsNamePromptOpen(false)
+    startImport()
+  }
+
+  function handleNamePromptCancel() {
+    setIsNamePromptOpen(false)
+    setNamePromptValue('')
+  }
+
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <div className="max-w-6xl mx-auto px-4 py-10">
@@ -160,12 +178,39 @@ export default function PhotoUploadPage() {
         {isSignedIn && (
           <div className="flex flex-col items-start gap-2 mb-8">
             <button
-              onClick={pickerStatus === 'idle' ? startImport : cancelImport}
+              onClick={pickerStatus === 'idle' ? handleImportClick : cancelImport}
               disabled={pickerStatus === 'downloading'}
               className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pickerStatus === 'idle' ? 'Import from Google Photos' : 'Cancel import'}
             </button>
+            {isNamePromptOpen && (
+              <div className="flex flex-col gap-2 w-full max-w-sm">
+                <input
+                  type="text"
+                  maxLength={500}
+                  placeholder="Name this batch"
+                  value={namePromptValue}
+                  onChange={(e) => setNamePromptValue(e.target.value)}
+                  autoFocus
+                  className="text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg px-3 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder:text-zinc-400 focus:outline-none w-full"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleNamePromptContinue}
+                    className="px-3 py-1.5 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                  >
+                    Continue
+                  </button>
+                  <button
+                    onClick={handleNamePromptCancel}
+                    className="px-3 py-1.5 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             {(pickerStatus === 'session-open' || pickerStatus === 'picking') && (
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
                 {pickerStatus === 'session-open' ? 'Opening Google Photos…' : 'Waiting for selection…'}

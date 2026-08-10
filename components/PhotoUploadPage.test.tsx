@@ -11,6 +11,12 @@ vi.mock('@/hooks/usePhotos', () => ({
 vi.mock('@/hooks/useObjectUrls', () => ({
   useObjectUrls: vi.fn(),
 }))
+vi.mock('@/hooks/useGoogleAuth', () => ({
+  useGoogleAuth: vi.fn(),
+}))
+vi.mock('@/hooks/useGooglePhotosPicker', () => ({
+  useGooglePhotosPicker: vi.fn(),
+}))
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
@@ -54,8 +60,12 @@ vi.mock('@dnd-kit/sortable', () => ({
 
 import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
+import { useGoogleAuth } from '@/hooks/useGoogleAuth'
+import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 const mockUsePhotos = vi.mocked(usePhotos)
 const mockUseObjectUrls = vi.mocked(useObjectUrls)
+const mockUseGoogleAuth = vi.mocked(useGoogleAuth)
+const mockUseGooglePhotosPicker = vi.mocked(useGooglePhotosPicker)
 
 function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
@@ -66,6 +76,21 @@ beforeEach(() => {
   capturedOnDragStart = null
   capturedOnDragEnd = null
   mockUseObjectUrls.mockReturnValue((file: File) => `blob:${file.name}`)
+  mockUseGoogleAuth.mockReturnValue({
+    accessToken: null,
+    expiresAt: null,
+    accountEmail: null,
+    isSignedIn: false,
+    isExpiringSoon: false,
+    signIn: vi.fn(),
+    signOut: vi.fn(),
+  })
+  mockUseGooglePhotosPicker.mockReturnValue({
+    status: 'idle',
+    error: null,
+    startImport: vi.fn(),
+    cancelImport: vi.fn(),
+  })
 })
 
 describe('PhotoUploadPage', () => {
@@ -257,5 +282,182 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
 
     const overlay = document.querySelector('[data-testid="drag-overlay"]')
     expect(overlay?.textContent).toContain('a.jpg')
+  })
+})
+
+describe('PhotoUploadPage — Google Photos batch naming', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function signIn() {
+    mockUseGoogleAuth.mockReturnValue({
+      accessToken: 'token-123',
+      expiresAt: Date.now() + 60_000,
+      accountEmail: 'user@example.com',
+      isSignedIn: true,
+      isExpiringSoon: false,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+    })
+  }
+
+  it('prompts for a batch name when importing and stores it in albumName', () => {
+    signIn()
+    const startImportMock = vi.fn()
+    mockUseGooglePhotosPicker.mockReturnValue({
+      status: 'idle',
+      error: null,
+      startImport: startImportMock,
+      cancelImport: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import from Google Photos' }))
+
+    const nameInput = screen.getByPlaceholderText('Name this batch')
+    fireEvent.change(nameInput, { target: { value: 'Vacaciones 2024' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(startImportMock).toHaveBeenCalledOnce()
+    const albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    expect(albumInput.value).toBe('Vacaciones 2024')
+  })
+
+  it('cancelling the name prompt collapses it without starting the picker session', () => {
+    signIn()
+    const startImportMock = vi.fn()
+    mockUseGooglePhotosPicker.mockReturnValue({
+      status: 'idle',
+      error: null,
+      startImport: startImportMock,
+      cancelImport: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import from Google Photos' }))
+    fireEvent.change(screen.getByPlaceholderText('Name this batch'), {
+      target: { value: 'Abandoned Name' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(startImportMock).not.toHaveBeenCalled()
+    expect(screen.queryByPlaceholderText('Name this batch')).toBeNull()
+    const albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    expect(albumInput.value).toBe('')
+  })
+
+  it('local-only session: typing directly into the Album Name field enables upload', () => {
+    signIn()
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    const albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    const uploadButton = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(uploadButton.disabled).toBe(true)
+
+    fireEvent.change(albumInput, { target: { value: 'Trip Photos' } })
+
+    expect(uploadButton.disabled).toBe(false)
+  })
+
+  it('importing twice with different names: the second name replaces the first', () => {
+    signIn()
+    const startImportMock = vi.fn()
+    mockUseGooglePhotosPicker.mockReturnValue({
+      status: 'idle',
+      error: null,
+      startImport: startImportMock,
+      cancelImport: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import from Google Photos' }))
+    fireEvent.change(screen.getByPlaceholderText('Name this batch'), {
+      target: { value: 'First Trip' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    let albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    expect(albumInput.value).toBe('First Trip')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import from Google Photos' }))
+    const namePromptInput = screen.getByPlaceholderText('Name this batch') as HTMLInputElement
+    expect(namePromptInput.value).toBe('First Trip')
+    fireEvent.change(namePromptInput, { target: { value: 'Second Trip' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(startImportMock).toHaveBeenCalledTimes(2)
+    albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    expect(albumInput.value).toBe('Second Trip')
+  })
+
+  it('whitespace-only name leaves the upload button disabled with helper text', () => {
+    signIn()
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    const albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    fireEvent.change(albumInput, { target: { value: '   ' } })
+
+    const uploadButton = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(uploadButton.disabled).toBe(true)
+    expect(screen.getByText('Enter a name to enable upload')).toBeDefined()
+  })
+
+  it('toggles upload button disabled state as the album name is entered and cleared', () => {
+    signIn()
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    const albumInput = screen.getByPlaceholderText('Album name') as HTMLInputElement
+    const uploadButton = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(uploadButton.disabled).toBe(true)
+
+    fireEvent.change(albumInput, { target: { value: 'Some Name' } })
+    expect(uploadButton.disabled).toBe(false)
+
+    fireEvent.change(albumInput, { target: { value: '' } })
+    expect(uploadButton.disabled).toBe(true)
   })
 })

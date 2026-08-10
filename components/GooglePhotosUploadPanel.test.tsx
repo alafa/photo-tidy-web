@@ -37,7 +37,7 @@ const defaultProps = {
   accessToken: null,
   uploadState: 'idle' as UploadState,
   photoStates: new Map<string, PhotoUploadState>(),
-  albumName: '',
+  albumName: 'My Vacation',
   onAlbumNameChange: vi.fn(),
   onStartUpload: vi.fn(),
   onRetryFailed: vi.fn(),
@@ -47,7 +47,7 @@ describe('GooglePhotosUploadPanel', () => {
   it('renders album name input and upload button when uploadState is idle', () => {
     render(<GooglePhotosUploadPanel {...defaultProps} />)
 
-    expect(screen.getByPlaceholderText('Album name (optional)')).toBeDefined()
+    expect(screen.getByPlaceholderText('Album name')).toBeDefined()
     expect(screen.getByRole('button', { name: 'Upload to Google Photos' })).toBeDefined()
   })
 
@@ -206,7 +206,7 @@ describe('GooglePhotosUploadPanel', () => {
   it('album name input has maxLength of 500', () => {
     render(<GooglePhotosUploadPanel {...defaultProps} />)
 
-    const input = screen.getByPlaceholderText('Album name (optional)') as HTMLInputElement
+    const input = screen.getByPlaceholderText('Album name') as HTMLInputElement
     expect(input.maxLength).toBe(500)
   })
 
@@ -217,6 +217,45 @@ describe('GooglePhotosUploadPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Upload to Google Photos' }))
     expect(onStartUpload).toHaveBeenCalledOnce()
+  })
+
+  it('disables upload button and shows helper text when albumName is empty', () => {
+    render(<GooglePhotosUploadPanel {...defaultProps} albumName="" />)
+
+    const button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(screen.getByText('Enter a name to enable upload')).toBeDefined()
+  })
+
+  it('disables upload button and shows helper text when albumName is whitespace-only', () => {
+    render(<GooglePhotosUploadPanel {...defaultProps} albumName="   " />)
+
+    const button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(screen.getByText('Enter a name to enable upload')).toBeDefined()
+  })
+
+  it('enables upload button and hides helper text once albumName has non-whitespace content', () => {
+    render(<GooglePhotosUploadPanel {...defaultProps} albumName="Vacaciones 2024" />)
+
+    const button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    expect(screen.queryByText('Enter a name to enable upload')).toBeNull()
+  })
+
+  it('toggles the upload button disabled state as albumName is entered and cleared', () => {
+    const { rerender } = render(<GooglePhotosUploadPanel {...defaultProps} albumName="" />)
+
+    let button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+
+    rerender(<GooglePhotosUploadPanel {...defaultProps} albumName="Vacaciones 2024" />)
+    button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+
+    rerender(<GooglePhotosUploadPanel {...defaultProps} albumName="" />)
+    button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
   })
 
   it('shows per-photo progress list when uploadState is not idle', () => {

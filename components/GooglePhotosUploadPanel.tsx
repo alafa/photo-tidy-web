@@ -25,6 +25,7 @@ export default function GooglePhotosUploadPanel({
 }: Props) {
   const doneCount = photos.filter((p) => photoStates.get(p.id)?.status === 'done').length
   const hasFailures = photos.some((p) => photoStates.get(p.id)?.status === 'failed')
+  const isNameEmpty = albumName.trim() === ''
 
   return (
     <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 mb-6">
@@ -33,18 +34,23 @@ export default function GooglePhotosUploadPanel({
         <input
           type="text"
           maxLength={500}
-          placeholder="Album name (optional)"
+          placeholder="Album name"
           value={albumName}
           onChange={(e) => onAlbumNameChange(e.target.value)}
           className="text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg px-3 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 placeholder:text-zinc-400 focus:outline-none w-full"
         />
+        {isNameEmpty && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            Enter a name to enable upload
+          </p>
+        )}
       </div>
 
       {/* Upload button */}
       <div className="mb-3">
         <button
           onClick={onStartUpload}
-          disabled={uploadState === 'uploading'}
+          disabled={uploadState === 'uploading' || isNameEmpty}
           className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Upload to Google Photos
