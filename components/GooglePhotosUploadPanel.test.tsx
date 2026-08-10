@@ -282,4 +282,190 @@ describe('GooglePhotosUploadPanel', () => {
     expect(screen.getByText('✓ Done')).toBeDefined()
     expect(screen.getByText('✗ Failed: Upload failed')).toBeDefined()
   })
+
+  describe('uploadState is error', () => {
+    it('renders an error banner and a general retry action when album creation failed before any photo started', () => {
+      const photos = [makePhoto(), makePhoto()]
+      const photoStates = makePhotoStates(photos, {})
+      const onStartUpload = vi.fn()
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="error"
+          photoStates={photoStates}
+          onStartUpload={onStartUpload}
+        />
+      )
+
+      expect(screen.getByText(/upload failed/i)).toBeDefined()
+      const retryButton = screen.getByRole('button', { name: 'Retry upload' })
+      fireEvent.click(retryButton)
+      expect(onStartUpload).toHaveBeenCalledOnce()
+      expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull()
+    })
+
+    it('renders an error banner with "Retry failed" when some photos had already progressed', () => {
+      const photos = [makePhoto(), makePhoto()]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'done' }],
+        [photos[1].id, { status: 'failed', error: 'Batch create failed' }],
+      ])
+      const onRetryFailed = vi.fn()
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="error"
+          photoStates={photoStates}
+          onRetryFailed={onRetryFailed}
+        />
+      )
+
+      expect(screen.getByText(/upload failed/i)).toBeDefined()
+      const retryButton = screen.getByRole('button', { name: 'Retry failed' })
+      fireEvent.click(retryButton)
+      expect(onRetryFailed).toHaveBeenCalledOnce()
+      expect(screen.queryByRole('button', { name: 'Retry upload' })).toBeNull()
+    })
+
+    it('does not render the success banner when uploadState is error', () => {
+      const photos = [makePhoto()]
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="error"
+          photoStates={makePhotoStates(photos, {})}
+        />
+      )
+
+      expect(screen.queryByText(/uploaded to/)).toBeNull()
+    })
+  })
+
+  describe('manual cleanup reminder', () => {
+    it('shows the cleanup reminder alongside the full success banner when a google-photos-origin photo succeeded', () => {
+      const photos = [
+        makePhoto({ filename: 'from-google.jpg', source: 'google-photos' }),
+        makePhoto({ filename: 'from-local.jpg', source: 'local' }),
+      ]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'done' }],
+        [photos[1].id, { status: 'done' }],
+      ])
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+          albumName="My Vacation"
+        />
+      )
+
+      expect(screen.getByText("2 photos uploaded to album 'My Vacation'")).toBeDefined()
+      expect(
+        screen.getByText(/If these photos came from an existing Google Photos album, you can now delete it manually\./)
+      ).toBeDefined()
+    })
+
+    it('does not show the cleanup reminder for a local-only batch that succeeded', () => {
+      const photos = [
+        makePhoto({ filename: 'a.jpg', source: 'local' }),
+        makePhoto({ filename: 'b.jpg', source: 'local' }),
+      ]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'done' }],
+        [photos[1].id, { status: 'done' }],
+      ])
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      expect(screen.getByText(/2 photos uploaded to album 'My Vacation'/)).toBeDefined()
+      expect(screen.queryByText(/delete it manually/)).toBeNull()
+    })
+
+    it('does not show the cleanup reminder when the google-photos-origin photo failed rather than succeeded', () => {
+      const photos = [
+        makePhoto({ filename: 'from-google.jpg', source: 'google-photos' }),
+        makePhoto({ filename: 'from-local.jpg', source: 'local' }),
+      ]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'failed', error: 'Upload failed' }],
+        [photos[1].id, { status: 'done' }],
+      ])
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      expect(screen.queryByText(/delete it manually/)).toBeNull()
+    })
+  })
+
+  describe('partial success', () => {
+    it('shows a qualified "N of M uploaded" banner instead of the full success banner when some photos failed', () => {
+      const photos = [makePhoto(), makePhoto(), makePhoto()]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'done' }],
+        [photos[1].id, { status: 'done' }],
+        [photos[2].id, { status: 'failed', error: 'Network error' }],
+      ])
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      expect(screen.getByText(/2 of 3 photos uploaded — see failures below/)).toBeDefined()
+      expect(screen.queryByText(/^\d+ photos uploaded to/)).toBeNull()
+      expect(screen.getByText('✗ Failed: Network error')).toBeDefined()
+      expect(screen.getByRole('button', { name: 'Retry failed' })).toBeDefined()
+    })
+
+    it('shows the cleanup reminder in the partial-success banner when a google-photos-origin photo reached done', () => {
+      const photos = [
+        makePhoto({ filename: 'from-google.jpg', source: 'google-photos' }),
+        makePhoto({ filename: 'from-local.jpg', source: 'local' }),
+      ]
+      const photoStates = new Map<string, PhotoUploadState>([
+        [photos[0].id, { status: 'done' }],
+        [photos[1].id, { status: 'failed', error: 'Network error' }],
+      ])
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      expect(screen.getByText(/1 of 2 photos uploaded — see failures below/)).toBeDefined()
+      expect(
+        screen.getByText(/If these photos came from an existing Google Photos album, you can now delete it manually\./)
+      ).toBeDefined()
+    })
+  })
 })
