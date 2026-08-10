@@ -125,28 +125,26 @@ export function useGooglePhotosUpload() {
       // Reset refs
       albumIdRef.current = undefined
 
-      // Optionally create album
-      if (albumName.trim()) {
-        try {
-          const albumResponse = await fetch('/api/google-photos/albums', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
-            body: JSON.stringify({ title: albumName.trim() }),
-          })
+      // Create album (mandatory for every upload)
+      try {
+        const albumResponse = await fetch('/api/google-photos/albums', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ title: `${albumName.trim()} (photo tidy)` }),
+        })
 
-          if (!albumResponse.ok) {
-            throw new Error(`Album creation failed: HTTP ${albumResponse.status}`)
-          }
-
-          const albumData = await albumResponse.json() as Album
-          albumIdRef.current = albumData.id
-        } catch {
-          setUploadState('error')
-          return
+        if (!albumResponse.ok) {
+          throw new Error(`Album creation failed: HTTP ${albumResponse.status}`)
         }
+
+        const albumData = await albumResponse.json() as Album
+        albumIdRef.current = albumData.id
+      } catch {
+        setUploadState('error')
+        return
       }
 
       // Upload each photo sequentially

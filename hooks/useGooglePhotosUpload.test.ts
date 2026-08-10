@@ -38,51 +38,8 @@ beforeEach(() => {
 
 // --- Tests ---
 
-describe('useGooglePhotosUpload — happy path without album', () => {
-  it('uploads two photos and calls batchCreate; both photoStates become done', async () => {
-    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
-    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
-
-    const mockFetch = vi.fn()
-    // upload photo1
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      text: async () => 'token-1',
-    })
-    // upload photo2
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      text: async () => 'token-2',
-    })
-    // batchCreate
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({}),
-    })
-    vi.stubGlobal('fetch', mockFetch)
-
-    const { result } = renderHook(() => useGooglePhotosUpload())
-
-    await act(() => result.current.startUpload([photo1, photo2], '', ACCESS_TOKEN))
-
-    expect(result.current.uploadState).toBe('done')
-    expect(result.current.photoStates.get('p1')?.status).toBe('done')
-    expect(result.current.photoStates.get('p2')?.status).toBe('done')
-
-    // batchCreate called with both tokens
-    const batchCall = mockFetch.mock.calls[2]
-    expect(batchCall[0]).toBe('/api/google-photos/batch-create')
-    const batchBody = JSON.parse(batchCall[1].body)
-    expect(batchBody.uploadTokens).toEqual([
-      { token: 'token-1', filename: 'a.jpg' },
-      { token: 'token-2', filename: 'b.jpg' },
-    ])
-    expect(batchBody.albumId).toBeUndefined()
-  })
-})
-
-describe('useGooglePhotosUpload — happy path with album', () => {
-  it('creates album first, then uploads, batchCreate includes albumId', async () => {
+describe('useGooglePhotosUpload — album creation is mandatory', () => {
+  it('creates an album before uploading any photo bytes, then uploads, batchCreate includes albumId', async () => {
     const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
     const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
 
@@ -90,7 +47,7 @@ describe('useGooglePhotosUpload — happy path with album', () => {
     // create album
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ id: 'album-123', title: 'Paris 2024' }),
+      json: async () => ({ id: 'album-123', title: 'Paris 2024 (photo tidy)' }),
     })
     // upload photo1
     mockFetch.mockResolvedValueOnce({
@@ -114,17 +71,48 @@ describe('useGooglePhotosUpload — happy path with album', () => {
     await act(() => result.current.startUpload([photo1, photo2], 'Paris 2024', ACCESS_TOKEN))
 
     expect(result.current.uploadState).toBe('done')
+    expect(result.current.photoStates.get('p1')?.status).toBe('done')
+    expect(result.current.photoStates.get('p2')?.status).toBe('done')
 
-    // First call creates album
-    const albumCall = mockFetch.mock.calls[0]
-    expect(albumCall[0]).toBe('/api/google-photos/albums')
-    expect(JSON.parse(albumCall[1].body)).toEqual({ title: 'Paris 2024' })
+    // First call creates album, before any upload call
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/google-photos/albums')
 
     // batchCreate includes albumId
     const batchCall = mockFetch.mock.calls[3]
+    expect(batchCall[0]).toBe('/api/google-photos/batch-create')
     const batchBody = JSON.parse(batchCall[1].body)
     expect(batchBody.albumId).toBe('album-123')
-    expect(batchBody.uploadTokens).toHaveLength(2)
+    expect(batchBody.uploadTokens).toEqual([
+      { token: 'token-1', filename: 'a.jpg' },
+      { token: 'token-2', filename: 'b.jpg' },
+    ])
+  })
+
+  it('composes the album title as "<name> (photo tidy)", not the raw batch name', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: 'album-456' }),
+    })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: async () => 'token-1',
+    })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Vacaciones 2024', ACCESS_TOKEN))
+
+    const albumCall = mockFetch.mock.calls[0]
+    expect(albumCall[0]).toBe('/api/google-photos/albums')
+    expect(JSON.parse(albumCall[1].body)).toEqual({ title: 'Vacaciones 2024 (photo tidy)' })
   })
 })
 
@@ -134,6 +122,11 @@ describe('useGooglePhotosUpload — error path: single upload failure', () => {
     const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
 
     const mockFetch = vi.fn()
+    // create album
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: 'album-789' }),
+    })
     // upload photo1 fails
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -154,14 +147,14 @@ describe('useGooglePhotosUpload — error path: single upload failure', () => {
 
     const { result } = renderHook(() => useGooglePhotosUpload())
 
-    await act(() => result.current.startUpload([photo1, photo2], '', ACCESS_TOKEN))
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
 
     expect(result.current.uploadState).toBe('done')
     expect(result.current.photoStates.get('p1')?.status).toBe('failed')
     expect(result.current.photoStates.get('p2')?.status).toBe('done')
 
     // batchCreate called with only photo2's token
-    const batchCall = mockFetch.mock.calls[2]
+    const batchCall = mockFetch.mock.calls[3]
     const batchBody = JSON.parse(batchCall[1].body)
     expect(batchBody.uploadTokens).toEqual([{ token: 'token-2', filename: 'b.jpg' }])
   })
@@ -173,7 +166,8 @@ describe('useGooglePhotosUpload — retryFailed', () => {
     const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
 
     const mockFetch = vi.fn()
-    // startUpload: photo1 fails, photo2 succeeds
+    // startUpload: create album, then photo1 fails, photo2 succeeds
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-321' }) }) // album creation
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'error' })
     mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' })
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) }) // batchCreate #1
@@ -185,7 +179,7 @@ describe('useGooglePhotosUpload — retryFailed', () => {
 
     const { result } = renderHook(() => useGooglePhotosUpload())
 
-    await act(() => result.current.startUpload([photo1, photo2], '', ACCESS_TOKEN))
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
 
     expect(result.current.photoStates.get('p1')?.status).toBe('failed')
     expect(result.current.photoStates.get('p2')?.status).toBe('done')
@@ -196,7 +190,7 @@ describe('useGooglePhotosUpload — retryFailed', () => {
     expect(result.current.photoStates.get('p1')?.status).toBe('done')
 
     // batchCreate #2 should only have the retry token — not re-submit the already-committed token-2
-    const batchCall2 = mockFetch.mock.calls[4]
+    const batchCall2 = mockFetch.mock.calls[5]
     const batchBody = JSON.parse(batchCall2[1].body)
     const tokenValues = batchBody.uploadTokens.map((t: { token: string }) => t.token)
     expect(tokenValues).toEqual(['token-1-retry'])
@@ -239,7 +233,7 @@ describe('useGooglePhotosUpload — edge cases', () => {
 
     // Start first upload (don't await yet)
     act(() => {
-      result.current.startUpload([photo1], '', ACCESS_TOKEN)
+      result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN)
     })
 
     // Attempt second startUpload while first is still in progress
@@ -273,13 +267,14 @@ describe('useGooglePhotosUpload — edge cases', () => {
     const photo1 = makePhoto({ id: 'p1' })
 
     const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-999' }) }) // album creation
     mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' })
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) })
     vi.stubGlobal('fetch', mockFetch)
 
     const { result } = renderHook(() => useGooglePhotosUpload())
 
-    await act(() => result.current.startUpload([photo1], '', ACCESS_TOKEN))
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
     expect(result.current.uploadState).toBe('done')
     expect(result.current.photoStates.size).toBe(1)
 

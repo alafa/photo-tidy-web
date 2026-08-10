@@ -203,11 +203,11 @@ describe('GooglePhotosUploadPanel', () => {
     expect(onRetryFailed).toHaveBeenCalledOnce()
   })
 
-  it('album name input has maxLength of 500', () => {
+  it('album name input has maxLength of 487, leaving room for the " (photo tidy)" suffix within the 500-char server cap', () => {
     render(<GooglePhotosUploadPanel {...defaultProps} />)
 
     const input = screen.getByPlaceholderText('Album name') as HTMLInputElement
-    expect(input.maxLength).toBe(500)
+    expect(input.maxLength).toBe(487)
   })
 
   it('calls onStartUpload when upload button is clicked', () => {

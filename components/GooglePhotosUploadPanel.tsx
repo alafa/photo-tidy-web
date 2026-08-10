@@ -33,7 +33,7 @@ export default function GooglePhotosUploadPanel({
       <div className="mb-3">
         <input
           type="text"
-          maxLength={500}
+          maxLength={487}
           placeholder="Album name"
           value={albumName}
           onChange={(e) => onAlbumNameChange(e.target.value)}
