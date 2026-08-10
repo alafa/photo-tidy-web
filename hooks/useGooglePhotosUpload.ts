@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { writeTimestamp } from '@/lib/exif-write'
-import type { UploadToken, Album } from '@/lib/google-photos-types'
+import type { UploadToken, Album, BatchCreateResult, NewMediaItemResult } from '@/lib/google-photos-types'
 
 export type UploadState = 'idle' | 'uploading' | 'done' | 'error'
 export type PhotoUploadStatus = 'pending' | 'uploading' | 'done' | 'failed'
@@ -11,6 +11,14 @@ export type PhotoUploadStatus = 'pending' | 'uploading' | 'done' | 'failed'
 export interface PhotoUploadState {
   status: PhotoUploadStatus
   error?: string
+}
+
+// An upload token carrying the id of the photo it came from, so batch-create
+// results (returned per-token, in submission order) can be matched back to
+// the correct photo even when some photos were skipped earlier (their raw
+// upload failed, so no token exists for them at all).
+interface PendingUploadToken extends UploadToken {
+  photoId: string
 }
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
@@ -21,6 +29,13 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks
 }
 
+// Google's proto-derived status convention (google.rpc.Status): `code` is
+// only populated for non-OK outcomes. Its absence, or an explicit 0, means
+// the individual media item was created successfully.
+function isBatchCreateSuccess(status: NewMediaItemResult['status']): boolean {
+  return status.code === undefined || status.code === 0
+}
+
 export function useGooglePhotosUpload() {
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [photoStates, setPhotoStates] = useState<Map<string, PhotoUploadState>>(new Map())
@@ -29,7 +44,7 @@ export function useGooglePhotosUpload() {
   const albumIdRef = useRef<string | undefined>(undefined)
 
   const uploadSinglePhoto = useCallback(
-    async (photo: PhotoEntry, accessToken: string): Promise<UploadToken | null> => {
+    async (photo: PhotoEntry, accessToken: string): Promise<PendingUploadToken | null> => {
       setPhotoStates((prev) => {
         const next = new Map(prev)
         next.set(photo.id, { status: 'uploading' })
@@ -57,13 +72,10 @@ export function useGooglePhotosUpload() {
 
         const uploadToken = await response.text()
 
-        setPhotoStates((prev) => {
-          const next = new Map(prev)
-          next.set(photo.id, { status: 'done' })
-          return next
-        })
-
-        return { token: uploadToken, filename: photo.filename }
+        // Raw bytes are uploaded, but the media item does not exist in
+        // Google Photos yet — batch-create still has to succeed for this
+        // specific photo. Stay 'uploading' until that resolves.
+        return { photoId: photo.id, token: uploadToken, filename: photo.filename }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err)
         setPhotoStates((prev) => {
@@ -77,30 +89,76 @@ export function useGooglePhotosUpload() {
     []
   )
 
+  // Marks every photo submitted in a chunk as 'failed' with a shared
+  // message. Used when the batch-create call for that chunk fails outright
+  // (network error or non-2xx), so no row is left stuck 'uploading'.
+  const markChunkFailed = useCallback((batch: PendingUploadToken[], message: string) => {
+    setPhotoStates((prev) => {
+      const next = new Map(prev)
+      for (const item of batch) {
+        if (next.get(item.photoId)?.status === 'uploading') {
+          next.set(item.photoId, { status: 'failed', error: message })
+        }
+      }
+      return next
+    })
+  }, [])
+
   const batchCreate = useCallback(
-    async (tokens: UploadToken[], albumId: string | undefined, accessToken: string) => {
+    async (tokens: PendingUploadToken[], albumId: string | undefined, accessToken: string) => {
       const batches = chunkArray(tokens, 50)
       for (const batch of batches) {
         const body: { uploadTokens: UploadToken[]; albumId?: string } = {
-          uploadTokens: batch,
+          uploadTokens: batch.map(({ token, filename }) => ({ token, filename })),
         }
         if (albumId) {
           body.albumId = albumId
         }
-        const res = await fetch('/api/google-photos/batch-create', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify(body),
-        })
+
+        let res: Response
+        try {
+          res = await fetch('/api/google-photos/batch-create', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify(body),
+          })
+        } catch (err) {
+          markChunkFailed(batch, 'Batch create request failed')
+          throw err
+        }
+
         if (!res.ok) {
+          markChunkFailed(batch, 'Batch create request failed')
           throw new Error(`Batch create failed: ${res.status}`)
         }
+
+        const data = (await res.json()) as BatchCreateResult
+        const results = data.newMediaItemResults ?? []
+
+        setPhotoStates((prev) => {
+          const next = new Map(prev)
+          batch.forEach((item, index) => {
+            // Results are returned in submission order WITHIN this single
+            // chunk's API call — never assume a running position across
+            // multiple chunks.
+            const result: NewMediaItemResult | undefined = results[index]
+            if (result && isBatchCreateSuccess(result.status)) {
+              next.set(item.photoId, { status: 'done' })
+            } else {
+              next.set(item.photoId, {
+                status: 'failed',
+                error: result?.status?.message ?? 'Batch create did not return a result for this photo',
+              })
+            }
+          })
+          return next
+        })
       }
     },
-    []
+    [markChunkFailed]
   )
 
   const startUpload = useCallback(
@@ -148,7 +206,7 @@ export function useGooglePhotosUpload() {
       }
 
       // Upload each photo sequentially
-      const tokens: UploadToken[] = []
+      const tokens: PendingUploadToken[] = []
       for (const photo of photos) {
         const result = await uploadSinglePhoto(photo, accessToken)
         if (result) {
@@ -183,7 +241,7 @@ export function useGooglePhotosUpload() {
       setUploadState('uploading')
 
       // Re-upload failed photos
-      const newTokens: UploadToken[] = []
+      const newTokens: PendingUploadToken[] = []
       for (const photo of failedPhotos) {
         const result = await uploadSinglePhoto(photo, accessToken)
         if (result) {
