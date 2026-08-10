@@ -67,13 +67,17 @@ export function usePhotos() {
         file,
         filename: file.name,
         capturedAt,
-        uploadIndex: i,
         source: 'local',
+        uploadIndex: 0, // placeholder; corrected in setPhotos below
       })
     }
 
-    setPhotos(sortPhotos(entries))
-    setHasEdits(false)
+    setPhotos((prev) => {
+      const maxIndex = prev.length > 0 ? Math.max(...prev.map((p) => p.uploadIndex)) : -1
+      const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
+      return sortPhotos([...prev, ...withIndex])
+    })
+    // processFiles appends to the existing batch — does NOT set hasEdits
   }, [])
 
   const reorderPhotos = useCallback((from: number, to: number) => {

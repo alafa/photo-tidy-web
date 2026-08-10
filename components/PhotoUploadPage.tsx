@@ -25,7 +25,6 @@ import { downloadAll } from '@/lib/download'
 export default function PhotoUploadPage() {
   const {
     photos,
-    hasEdits,
     processFiles,
     addPhotos,
     reorderPhotos,
@@ -55,14 +54,8 @@ export default function PhotoUploadPage() {
 
   const activeEntry = activeId ? photos.find((p) => p.id === activeId) : null
 
-  function maybeConfirm(): boolean {
-    if (!hasEdits) return true
-    return window.confirm('Uploading new photos will discard your edits. Continue?')
-  }
-
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
-      if (!maybeConfirm()) return
       setSelectedIds(new Set())
       processFiles(e.target.files)
       reset()
@@ -78,7 +71,6 @@ export default function PhotoUploadPage() {
     e.preventDefault()
     e.stopPropagation()
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      if (!maybeConfirm()) return
       setSelectedIds(new Set())
       processFiles(e.dataTransfer.files)
       reset()

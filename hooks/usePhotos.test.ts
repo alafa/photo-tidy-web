@@ -190,6 +190,70 @@ describe('usePhotos — addPhotos', () => {
   })
 })
 
+describe('usePhotos — processFiles append behavior', () => {
+  it('merges newly-added local files into an existing batch instead of replacing it', async () => {
+    const [gp1, gp2] = [makeFile('gp1.jpg'), makeFile('gp2.jpg')]
+    const [local1] = [makeFile('local1.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      if (file === gp1) return new Date('2025-01-01')
+      if (file === gp2) return new Date('2025-02-01')
+      if (file === local1) return new Date('2025-03-01')
+      return null
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    // Simulate importing 2 photos from Google Photos first
+    await act(() => result.current.addPhotos([gp1, gp2], 'google-photos'))
+    expect(result.current.photos).toHaveLength(2)
+
+    // Then add 1 local file (as if dropped via drag-drop)
+    await act(() => result.current.processFiles(makeFileList([local1])))
+
+    expect(result.current.photos).toHaveLength(3)
+    const filenames = result.current.photos.map((p) => p.filename)
+    expect(filenames).toEqual(['gp1.jpg', 'gp2.jpg', 'local1.jpg'])
+  })
+
+  it('behaves the same as a fresh upload when there are no prior photos', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) =>
+      file === a ? new Date('2025-01-01') : new Date('2025-02-01')
+    )
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'b.jpg'])
+  })
+
+  it('preserves both batches when adding local files twice in a row', async () => {
+    const [a] = [makeFile('a.jpg')]
+    const [b] = [makeFile('b.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) =>
+      file === a ? new Date('2025-01-01') : new Date('2025-02-01')
+    )
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a])))
+    await act(() => result.current.processFiles(makeFileList([b])))
+
+    expect(result.current.photos).toHaveLength(2)
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'b.jpg'])
+  })
+
+  it('assigns continuing uploadIndex values to newly-appended entries', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockResolvedValue(null) // no dates -> uploadIndex is the sort tiebreaker
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a])))
+    expect(result.current.photos[0].uploadIndex).toBe(0)
+
+    await act(() => result.current.processFiles(makeFileList([b])))
+    expect(result.current.photos.map((p) => p.uploadIndex)).toEqual([0, 1])
+  })
+})
+
 describe('usePhotos — reorderPhotos', () => {
   async function setupPhotos(files: File[], dates: (Date | null)[]) {
     mockGetPhotoDate.mockImplementation(async (file: File) => {
@@ -269,7 +333,7 @@ describe('usePhotos — reorderPhotos', () => {
     expect(result.current.photos[0]).not.toBe(original)
   })
 
-  it('processFiles after reorderPhotos replaces state with EXIF-sorted order', async () => {
+  it('processFiles after reorderPhotos appends new entries without discarding the reordered edit', async () => {
     const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
     const early = new Date('2020-01-01T00:00:00Z')
     const late = new Date('2025-06-15T10:00:00Z')
@@ -283,9 +347,11 @@ describe('usePhotos — reorderPhotos', () => {
     act(() => result.current.reorderPhotos(1, 0))
     expect(result.current.photos[0].filename).toBe('a.jpg')
 
-    // re-upload restores EXIF order: b (early) before a (late)
+    // adding more local files appends — the reordered 'a' stays first, and
+    // both the original two photos plus the two newly-added ones are present
     await act(() => result.current.processFiles(makeFileList([a, b])))
-    expect(result.current.photos[0].filename).toBe('b.jpg')
+    expect(result.current.photos).toHaveLength(4)
+    expect(result.current.photos[0].filename).toBe('a.jpg')
   })
 })
 
