@@ -107,6 +107,8 @@ export function useGooglePhotosUpload() {
   const batchCreate = useCallback(
     async (tokens: PendingUploadToken[], albumId: string | undefined, accessToken: string) => {
       const batches = chunkArray(tokens, 50)
+      let anyChunkFailed = false
+
       for (const batch of batches) {
         const body: { uploadTokens: UploadToken[]; albumId?: string } = {
           uploadTokens: batch.map(({ token, filename }) => ({ token, filename })),
@@ -125,26 +127,39 @@ export function useGooglePhotosUpload() {
             },
             body: JSON.stringify(body),
           })
-        } catch (err) {
+        } catch {
+          // Don't abandon later chunks on one chunk's failure — mark this
+          // chunk failed and keep going so the rest still get a chance.
           markChunkFailed(batch, 'Batch create request failed')
-          throw err
+          anyChunkFailed = true
+          continue
         }
 
         if (!res.ok) {
           markChunkFailed(batch, 'Batch create request failed')
-          throw new Error(`Batch create failed: ${res.status}`)
+          anyChunkFailed = true
+          continue
         }
 
-        const data = (await res.json()) as BatchCreateResult
-        const results = data.newMediaItemResults ?? []
+        let data: BatchCreateResult
+        try {
+          data = (await res.json()) as BatchCreateResult
+        } catch {
+          markChunkFailed(batch, 'Batch create returned an invalid response')
+          anyChunkFailed = true
+          continue
+        }
+
+        // Match each result back to its submitted token explicitly, rather
+        // than assuming response order mirrors submission order.
+        const resultsByToken = new Map(
+          (data.newMediaItemResults ?? []).map((result) => [result.uploadToken, result])
+        )
 
         setPhotoStates((prev) => {
           const next = new Map(prev)
-          batch.forEach((item, index) => {
-            // Results are returned in submission order WITHIN this single
-            // chunk's API call — never assume a running position across
-            // multiple chunks.
-            const result: NewMediaItemResult | undefined = results[index]
+          for (const item of batch) {
+            const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
             if (result && isBatchCreateSuccess(result.status)) {
               next.set(item.photoId, { status: 'done' })
             } else {
@@ -153,9 +168,13 @@ export function useGooglePhotosUpload() {
                 error: result?.status?.message ?? 'Batch create did not return a result for this photo',
               })
             }
-          })
+          }
           return next
         })
+      }
+
+      if (anyChunkFailed) {
+        throw new Error('One or more batch-create chunks failed')
       }
     },
     [markChunkFailed]
@@ -231,6 +250,10 @@ export function useGooglePhotosUpload() {
 
   const retryFailed = useCallback(
     async (photos: PhotoEntry[], accessToken: string): Promise<void> => {
+      // Noop if already uploading — prevents a duplicate concurrent retry
+      // (e.g. a rapid double-click) from creating duplicate media items.
+      if (uploadState === 'uploading') return
+
       // Find failed photos
       const failedPhotos = photos.filter(
         (p) => photoStates.get(p.id)?.status === 'failed'
@@ -262,7 +285,7 @@ export function useGooglePhotosUpload() {
 
       setUploadState('done')
     },
-    [photoStates, uploadSinglePhoto, batchCreate]
+    [uploadState, photoStates, uploadSinglePhoto, batchCreate]
   )
 
   const reset = useCallback(() => {

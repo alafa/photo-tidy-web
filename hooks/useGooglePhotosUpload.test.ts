@@ -278,6 +278,70 @@ describe('useGooglePhotosUpload — edge cases', () => {
     })
   })
 
+  it('noop when retryFailed is called while an upload is already in progress', async () => {
+    const photo1 = makePhoto({ id: 'p1' })
+    const photo2 = makePhoto({ id: 'p2' })
+
+    // First run: p1 fails, p2 succeeds, so p1 is retryable.
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'error' }) // p1 fails raw upload
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // p2 succeeds
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'photo.jpg' } },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+
+    // Make the first retryFailed's raw upload hang so uploadState stays 'uploading'.
+    let resolveRetryUpload!: (value: Response) => void
+    const hangingUpload = new Promise<Response>((res) => {
+      resolveRetryUpload = res
+    })
+    mockFetch.mockReturnValueOnce(hangingUpload)
+
+    act(() => {
+      result.current.retryFailed([photo1, photo2], ACCESS_TOKEN)
+    })
+    expect(result.current.uploadState).toBe('uploading')
+
+    // A second concurrent retryFailed call while the first is still in
+    // flight must be a noop. Assert against the final settled state rather
+    // than an intermediate call count, since the first call's own pending
+    // continuation (past its earlier `await`) can still resolve during this
+    // await and is not itself evidence the guard failed.
+    await act(() => result.current.retryFailed([photo1, photo2], ACCESS_TOKEN))
+
+    // Let the first (and only) retry's upload finish.
+    resolveRetryUpload({ ok: true, text: async () => 'token-1-retry' } as unknown as Response)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1-retry', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'photo.jpg' } },
+        ],
+      }),
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    expect(result.current.uploadState).toBe('done')
+    expect(result.current.photoStates.get('p1')?.status).toBe('done')
+    // Exactly one retry cycle happened: 4 calls from startUpload + 2 from the
+    // single retry (raw upload + batchCreate) = 6. If the guard had failed
+    // and a second concurrent retry cycle also ran, this would be 8.
+    expect(mockFetch.mock.calls.length).toBe(6)
+  })
+
   it('photos is empty → uploadState becomes done immediately, no API calls', async () => {
     const mockFetch = vi.fn()
     vi.stubGlobal('fetch', mockFetch)
@@ -594,6 +658,63 @@ describe('useGooglePhotosUpload — U4: per-photo done/failed status matches bat
     expect(result.current.photoStates.get('p1')?.error).toBe('Batch create request failed')
   })
 
+  it('chunk batch-create response is ok but not valid JSON: the chunk is marked failed, not left stuck uploading', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected token') },
+    }) // batchCreate returns 200 with a non-JSON body
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('error')
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Batch create returned an invalid response')
+  })
+
+  it('a later chunk failing outright does not abandon or leave an earlier chunk stuck uploading', async () => {
+    const firstChunkPhotos = Array.from({ length: 50 }, (_, i) => makePhoto({ id: `p${i}`, filename: `${i}.jpg` }))
+    const lastPhoto = makePhoto({ id: 'p-last', filename: 'last.jpg' })
+    const photos = [...firstChunkPhotos, lastPhoto]
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    // Raw upload for all 51 photos succeeds.
+    for (let i = 0; i < photos.length; i++) {
+      mockFetch.mockResolvedValueOnce({ ok: true, text: async () => `token-${i}` })
+    }
+    // First batchCreate call (chunk of 50) succeeds fully.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: firstChunkPhotos.map((_, i) => ({
+          uploadToken: `token-${i}`,
+          status: { message: 'Success' },
+          mediaItem: { id: `m${i}`, filename: `${i}.jpg` },
+        })),
+      }),
+    })
+    // Second batchCreate call (the remaining 1 photo) fails outright.
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+    await act(() => result.current.startUpload(photos, 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('error')
+    for (const photo of firstChunkPhotos) {
+      expect(result.current.photoStates.get(photo.id)?.status).toBe('done')
+    }
+    expect(result.current.photoStates.get('p-last')?.status).toBe('failed')
+  })
+
   it('retryFailed applies the same id-based, per-chunk matching to the retry batchCreate response', async () => {
     const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
     const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
@@ -623,20 +744,22 @@ describe('useGooglePhotosUpload — U4: per-photo done/failed status matches bat
     expect(result.current.photoStates.get('p2')?.status).toBe('failed')
     expect(result.current.photoStates.get('p3')?.status).toBe('done')
 
-    // retryFailed re-uploads p1 and p2 only. Raw uploads both succeed this
-    // time, and the mocked batchCreate response returns results in REVERSE
-    // order (p2's token first, p1's second) to prove id-based matching.
+    // retryFailed re-uploads p1 and p2 only, in that submission order. Raw
+    // uploads both succeed, but the mocked batchCreate response returns
+    // results in REVERSE order (p2's token first, p1's second) — this proves
+    // matching is by uploadToken, not by array position, since a
+    // position-based match would incorrectly swap p1 and p2's outcomes.
     mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1-retry' }) // p1 retry upload
     mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2-retry' }) // p2 retry upload
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         newMediaItemResults: [
-          { uploadToken: 'token-1-retry', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
           { uploadToken: 'token-2-retry', status: { message: 'Invalid argument', code: 3 } },
+          { uploadToken: 'token-1-retry', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
         ],
       }),
-    }) // batchCreate #2 (retry)
+    }) // batchCreate #2 (retry) — deliberately out of submission order
 
     await act(() => result.current.retryFailed([photo1, photo2, photo3], ACCESS_TOKEN))
 

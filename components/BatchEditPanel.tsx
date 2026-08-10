@@ -44,10 +44,6 @@ export default function BatchEditPanel({
     setTimeout(() => setTsApplied(false), 1500)
   }
 
-  function handleDelete() {
-    onBatchDelete()
-  }
-
   const padLen = String(selectedCount).length
   const exampleSuffix = `${'1'.padStart(padLen, '0')}`
 
@@ -126,7 +122,7 @@ export default function BatchEditPanel({
             Delete selected
           </label>
           <button
-            onClick={handleDelete}
+            onClick={onBatchDelete}
             className="px-3 py-1.5 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors dark:bg-red-500 dark:hover:bg-red-600"
           >
             Delete selected

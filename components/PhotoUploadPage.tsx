@@ -177,7 +177,7 @@ export default function PhotoUploadPage() {
           <div className="flex flex-col items-start gap-2 mb-8">
             <button
               onClick={pickerStatus === 'idle' ? handleImportClick : cancelImport}
-              disabled={pickerStatus === 'downloading'}
+              disabled={pickerStatus === 'downloading' || isNamePromptOpen}
               className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pickerStatus === 'idle' ? 'Import from Google Photos' : 'Cancel import'}

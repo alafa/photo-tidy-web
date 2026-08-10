@@ -97,19 +97,10 @@ export default function GooglePhotosUploadPanel({
         <div className="mb-3">
           <button
             onClick={onStartUpload}
+            disabled={isNameEmpty}
             className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Retry upload
-          </button>
-        </div>
-      )}
-      {uploadState === 'error' && !noPhotoStarted && hasFailures && (
-        <div className="mb-3">
-          <button
-            onClick={onRetryFailed}
-            className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Retry failed
           </button>
         </div>
       )}
@@ -130,8 +121,10 @@ export default function GooglePhotosUploadPanel({
         </div>
       )}
 
-      {/* Retry failed button */}
-      {uploadState === 'done' && hasFailures && (
+      {/* Retry failed button — shown whenever some photos failed, whether the
+          overall run ended in 'error' (after a chunk failure) or 'done' with
+          partial success. */}
+      {((uploadState === 'error' && !noPhotoStarted) || uploadState === 'done') && hasFailures && (
         <div className="mb-3">
           <button
             onClick={onRetryFailed}
