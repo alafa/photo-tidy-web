@@ -26,13 +26,24 @@ export default function GooglePhotosUploadPanel({
   const doneCount = photos.filter((p) => photoStates.get(p.id)?.status === 'done').length
   const hasFailures = photos.some((p) => photoStates.get(p.id)?.status === 'failed')
   const isNameEmpty = albumName.trim() === ''
-  const hasDoneGooglePhotosOrigin = photos.some(
-    (p) => p.source === 'google-photos' && photoStates.get(p.id)?.status === 'done'
-  )
+
+  // Only relevant once the upload has settled — skip the extra passes over
+  // `photos` while idle or uploading, where neither value is displayed.
+  const hasDoneGooglePhotosOrigin =
+    uploadState === 'done' &&
+    photos.some((p) => p.source === 'google-photos' && photoStates.get(p.id)?.status === 'done')
   // If no photo ever progressed past 'pending', the failure happened before any
   // per-photo attempt (e.g. album creation failed) — there's nothing to retry
   // per-photo, so offer a full restart instead of "Retry failed".
-  const noPhotoStarted = photos.every((p) => (photoStates.get(p.id)?.status ?? 'pending') === 'pending')
+  const noPhotoStarted =
+    uploadState === 'error' &&
+    photos.every((p) => (photoStates.get(p.id)?.status ?? 'pending') === 'pending')
+
+  const cleanupReminder = hasDoneGooglePhotosOrigin && (
+    <p className="mt-1">
+      If these photos came from an existing Google Photos album, you can now delete it manually.
+    </p>
+  )
 
   return (
     <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 mb-6">
@@ -109,21 +120,13 @@ export default function GooglePhotosUploadPanel({
           {albumName.trim()
             ? `${doneCount} photos uploaded to album '${albumName.trim()}'`
             : `${doneCount} photos uploaded to Google Photos`}
-          {hasDoneGooglePhotosOrigin && (
-            <p className="mt-1">
-              If these photos came from an existing Google Photos album, you can now delete it manually.
-            </p>
-          )}
+          {cleanupReminder}
         </div>
       )}
       {uploadState === 'done' && hasFailures && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-300 rounded-lg px-3 py-2 text-sm mb-3">
           {doneCount} of {photos.length} photos uploaded — see failures below
-          {hasDoneGooglePhotosOrigin && (
-            <p className="mt-1">
-              If these photos came from an existing Google Photos album, you can now delete it manually.
-            </p>
-          )}
+          {cleanupReminder}
         </div>
       )}
 

@@ -52,6 +52,13 @@ function slotTimestamp(photos: PhotoEntry[], toIndex: number): PhotoEntry[] {
   return photos.map((p, i) => (i === toIndex ? { ...p, capturedAt: newTimestamp } : p))
 }
 
+/** Append `entries` after `prev`, assigning `uploadIndex` values that continue from `prev`'s current maximum. */
+function appendWithIndex(prev: PhotoEntry[], entries: PhotoEntry[]): PhotoEntry[] {
+  const maxIndex = prev.reduce((max, p) => Math.max(max, p.uploadIndex), -1)
+  const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
+  return sortPhotos([...prev, ...withIndex])
+}
+
 export function usePhotos() {
   const [photos, setPhotos] = useState<PhotoEntry[]>([])
   const [hasEdits, setHasEdits] = useState(false)
@@ -72,11 +79,7 @@ export function usePhotos() {
       })
     }
 
-    setPhotos((prev) => {
-      const maxIndex = prev.length > 0 ? Math.max(...prev.map((p) => p.uploadIndex)) : -1
-      const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
-      return sortPhotos([...prev, ...withIndex])
-    })
+    setPhotos((prev) => appendWithIndex(prev, entries))
     // processFiles appends to the existing batch — does NOT set hasEdits
   }, [])
 
@@ -158,11 +161,7 @@ export function usePhotos() {
         uploadIndex: 0, // placeholder; corrected in setPhotos below
       })
     }
-    setPhotos((prev) => {
-      const maxIndex = prev.length > 0 ? Math.max(...prev.map((p) => p.uploadIndex)) : -1
-      const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
-      return sortPhotos([...prev, ...withIndex])
-    })
+    setPhotos((prev) => appendWithIndex(prev, entries))
     // addPhotos is not a user edit — does NOT set hasEdits
   }, [])
 
