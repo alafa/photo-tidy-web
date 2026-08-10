@@ -289,6 +289,81 @@ describe('usePhotos — reorderPhotos', () => {
   })
 })
 
+describe('usePhotos — removePhotos', () => {
+  it('removes the selected photos and keeps the rest, preserving order', async () => {
+    const files = [
+      makeFile('a.jpg'),
+      makeFile('b.jpg'),
+      makeFile('c.jpg'),
+      makeFile('d.jpg'),
+      makeFile('e.jpg'),
+    ]
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      const i = files.indexOf(file)
+      return new Date(2025, 0, i + 1)
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+    expect(result.current.photos).toHaveLength(5)
+
+    const idsToRemove = [
+      result.current.photos[1].id, // b.jpg
+      result.current.photos[3].id, // d.jpg
+    ]
+
+    act(() => result.current.removePhotos(idsToRemove))
+
+    expect(result.current.photos).toHaveLength(3)
+    expect(result.current.photos.map((p) => p.filename)).toEqual([
+      'a.jpg',
+      'c.jpg',
+      'e.jpg',
+    ])
+  })
+
+  it('empties the list entirely when every photo is removed, with no error', async () => {
+    const files = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+
+    const allIds = result.current.photos.map((p) => p.id)
+
+    expect(() => {
+      act(() => result.current.removePhotos(allIds))
+    }).not.toThrow()
+
+    expect(result.current.photos).toEqual([])
+  })
+
+  it('sets hasEdits to true after removing photos', async () => {
+    const [a] = [makeFile('a.jpg')]
+    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a])))
+    expect(result.current.hasEdits).toBe(false)
+
+    act(() => result.current.removePhotos([result.current.photos[0].id]))
+
+    expect(result.current.hasEdits).toBe(true)
+  })
+
+  it('is a no-op for ids that are not present in the current list', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+
+    act(() => result.current.removePhotos(['nonexistent-id']))
+
+    expect(result.current.photos).toHaveLength(2)
+  })
+})
+
 // --- useObjectUrls ---
 
 describe('useObjectUrls', () => {

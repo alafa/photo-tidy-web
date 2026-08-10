@@ -33,6 +33,7 @@ export default function PhotoUploadPage() {
     updatePhotoTimestamp,
     batchUpdateNames,
     batchSetTimestamps,
+    removePhotos,
   } = usePhotos()
   const getObjectUrl = useObjectUrls()
   const { isSignedIn, accountEmail, isExpiringSoon, accessToken, signIn, signOut } = useGoogleAuth()
@@ -122,6 +123,11 @@ export default function PhotoUploadPage() {
 
   function handleBatchSetTimestamp(anchor: Date) {
     batchSetTimestamps(Array.from(selectedIds), anchor)
+  }
+
+  function handleBatchDelete() {
+    removePhotos(Array.from(selectedIds))
+    clearSelection()
   }
 
   function handleImportClick() {
@@ -272,6 +278,7 @@ export default function PhotoUploadPage() {
                 selectedCount={selectedIds.size}
                 onBatchRename={handleBatchRename}
                 onBatchSetTimestamp={handleBatchSetTimestamp}
+                onBatchDelete={handleBatchDelete}
                 onClearSelection={clearSelection}
               />
             )}

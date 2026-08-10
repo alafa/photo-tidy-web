@@ -17,6 +17,9 @@ vi.mock('@/hooks/useGoogleAuth', () => ({
 vi.mock('@/hooks/useGooglePhotosPicker', () => ({
   useGooglePhotosPicker: vi.fn(),
 }))
+vi.mock('@/hooks/useGooglePhotosUpload', () => ({
+  useGooglePhotosUpload: vi.fn(),
+}))
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
@@ -62,10 +65,12 @@ import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
+import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 const mockUsePhotos = vi.mocked(usePhotos)
 const mockUseObjectUrls = vi.mocked(useObjectUrls)
 const mockUseGoogleAuth = vi.mocked(useGoogleAuth)
 const mockUseGooglePhotosPicker = vi.mocked(useGooglePhotosPicker)
+const mockUseGooglePhotosUpload = vi.mocked(useGooglePhotosUpload)
 
 function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
@@ -90,6 +95,13 @@ beforeEach(() => {
     error: null,
     startImport: vi.fn(),
     cancelImport: vi.fn(),
+  })
+  mockUseGooglePhotosUpload.mockReturnValue({
+    uploadState: 'idle',
+    photoStates: new Map(),
+    startUpload: vi.fn(),
+    retryFailed: vi.fn(),
+    reset: vi.fn(),
   })
 })
 
@@ -459,5 +471,153 @@ describe('PhotoUploadPage — Google Photos batch naming', () => {
 
     fireEvent.change(albumInput, { target: { value: '' } })
     expect(uploadButton.disabled).toBe(true)
+  })
+})
+
+describe('PhotoUploadPage — batch delete', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[], removePhotos = vi.fn()) {
+    return {
+      photos,
+      hasEdits: false,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos,
+    }
+  }
+
+  /**
+   * Wires mockUsePhotos to a mutable photo list: removePhotos filters the
+   * list in place, so the *next* render (triggered by any state change,
+   * e.g. clearSelection) reflects the deletion — mirroring how the real
+   * usePhotos hook re-renders after setPhotos.
+   */
+  function makeStatefulPhotosMock(initialPhotos: ReturnType<typeof makeEntry>[]) {
+    let current = initialPhotos
+    const removePhotosMock = vi.fn((ids: string[]) => {
+      const idSet = new Set(ids)
+      current = current.filter((p) => !idSet.has(p.id))
+    })
+    mockUsePhotos.mockImplementation(() => basePhotosReturn(current, removePhotosMock))
+    return removePhotosMock
+  }
+
+  function signIn() {
+    mockUseGoogleAuth.mockReturnValue({
+      accessToken: 'token-123',
+      expiresAt: Date.now() + 60_000,
+      accountEmail: 'user@example.com',
+      isSignedIn: true,
+      isExpiringSoon: false,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+    })
+  }
+
+  it('selecting 2 of 5 photos and clicking Delete selected shrinks the list to 3, removing the deleted photos', () => {
+    const photos = [
+      makeEntry('a.jpg', 0),
+      makeEntry('b.jpg', 1),
+      makeEntry('c.jpg', 2),
+      makeEntry('d.jpg', 3),
+      makeEntry('e.jpg', 4),
+    ]
+    const removePhotosMock = makeStatefulPhotosMock(photos)
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    fireEvent.click(screen.getByAltText('d.jpg'))
+
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+    expect(new Set(removedIds)).toEqual(new Set([photos[1].id, photos[3].id]))
+
+    expect(screen.queryAllByRole('img')).toHaveLength(3)
+    expect(screen.queryByAltText('b.jpg')).toBeNull()
+    expect(screen.queryByAltText('d.jpg')).toBeNull()
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('c.jpg')).toBeDefined()
+    expect(screen.getByAltText('e.jpg')).toBeDefined()
+  })
+
+  it('deleting every selected photo empties the list with no error and clears the selection', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    const removePhotosMock = makeStatefulPhotosMock(photos)
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    expect(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+    }).not.toThrow()
+
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+    expect(new Set(removedIds)).toEqual(new Set([photos[0].id, photos[1].id]))
+
+    // Selection cleared and grid/batch UI gone since photos is now empty
+    expect(screen.queryAllByRole('img')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Select all' })).toBeNull()
+    expect(screen.getByText(/click to select photos/i)).toBeDefined()
+  })
+
+  it('integration: after deleting a photo, the next startUpload call no longer includes that photo id', () => {
+    signIn()
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    const startUploadMock = vi.fn()
+
+    mockUseGooglePhotosUpload.mockReturnValue({
+      uploadState: 'idle',
+      photoStates: new Map(),
+      startUpload: startUploadMock,
+      retryFailed: vi.fn(),
+      reset: vi.fn(),
+    })
+
+    const removePhotosMock = makeStatefulPhotosMock(photos)
+
+    render(<PhotoUploadPage />)
+
+    // Enable the upload button
+    fireEvent.change(screen.getByPlaceholderText('Album name'), {
+      target: { value: 'Trip Photos' },
+    })
+
+    // Select and delete a.jpg
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+    expect(removePhotosMock).toHaveBeenCalledWith([photos[0].id])
+
+    // Now trigger the upload — should only see the remaining photo
+    fireEvent.click(screen.getByRole('button', { name: 'Upload to Google Photos' }))
+
+    expect(startUploadMock).toHaveBeenCalledOnce()
+    const uploadedPhotos = startUploadMock.mock.calls[0][0] as typeof photos
+    const uploadedIds = uploadedPhotos.map((p) => p.id)
+    expect(uploadedIds).not.toContain(photos[0].id)
+    expect(uploadedIds).toEqual([photos[1].id])
   })
 })

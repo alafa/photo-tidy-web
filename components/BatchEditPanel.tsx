@@ -6,6 +6,7 @@ type Props = {
   selectedCount: number
   onBatchRename: (baseName: string) => void
   onBatchSetTimestamp: (anchor: Date) => void
+  onBatchDelete: () => void
   onClearSelection: () => void
 }
 
@@ -20,6 +21,7 @@ export default function BatchEditPanel({
   selectedCount,
   onBatchRename,
   onBatchSetTimestamp,
+  onBatchDelete,
   onClearSelection,
 }: Props) {
   const [baseName, setBaseName] = useState('')
@@ -42,6 +44,10 @@ export default function BatchEditPanel({
     setTimeout(() => setTsApplied(false), 1500)
   }
 
+  function handleDelete() {
+    onBatchDelete()
+  }
+
   const padLen = String(selectedCount).length
   const exampleSuffix = `${'1'.padStart(padLen, '0')}`
 
@@ -59,7 +65,7 @@ export default function BatchEditPanel({
         </button>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* Batch rename */}
         <div className="flex flex-col gap-2">
           <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase tracking-wide">
@@ -111,6 +117,22 @@ export default function BatchEditPanel({
           </div>
           <p className="text-xs text-zinc-400 dark:text-zinc-500">
             Selected photos get times 1 second apart from this start, in display order.
+          </p>
+        </div>
+
+        {/* Batch delete */}
+        <div className="flex flex-col gap-2">
+          <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase tracking-wide">
+            Delete selected
+          </label>
+          <button
+            onClick={handleDelete}
+            className="px-3 py-1.5 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors dark:bg-red-500 dark:hover:bg-red-600"
+          >
+            Delete selected
+          </button>
+          <p className="text-xs text-zinc-400 dark:text-zinc-500">
+            Removes {selectedCount} photo{selectedCount !== 1 ? 's' : ''} from this batch. This does not affect Google Photos.
           </p>
         </div>
       </div>

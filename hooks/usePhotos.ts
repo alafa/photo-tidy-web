@@ -127,6 +127,12 @@ export function usePhotos() {
     setHasEdits(true)
   }, [])
 
+  const removePhotos = useCallback((ids: string[]) => {
+    const idSet = new Set(ids)
+    setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)))
+    setHasEdits(true)
+  }, [])
+
   const addPhotos = useCallback(async (
     files: File[],
     source: 'google-photos',
@@ -166,5 +172,6 @@ export function usePhotos() {
     updatePhotoTimestamp,
     batchUpdateNames,
     batchSetTimestamps,
+    removePhotos,
   }
 }
