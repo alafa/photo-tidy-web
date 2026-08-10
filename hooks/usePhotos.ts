@@ -52,11 +52,19 @@ function slotTimestamp(photos: PhotoEntry[], toIndex: number): PhotoEntry[] {
   return photos.map((p, i) => (i === toIndex ? { ...p, capturedAt: newTimestamp } : p))
 }
 
-/** Append `entries` after `prev`, assigning `uploadIndex` values that continue from `prev`'s current maximum. */
+/**
+ * Append `entries` after `prev`. `prev`'s `uploadIndex` values are renumbered
+ * to match its current array position first — `photos` is always kept in
+ * display order, but a photo's `uploadIndex` otherwise still holds whatever
+ * value it was assigned when first added, which can drift from its visual
+ * position (e.g. after a drag-reorder among undated photos). Renumbering
+ * keeps the null-`capturedAt` sort fallback (see `sortPhotos`) consistent
+ * with what's on screen before the new entries continue the count.
+ */
 function appendWithIndex(prev: PhotoEntry[], entries: PhotoEntry[]): PhotoEntry[] {
-  const maxIndex = prev.reduce((max, p) => Math.max(max, p.uploadIndex), -1)
-  const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: maxIndex + 1 + i }))
-  return sortPhotos([...prev, ...withIndex])
+  const renumberedPrev = prev.map((p, i) => ({ ...p, uploadIndex: i }))
+  const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: renumberedPrev.length + i }))
+  return sortPhotos([...renumberedPrev, ...withIndex])
 }
 
 export function usePhotos() {

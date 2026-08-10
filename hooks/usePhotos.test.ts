@@ -353,6 +353,33 @@ describe('usePhotos — reorderPhotos', () => {
     expect(result.current.photos).toHaveLength(4)
     expect(result.current.photos[0].filename).toBe('a.jpg')
   })
+
+  it('processFiles after reordering undated photos keeps the dragged order (uploadIndex tiebreak follows array position)', async () => {
+    // All three photos have no EXIF date, so sortPhotos falls back to
+    // uploadIndex to order them. Dragging among undated neighbours leaves
+    // capturedAt untouched (slotTimestamp's all-null branch), so the drag
+    // is only reflected in array position — appendWithIndex must renumber
+    // that position into uploadIndex or the append's sortPhotos call would
+    // silently snap back to original upload order.
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    mockGetPhotoDate.mockResolvedValue(null)
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b, c])))
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'b.jpg', 'c.jpg'])
+
+    // drag 'c' to the front
+    act(() => result.current.reorderPhotos(2, 0))
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['c.jpg', 'a.jpg', 'b.jpg'])
+
+    const [d] = [makeFile('d.jpg')]
+    await act(() => result.current.processFiles(makeFileList([d])))
+    expect(result.current.photos.map((p) => p.filename)).toEqual([
+      'c.jpg',
+      'a.jpg',
+      'b.jpg',
+      'd.jpg',
+    ])
+  })
 })
 
 describe('usePhotos — removePhotos', () => {
