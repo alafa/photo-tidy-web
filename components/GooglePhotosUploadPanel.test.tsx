@@ -258,6 +258,46 @@ describe('GooglePhotosUploadPanel', () => {
     expect(button.disabled).toBe(true)
   })
 
+  describe('re-click after a completed run', () => {
+    it('disables the upload button when uploadState is done and every photo already has a status', () => {
+      const photos = [makePhoto(), makePhoto()]
+      const photoStates = makePhotoStates(photos, {
+        [photos[0].id]: 'done',
+        [photos[1].id]: 'done',
+      })
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      const button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+    })
+
+    it('re-enables the upload button when uploadState is done but a new, never-attempted photo was added', () => {
+      const photos = [makePhoto(), makePhoto()]
+      // Only the first photo has a status — the second is new since the last run.
+      const photoStates = makePhotoStates([photos[0]], { [photos[0].id]: 'done' })
+
+      render(
+        <GooglePhotosUploadPanel
+          {...defaultProps}
+          photos={photos}
+          uploadState="done"
+          photoStates={photoStates}
+        />
+      )
+
+      const button = screen.getByRole('button', { name: 'Upload to Google Photos' }) as HTMLButtonElement
+      expect(button.disabled).toBe(false)
+    })
+  })
+
   it('shows per-photo progress list when uploadState is not idle', () => {
     const photos = [
       makePhoto({ filename: 'photo1.jpg' }),

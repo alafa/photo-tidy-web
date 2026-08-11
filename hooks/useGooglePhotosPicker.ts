@@ -102,8 +102,12 @@ export function useGooglePhotosPicker(opts: {
   const [error, setError] = useState<string | null>(null)
 
   const sessionIdRef = useRef<string | null>(null)
-  const cancelledRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
+  // Identifies which startImport() call is still "current". cancelImport()
+  // and a fresh startImport() both bump this — a suspended older call can
+  // then tell it no longer owns the shared refs/state instead of resuming
+  // as if it were still active.
+  const importGenerationRef = useRef(0)
 
   // Visibility-change optimization: when returning from Google Photos tab, kick a poll
   const triggerImmediatePollRef = useRef<(() => void) | null>(null)
@@ -124,7 +128,7 @@ export function useGooglePhotosPicker(opts: {
   }, [])
 
   const cancelImport = useCallback(() => {
-    cancelledRef.current = true
+    importGenerationRef.current += 1
     abortControllerRef.current?.abort()
     if (sessionIdRef.current) {
       cleanupSession(sessionIdRef.current)
@@ -137,8 +141,10 @@ export function useGooglePhotosPicker(opts: {
   const startImport = useCallback(async () => {
     if (!accessToken || status !== 'idle') return
 
-    cancelledRef.current = false
-    abortControllerRef.current = new AbortController()
+    const myGeneration = ++importGenerationRef.current
+    const isCurrent = () => importGenerationRef.current === myGeneration
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     setStatus('session-open')
     setError(null)
@@ -151,10 +157,10 @@ export function useGooglePhotosPicker(opts: {
         res = await fetch('/api/google-photos/sessions', {
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}` },
-          signal: abortControllerRef.current.signal,
+          signal: controller.signal,
         })
       } catch {
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError('Failed to create import session: unable to reach the server')
         }
@@ -163,7 +169,7 @@ export function useGooglePhotosPicker(opts: {
 
       if (!res.ok) {
         const data = await parseErrorBody(res)
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError(describeApiError('Failed to create import session', res, data))
         }
@@ -173,7 +179,7 @@ export function useGooglePhotosPicker(opts: {
       try {
         session = await res.json() as PickerSession
       } catch {
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError('Failed to create import session: server returned an invalid response')
         }
@@ -181,6 +187,7 @@ export function useGooglePhotosPicker(opts: {
       }
     }
 
+    if (!isCurrent()) return
     sessionIdRef.current = session.id
 
     // Step 2: Open Google Photos picker
@@ -211,15 +218,15 @@ export function useGooglePhotosPicker(opts: {
     }
 
     let mediaItemsSet = false
-    while (!cancelledRef.current) {
+    while (isCurrent()) {
       await waitWithImmediateOption(pollIntervalMs)
 
-      if (cancelledRef.current) break
+      if (!isCurrent()) break
 
       try {
         const res = await fetch(`/api/google-photos/sessions/${session.id}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
-          signal: abortControllerRef.current?.signal,
+          signal: controller.signal,
         })
         if (!res.ok) throw new Error(`Poll failed: ${res.status}`)
         const data = await res.json() as PickerSession
@@ -228,24 +235,26 @@ export function useGooglePhotosPicker(opts: {
           break
         }
       } catch {
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           // network hiccup during poll — keep trying
         }
       }
 
       if (Date.now() - startTime > timeoutSec * 1000) {
-        setStatus('error')
-        setError('Import timed out. Please try again.')
+        if (isCurrent()) {
+          setStatus('error')
+          setError('Import timed out. Please try again.')
+          sessionIdRef.current = null
+          triggerImmediatePollRef.current = null
+        }
         cleanupSession(session.id)
-        sessionIdRef.current = null
-        triggerImmediatePollRef.current = null
         return
       }
     }
 
-    triggerImmediatePollRef.current = null
+    if (isCurrent()) triggerImmediatePollRef.current = null
 
-    if (cancelledRef.current || !mediaItemsSet) return
+    if (!isCurrent() || !mediaItemsSet) return
 
     // Step 4: Fetch media items
     let mediaItemsResponse: MediaItemsResponse
@@ -254,43 +263,43 @@ export function useGooglePhotosPicker(opts: {
       try {
         res = await fetch(`/api/google-photos/sessions/${session.id}?items=true`, {
           headers: { Authorization: `Bearer ${accessToken}` },
-          signal: abortControllerRef.current?.signal,
+          signal: controller.signal,
         })
       } catch {
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError('Failed to fetch selected photos: unable to reach the server')
-          cleanupSession(session.id)
           sessionIdRef.current = null
         }
+        cleanupSession(session.id)
         return
       }
 
       if (!res.ok) {
         const data = await parseErrorBody(res)
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError(describeApiError('Failed to fetch selected photos', res, data))
-          cleanupSession(session.id)
           sessionIdRef.current = null
         }
+        cleanupSession(session.id)
         return
       }
 
       try {
         mediaItemsResponse = await res.json() as MediaItemsResponse
       } catch {
-        if (!cancelledRef.current) {
+        if (isCurrent()) {
           setStatus('error')
           setError('Failed to fetch selected photos: server returned an invalid response')
-          cleanupSession(session.id)
           sessionIdRef.current = null
         }
+        cleanupSession(session.id)
         return
       }
     }
 
-    if (cancelledRef.current) return
+    if (!isCurrent()) return
 
     const items = mediaItemsResponse.mediaItems ?? []
     if (items.length === 0) {
@@ -304,13 +313,9 @@ export function useGooglePhotosPicker(opts: {
     // Step 5: Download
     setStatus('downloading')
 
-    const downloaded = await downloadBatch(
-      items,
-      accessToken,
-      abortControllerRef.current?.signal ?? new AbortController().signal,
-    )
+    const downloaded = await downloadBatch(items, accessToken, controller.signal)
 
-    if (cancelledRef.current) return
+    if (!isCurrent()) return
 
     if (downloaded.length > 0) {
       const files = downloaded.map((d) => d.file)
@@ -318,7 +323,7 @@ export function useGooglePhotosPicker(opts: {
       await addPhotos(files, 'google-photos', capturedAts)
     }
 
-    if (cancelledRef.current) return
+    if (!isCurrent()) return
 
     // Step 6: Cleanup
     cleanupSession(session.id)
@@ -327,6 +332,14 @@ export function useGooglePhotosPicker(opts: {
     setStatus('idle')
     setError(null)
   }, [accessToken, status, addPhotos, cleanupSession])
+
+  // Stop polling/fetching and release the session if the component unmounts
+  // mid-import — otherwise the loop keeps firing requests for up to the full
+  // timeout window and can still call addPhotos() after this component
+  // (and whatever renders its results) is gone.
+  useEffect(() => {
+    return () => cancelImport()
+  }, [cancelImport])
 
   return {
     status,

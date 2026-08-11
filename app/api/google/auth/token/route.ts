@@ -50,11 +50,16 @@ export async function POST(request: Request): Promise<NextResponse> {
     grant_type: 'authorization_code',
   })
 
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  })
+  let tokenResponse: Response
+  try {
+    tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    })
+  } catch {
+    return NextResponse.json({ error: 'Failed to reach Google OAuth' }, { status: 502 })
+  }
 
   if (!tokenResponse.ok) {
     const errorText = await tokenResponse.text()
@@ -64,7 +69,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     )
   }
 
-  const tokenData: GoogleTokenResponse = await tokenResponse.json()
+  let tokenData: GoogleTokenResponse
+  try {
+    tokenData = await tokenResponse.json()
+  } catch {
+    return NextResponse.json({ error: 'Token exchange returned an invalid response' }, { status: 502 })
+  }
 
   return NextResponse.json({
     accessToken: tokenData.access_token,

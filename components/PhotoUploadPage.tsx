@@ -34,7 +34,7 @@ export default function PhotoUploadPage() {
     batchSetTimestamps,
     removePhotos,
   } = usePhotos()
-  const getObjectUrl = useObjectUrls()
+  const { getObjectUrl, releaseObjectUrl } = useObjectUrls()
   const { isSignedIn, accountEmail, isExpiringSoon, accessToken, signIn, signOut } = useGoogleAuth()
   const {
     status: pickerStatus,
@@ -118,6 +118,9 @@ export default function PhotoUploadPage() {
   }
 
   function handleBatchDelete() {
+    for (const photo of photos) {
+      if (selectedIds.has(photo.id)) releaseObjectUrl(photo.file)
+    }
     removePhotos(Array.from(selectedIds))
     clearSelection()
   }

@@ -26,6 +26,11 @@ export default function GooglePhotosUploadPanel({
   const doneCount = photos.filter((p) => photoStates.get(p.id)?.status === 'done').length
   const hasFailures = photos.some((p) => photoStates.get(p.id)?.status === 'failed')
   const isNameEmpty = albumName.trim() === ''
+  // Once a run has settled, re-clicking Upload with the exact same photo set
+  // would recreate the album and re-upload everything already done. Allow it
+  // again only once a genuinely new (never-attempted) photo appears — e.g.
+  // the user imported or added more files since the last run.
+  const hasUnprocessedPhotos = photos.some((p) => !photoStates.has(p.id))
 
   // Only relevant once the upload has settled — skip the extra passes over
   // `photos` while idle or uploading, where neither value is displayed.
@@ -68,7 +73,11 @@ export default function GooglePhotosUploadPanel({
       <div className="mb-3">
         <button
           onClick={onStartUpload}
-          disabled={uploadState === 'uploading' || isNameEmpty}
+          disabled={
+            uploadState === 'uploading' ||
+            isNameEmpty ||
+            (uploadState === 'done' && !hasUnprocessedPhotos)
+          }
           className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Upload to Google Photos

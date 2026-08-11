@@ -80,7 +80,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
-  mockUseObjectUrls.mockReturnValue((file: File) => `blob:${file.name}`)
+  mockUseObjectUrls.mockReturnValue({
+    getObjectUrl: (file: File) => `blob:${file.name}`,
+    releaseObjectUrl: vi.fn(),
+  })
   mockUseGoogleAuth.mockReturnValue({
     accessToken: null,
     expiresAt: null,

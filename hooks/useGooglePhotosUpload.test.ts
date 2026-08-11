@@ -248,12 +248,13 @@ describe('useGooglePhotosUpload — edge cases', () => {
   it('noop when startUpload called while already uploading', async () => {
     const photo1 = makePhoto({ id: 'p1' })
 
-    // Make the upload hang until we resolve it
-    let resolveUpload!: (value: Response) => void
-    const uploadPromise = new Promise<Response>((res) => {
-      resolveUpload = res
+    // Make the album-creation fetch hang so uploadState stays 'uploading'
+    // for the whole first call.
+    let resolveAlbum!: (value: Response) => void
+    const hangingAlbum = new Promise<Response>((res) => {
+      resolveAlbum = res
     })
-    const mockFetch = vi.fn().mockReturnValue(uploadPromise)
+    const mockFetch = vi.fn().mockReturnValueOnce(hangingAlbum)
     vi.stubGlobal('fetch', mockFetch)
 
     const { result } = renderHook(() => useGooglePhotosUpload())
@@ -262,20 +263,33 @@ describe('useGooglePhotosUpload — edge cases', () => {
     act(() => {
       result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN)
     })
+    expect(result.current.uploadState).toBe('uploading')
 
-    // Attempt second startUpload while first is still in progress
-    // Since uploadState is 'uploading', this should be a noop
-    // We need to check the state is 'uploading' at this point
-    // and the second call won't add additional fetch calls
+    // A second concurrent startUpload call while the first is still in
+    // flight must be a noop — no additional fetch calls.
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+    expect(mockFetch.mock.calls.length).toBe(1)
 
-    // Resolve the upload
-    resolveUpload({ ok: true, text: async () => 'token-x' } as unknown as Response)
-    // Also need batchCreate response
-    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+    // Let the first call's album creation resolve and finish out normally.
+    resolveAlbum({ ok: true, json: async () => ({ id: 'album-1' }) } as unknown as Response)
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'photo.jpg' } },
+        ],
+      }),
+    })
 
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50))
     })
+
+    expect(result.current.uploadState).toBe('done')
+    expect(result.current.photoStates.get('p1')?.status).toBe('done')
+    // Exactly one upload cycle happened: album + upload + batchCreate = 3 calls.
+    expect(mockFetch.mock.calls.length).toBe(3)
   })
 
   it('noop when retryFailed is called while an upload is already in progress', async () => {

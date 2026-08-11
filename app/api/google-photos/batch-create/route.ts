@@ -1,24 +1,27 @@
 import { NextResponse } from 'next/server'
-import { extractBearer } from '@/lib/google-photos-server'
+import { extractBearer, upstreamErrorBody } from '@/lib/google-photos-server'
 import type { UploadToken, NewMediaItem } from '@/lib/google-photos-types'
 
 export async function POST(request: Request): Promise<NextResponse> {
   const authHeader = extractBearer(request)
   if (!authHeader) {
-    return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 })
+    return NextResponse.json(
+      upstreamErrorBody('Missing or invalid Authorization header', 'UNAUTHENTICATED'),
+      { status: 401 },
+    )
   }
 
   let body: { uploadTokens?: UploadToken[]; albumId?: string }
   try {
     body = await request.json()
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+    return NextResponse.json(upstreamErrorBody('Invalid JSON body', 'INVALID_REQUEST'), { status: 400 })
   }
 
   const { uploadTokens, albumId } = body
   if (!uploadTokens || uploadTokens.length === 0) {
     return NextResponse.json(
-      { error: 'Missing or empty required field: uploadTokens' },
+      upstreamErrorBody('Missing or empty required field: uploadTokens', 'INVALID_REQUEST'),
       { status: 400 },
     )
   }
@@ -39,16 +42,32 @@ export async function POST(request: Request): Promise<NextResponse> {
     requestBody.albumId = albumId
   }
 
-  const upstream = await fetch('https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate', {
-    method: 'POST',
-    headers: {
-      Authorization: authHeader,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  })
+  let upstream: Response
+  try {
+    upstream = await fetch('https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate', {
+      method: 'POST',
+      headers: {
+        Authorization: authHeader,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    })
+  } catch {
+    return NextResponse.json(
+      upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
+      { status: 502 },
+    )
+  }
 
-  const data = await upstream.json()
+  let data: unknown
+  try {
+    data = await upstream.json()
+  } catch {
+    return NextResponse.json(
+      upstreamErrorBody('Upstream returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'),
+      { status: upstream.ok ? 502 : upstream.status },
+    )
+  }
 
   if (!upstream.ok) {
     return NextResponse.json(data, { status: upstream.status })

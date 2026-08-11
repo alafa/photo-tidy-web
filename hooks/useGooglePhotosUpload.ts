@@ -29,6 +29,28 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks
 }
 
+// Raw-byte uploads to Google are independent per photo (batch-create matches
+// results back by token, not position), so they don't need to run strictly
+// sequentially. Bound the concurrency instead of firing all of them at once,
+// mirroring downloadBatch's DOWNLOAD_CONCURRENCY on the symmetric picker path.
+const UPLOAD_CONCURRENCY = 5
+
+async function uploadWithConcurrency<T>(
+  photos: PhotoEntry[],
+  accessToken: string,
+  uploadFn: (photo: PhotoEntry, accessToken: string) => Promise<T | null>,
+): Promise<T[]> {
+  const tokens: T[] = []
+  for (let i = 0; i < photos.length; i += UPLOAD_CONCURRENCY) {
+    const batch = photos.slice(i, i + UPLOAD_CONCURRENCY)
+    const results = await Promise.all(batch.map((photo) => uploadFn(photo, accessToken)))
+    for (const result of results) {
+      if (result) tokens.push(result)
+    }
+  }
+  return tokens
+}
+
 // Google's proto-derived status convention (google.rpc.Status): `code` is
 // only populated for non-OK outcomes. Its absence, or an explicit 0, means
 // the individual media item was created successfully.
@@ -66,8 +88,13 @@ export function useGooglePhotosUpload() {
         })
 
         if (!response.ok) {
-          const errorText = await response.text().catch(() => `HTTP ${response.status}`)
-          throw new Error(errorText || `HTTP ${response.status}`)
+          const errorMessage = await response
+            .json()
+            .then((body: { error?: { message?: string } | string }) =>
+              typeof body.error === 'string' ? body.error : body.error?.message
+            )
+            .catch(() => undefined)
+          throw new Error(errorMessage || `HTTP ${response.status}`)
         }
 
         const uploadToken = await response.text()
@@ -224,19 +251,19 @@ export function useGooglePhotosUpload() {
         return
       }
 
-      // Upload each photo sequentially
-      const tokens: PendingUploadToken[] = []
-      for (const photo of photos) {
-        const result = await uploadSinglePhoto(photo, accessToken)
-        if (result) {
-          tokens.push(result)
-        }
-      }
+      // Capture the album id for this call locally — albumIdRef.current can
+      // be cleared by a concurrent reset() (e.g. the user adding more local
+      // files while this upload is still running), and re-reading the ref
+      // after the upload loop would then submit batchCreate with no album,
+      // silently orphaning these photos outside any album.
+      const albumId = albumIdRef.current
+
+      const tokens = await uploadWithConcurrency(photos, accessToken, uploadSinglePhoto)
 
       // Batch create
       if (tokens.length > 0) {
         try {
-          await batchCreate(tokens, albumIdRef.current, accessToken)
+          await batchCreate(tokens, albumId, accessToken)
         } catch {
           setUploadState('error')
           return
@@ -263,20 +290,18 @@ export function useGooglePhotosUpload() {
 
       setUploadState('uploading')
 
+      // Capture locally for the same reason as startUpload — a concurrent
+      // reset() must not be able to null out the album this retry commits to.
+      const albumId = albumIdRef.current
+
       // Re-upload failed photos
-      const newTokens: PendingUploadToken[] = []
-      for (const photo of failedPhotos) {
-        const result = await uploadSinglePhoto(photo, accessToken)
-        if (result) {
-          newTokens.push(result)
-        }
-      }
+      const newTokens = await uploadWithConcurrency(failedPhotos, accessToken, uploadSinglePhoto)
 
       // Only batch-create the newly retried tokens — previously successful tokens
       // were already committed in the initial startUpload call
       if (newTokens.length > 0) {
         try {
-          await batchCreate(newTokens, albumIdRef.current, accessToken)
+          await batchCreate(newTokens, albumId, accessToken)
         } catch {
           setUploadState('error')
           return

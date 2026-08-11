@@ -53,23 +53,26 @@ function slotTimestamp(photos: PhotoEntry[], toIndex: number): PhotoEntry[] {
 }
 
 /**
- * Append `entries` after `prev`. `prev`'s `uploadIndex` values are renumbered
- * to match its current array position first — `photos` is always kept in
- * display order, but a photo's `uploadIndex` otherwise still holds whatever
- * value it was assigned when first added, which can drift from its visual
- * position (e.g. after a drag-reorder among undated photos). Renumbering
- * keeps the null-`capturedAt` sort fallback (see `sortPhotos`) consistent
- * with what's on screen before the new entries continue the count.
+ * Renumber `uploadIndex` to match current array position. `photos` is always
+ * kept in display order, but a photo's `uploadIndex` otherwise still holds
+ * whatever value it was assigned when first added, which can drift from its
+ * visual position (e.g. after a drag-reorder among undated photos).
+ * Renumbering keeps the null-`capturedAt` sort fallback (see `sortPhotos`)
+ * consistent with what's on screen before further mutation.
  */
+function renumberByPosition(photos: PhotoEntry[]): PhotoEntry[] {
+  return photos.map((p, i) => ({ ...p, uploadIndex: i }))
+}
+
+/** Append `entries` after `prev`, continuing the upload index from `prev`'s renumbered length. */
 function appendWithIndex(prev: PhotoEntry[], entries: PhotoEntry[]): PhotoEntry[] {
-  const renumberedPrev = prev.map((p, i) => ({ ...p, uploadIndex: i }))
+  const renumberedPrev = renumberByPosition(prev)
   const withIndex = entries.map((e, i) => ({ ...e, uploadIndex: renumberedPrev.length + i }))
   return sortPhotos([...renumberedPrev, ...withIndex])
 }
 
 export function usePhotos() {
   const [photos, setPhotos] = useState<PhotoEntry[]>([])
-  const [hasEdits, setHasEdits] = useState(false)
 
   const processFiles = useCallback(async (fileList: FileList | File[]) => {
     const entries: PhotoEntry[] = []
@@ -88,26 +91,22 @@ export function usePhotos() {
     }
 
     setPhotos((prev) => appendWithIndex(prev, entries))
-    // processFiles appends to the existing batch — does NOT set hasEdits
   }, [])
 
   const reorderPhotos = useCallback((from: number, to: number) => {
     setPhotos((prev) => slotTimestamp(arrayMove(prev, from, to), to))
-    // reorderPhotos does NOT set hasEdits — drag is not treated as a user edit
   }, [])
 
   const updatePhotoName = useCallback((id: string, newName: string) => {
     setPhotos((prev) =>
       prev.map((p) => (p.id === id ? { ...p, filename: newName } : p))
     )
-    setHasEdits(true)
   }, [])
 
   const updatePhotoTimestamp = useCallback((id: string, newDate: Date | null) => {
     setPhotos((prev) =>
-      sortPhotos(prev.map((p) => (p.id === id ? { ...p, capturedAt: newDate } : p)))
+      sortPhotos(renumberByPosition(prev).map((p) => (p.id === id ? { ...p, capturedAt: newDate } : p)))
     )
-    setHasEdits(true)
   }, [])
 
   const batchUpdateNames = useCallback((ids: string[], baseName: string) => {
@@ -124,14 +123,13 @@ export function usePhotos() {
         return { ...p, filename: newName }
       })
     )
-    setHasEdits(true)
   }, [])
 
   const batchSetTimestamps = useCallback((ids: string[], anchorDate: Date) => {
     const idSet = new Set(ids)
     let rank = 0
     setPhotos((prev) => {
-      const updated = prev.map((p) => {
+      const updated = renumberByPosition(prev).map((p) => {
         if (!idSet.has(p.id)) return p
         const newDate = new Date(anchorDate.getTime() + rank * 1000)
         rank++
@@ -139,13 +137,11 @@ export function usePhotos() {
       })
       return sortPhotos(updated)
     })
-    setHasEdits(true)
   }, [])
 
   const removePhotos = useCallback((ids: string[]) => {
     const idSet = new Set(ids)
     setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)))
-    setHasEdits(true)
   }, [])
 
   const addPhotos = useCallback(async (
@@ -170,12 +166,10 @@ export function usePhotos() {
       })
     }
     setPhotos((prev) => appendWithIndex(prev, entries))
-    // addPhotos is not a user edit — does NOT set hasEdits
   }, [])
 
   return {
     photos,
-    hasEdits,
     processFiles,
     addPhotos,
     reorderPhotos,

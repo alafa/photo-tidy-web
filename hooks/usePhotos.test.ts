@@ -174,20 +174,6 @@ describe('usePhotos — addPhotos', () => {
     expect(result.current.photos[0].source).toBe('google-photos')
   })
 
-  it('does not reset hasEdits when called after edits exist', async () => {
-    const [a] = [makeFile('a.jpg')]
-    const [b] = [makeFile('b.jpg')]
-    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
-
-    const { result } = renderHook(() => usePhotos())
-    await act(() => result.current.processFiles(makeFileList([a])))
-    act(() => result.current.updatePhotoName(result.current.photos[0].id, 'renamed.jpg'))
-    expect(result.current.hasEdits).toBe(true)
-
-    await act(() => result.current.addPhotos([b], 'google-photos'))
-
-    expect(result.current.hasEdits).toBe(true)
-  })
 })
 
 describe('usePhotos — processFiles append behavior', () => {
@@ -380,6 +366,44 @@ describe('usePhotos — reorderPhotos', () => {
       'd.jpg',
     ])
   })
+
+  it('updatePhotoTimestamp after reordering undated photos keeps the other undated photos in their dragged order', async () => {
+    // Same uploadIndex/sortPhotos hazard as the append case above, but for
+    // an inline timestamp edit: giving one undated photo a real date must
+    // not resort the rest back to stale upload-time uploadIndex order.
+    const [a, b, c, d] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg'), makeFile('d.jpg')]
+    mockGetPhotoDate.mockResolvedValue(null)
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b, c, d])))
+
+    // drag 'c' to the front
+    act(() => result.current.reorderPhotos(2, 0))
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['c.jpg', 'a.jpg', 'b.jpg', 'd.jpg'])
+
+    // Give 'd' a real timestamp — dated photos always sort before undated
+    // ones, so 'd' moves to the front; the still-undated photos must keep
+    // the dragged order (c, a, b), not revert to upload order (a, b, c).
+    const dId = result.current.photos.find((p) => p.filename === 'd.jpg')!.id
+    act(() => result.current.updatePhotoTimestamp(dId, new Date('2025-06-01T00:00:00Z')))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['d.jpg', 'c.jpg', 'a.jpg', 'b.jpg'])
+  })
+
+  it('batchSetTimestamps after reordering undated photos keeps the other undated photos in their dragged order', async () => {
+    const [a, b, c, d] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg'), makeFile('d.jpg')]
+    mockGetPhotoDate.mockResolvedValue(null)
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b, c, d])))
+
+    // drag 'c' to the front
+    act(() => result.current.reorderPhotos(2, 0))
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['c.jpg', 'a.jpg', 'b.jpg', 'd.jpg'])
+
+    const dId = result.current.photos.find((p) => p.filename === 'd.jpg')!.id
+    act(() => result.current.batchSetTimestamps([dId], new Date('2025-06-01T00:00:00Z')))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['d.jpg', 'c.jpg', 'a.jpg', 'b.jpg'])
+  })
 })
 
 describe('usePhotos — removePhotos', () => {
@@ -431,19 +455,6 @@ describe('usePhotos — removePhotos', () => {
     expect(result.current.photos).toEqual([])
   })
 
-  it('sets hasEdits to true after removing photos', async () => {
-    const [a] = [makeFile('a.jpg')]
-    mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
-
-    const { result } = renderHook(() => usePhotos())
-    await act(() => result.current.processFiles(makeFileList([a])))
-    expect(result.current.hasEdits).toBe(false)
-
-    act(() => result.current.removePhotos([result.current.photos[0].id]))
-
-    expect(result.current.hasEdits).toBe(true)
-  })
-
   it('is a no-op for ids that are not present in the current list', async () => {
     const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
     mockGetPhotoDate.mockResolvedValue(new Date('2025-01-01'))
@@ -464,7 +475,7 @@ describe('useObjectUrls', () => {
     const file = makeFile('photo.jpg')
     const { result } = renderHook(() => useObjectUrls())
 
-    const url = result.current(file)
+    const url = result.current.getObjectUrl(file)
 
     expect(url).toBe('blob:photo.jpg')
     expect(mockCreateObjectURL).toHaveBeenCalledWith(file)
@@ -474,8 +485,8 @@ describe('useObjectUrls', () => {
     const file = makeFile('photo.jpg')
     const { result } = renderHook(() => useObjectUrls())
 
-    const url1 = result.current(file)
-    const url2 = result.current(file)
+    const url1 = result.current.getObjectUrl(file)
+    const url2 = result.current.getObjectUrl(file)
 
     expect(url1).toBe(url2)
     expect(mockCreateObjectURL).toHaveBeenCalledTimes(1)
@@ -485,12 +496,39 @@ describe('useObjectUrls', () => {
     const [f1, f2] = [makeFile('a.jpg'), makeFile('b.jpg')]
     const { result, unmount } = renderHook(() => useObjectUrls())
 
-    result.current(f1)
-    result.current(f2)
+    result.current.getObjectUrl(f1)
+    result.current.getObjectUrl(f2)
     unmount()
 
     expect(mockRevokeObjectURL).toHaveBeenCalledTimes(2)
     expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:a.jpg')
     expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:b.jpg')
+  })
+
+  it('releaseObjectUrl revokes and evicts a single file without waiting for unmount', () => {
+    const [f1, f2] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    const { result, unmount } = renderHook(() => useObjectUrls())
+
+    result.current.getObjectUrl(f1)
+    result.current.getObjectUrl(f2)
+    result.current.releaseObjectUrl(f1)
+
+    expect(mockRevokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:a.jpg')
+
+    // Releasing again (or unmounting) must not double-revoke the same URL.
+    mockRevokeObjectURL.mockClear()
+    unmount()
+    expect(mockRevokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:b.jpg')
+  })
+
+  it('releaseObjectUrl is a noop for a file that was never fetched', () => {
+    const file = makeFile('never-fetched.jpg')
+    const { result } = renderHook(() => useObjectUrls())
+
+    result.current.releaseObjectUrl(file)
+
+    expect(mockRevokeObjectURL).not.toHaveBeenCalled()
   })
 })
