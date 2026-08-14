@@ -190,6 +190,61 @@ export function useGooglePhotosUpload() {
     []
   )
 
+  // Reconciles a set of photos already known to have a mediaItemId, and
+  // updates their status to 'done' or 'failed' based on the result. Shared
+  // between batchCreate's per-chunk reconciliation and retryFailed's
+  // reconciliation-only retry path, so the "no album to confirm membership
+  // against" edge case and the confirmed/failed status mapping are defined
+  // in exactly one place. Returns whether reconciliation was confirmed.
+  const reconcileAndSetStatus = useCallback(
+    async (
+      items: { photoId: string; mediaItemId: string }[],
+      albumId: string | undefined,
+      accessToken: string,
+    ): Promise<boolean> => {
+      if (!albumId) {
+        // Album creation is mandatory on every upload today, so this
+        // should not happen in practice — but without an album id there
+        // is nothing to confirm membership against.
+        setPhotoStates((prev) => {
+          const next = new Map(prev)
+          for (const { photoId } of items) {
+            next.set(photoId, {
+              ...next.get(photoId),
+              status: 'failed',
+              error: 'No album to confirm membership against',
+            })
+          }
+          return next
+        })
+        return false
+      }
+
+      const confirmed = await reconcileAlbumMembership(
+        albumId,
+        items.map((i) => i.mediaItemId),
+        accessToken
+      )
+      setPhotoStates((prev) => {
+        const next = new Map(prev)
+        for (const { photoId } of items) {
+          if (confirmed) {
+            next.set(photoId, { ...next.get(photoId), status: 'done' })
+          } else {
+            next.set(photoId, {
+              ...next.get(photoId),
+              status: 'failed',
+              error: 'Media item created but could not be confirmed in the album',
+            })
+          }
+        }
+        return next
+      })
+      return confirmed
+    },
+    [reconcileAlbumMembership]
+  )
+
   const batchCreate = useCallback(
     async (tokens: PendingUploadToken[], albumId: string | undefined, accessToken: string) => {
       const batches = chunkArray(tokens, 50)
@@ -299,45 +354,8 @@ export function useGooglePhotosUpload() {
         // that chunk resolves, using only this chunk's own successful media
         // item ids — never one call across the whole run.
         if (reconcilable.length > 0) {
-          if (!albumId) {
-            // Album creation is mandatory on every upload today, so this
-            // should not happen in practice — but without an album id there
-            // is nothing to confirm membership against.
-            setPhotoStates((prev) => {
-              const next = new Map(prev)
-              for (const { photoId } of reconcilable) {
-                next.set(photoId, {
-                  ...next.get(photoId),
-                  status: 'failed',
-                  error: 'No album to confirm membership against',
-                })
-              }
-              return next
-            })
-            anyChunkFailed = true
-          } else {
-            const confirmed = await reconcileAlbumMembership(
-              albumId,
-              reconcilable.map((r) => r.mediaItemId),
-              accessToken
-            )
-            setPhotoStates((prev) => {
-              const next = new Map(prev)
-              for (const { photoId } of reconcilable) {
-                if (confirmed) {
-                  next.set(photoId, { ...next.get(photoId), status: 'done' })
-                } else {
-                  next.set(photoId, {
-                    ...next.get(photoId),
-                    status: 'failed',
-                    error: 'Media item created but could not be confirmed in the album',
-                  })
-                }
-              }
-              return next
-            })
-            if (!confirmed) anyChunkFailed = true
-          }
+          const confirmed = await reconcileAndSetStatus(reconcilable, albumId, accessToken)
+          if (!confirmed) anyChunkFailed = true
         }
       }
 
@@ -345,7 +363,7 @@ export function useGooglePhotosUpload() {
         throw new Error('One or more batch-create chunks failed')
       }
     },
-    [markChunkFailed, reconcileAlbumMembership]
+    [markChunkFailed, reconcileAndSetStatus]
   )
 
   const startUpload = useCallback(
@@ -448,41 +466,14 @@ export function useGooglePhotosUpload() {
       let anyFailure = false
 
       if (reconcileOnlyPhotos.length > 0) {
-        if (!albumId) {
-          setPhotoStates((prev) => {
-            const next = new Map(prev)
-            for (const p of reconcileOnlyPhotos) {
-              next.set(p.id, {
-                ...next.get(p.id),
-                status: 'failed',
-                error: 'No album to confirm membership against',
-              })
-            }
-            return next
-          })
-          anyFailure = true
-        } else {
-          // Chunked the same way as batch-create (50 per call, KTD2).
-          for (const chunk of chunkArray(reconcileOnlyPhotos, 50)) {
-            const mediaItemIds = chunk.map((p) => photoStates.get(p.id)!.mediaItemId!)
-            const confirmed = await reconcileAlbumMembership(albumId, mediaItemIds, accessToken)
-            setPhotoStates((prev) => {
-              const next = new Map(prev)
-              for (const p of chunk) {
-                if (confirmed) {
-                  next.set(p.id, { ...next.get(p.id), status: 'done' })
-                } else {
-                  next.set(p.id, {
-                    ...next.get(p.id),
-                    status: 'failed',
-                    error: 'Media item created but could not be confirmed in the album',
-                  })
-                }
-              }
-              return next
-            })
-            if (!confirmed) anyFailure = true
-          }
+        // Chunked the same way as batch-create (50 per call, KTD2).
+        for (const chunk of chunkArray(reconcileOnlyPhotos, 50)) {
+          const items = chunk.map((p) => ({
+            photoId: p.id,
+            mediaItemId: photoStates.get(p.id)!.mediaItemId!,
+          }))
+          const confirmed = await reconcileAndSetStatus(items, albumId, accessToken)
+          if (!confirmed) anyFailure = true
         }
       }
 
@@ -503,7 +494,7 @@ export function useGooglePhotosUpload() {
 
       setUploadState(anyFailure ? 'error' : 'done')
     },
-    [uploadState, photoStates, uploadSinglePhoto, batchCreate, reconcileAlbumMembership]
+    [uploadState, photoStates, uploadSinglePhoto, batchCreate, reconcileAndSetStatus]
   )
 
   const reset = useCallback(() => {
