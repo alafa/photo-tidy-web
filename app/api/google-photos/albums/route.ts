@@ -1,5 +1,14 @@
 import { NextResponse } from 'next/server'
-import { extractBearer, upstreamErrorBody } from '@/lib/google-photos-server'
+import {
+  extractBearer,
+  isTimeoutError,
+  parseRetryAfterMs,
+  upstreamErrorBody,
+} from '@/lib/google-photos-server'
+
+// Small JSON body — matches batch-create's budget, shorter than the
+// raw-byte upload route's.
+const ALBUMS_TIMEOUT_MS = 12_000
 
 export async function POST(request: Request): Promise<NextResponse> {
   const authHeader = extractBearer(request)
@@ -36,11 +45,26 @@ export async function POST(request: Request): Promise<NextResponse> {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ album: { title: trimmedTitle } }),
+      signal: AbortSignal.timeout(ALBUMS_TIMEOUT_MS),
     })
-  } catch {
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      return NextResponse.json(
+        upstreamErrorBody('Request to Google Photos timed out', 'REQUEST_TIMEOUT'),
+        { status: 504 },
+      )
+    }
     return NextResponse.json(
       upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
       { status: 502 },
+    )
+  }
+
+  if (upstream.status === 429) {
+    const retryAfterMs = parseRetryAfterMs(upstream.headers.get('Retry-After'))
+    return NextResponse.json(
+      upstreamErrorBody('Rate limited by Google Photos', 'RATE_LIMITED', retryAfterMs),
+      { status: 429 },
     )
   }
 

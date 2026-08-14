@@ -58,6 +58,23 @@ function isBatchCreateSuccess(status: NewMediaItemResult['status']): boolean {
   return status.code === undefined || status.code === 0
 }
 
+// Maps the `error.status` value from the API routes' upstreamErrorBody
+// convention (lib/google-photos-server.ts) to a message that names the
+// specific failure mode. Any other status value, or a status that couldn't
+// be determined at all (unparseable body, older error shape), falls back
+// to the caller-supplied generic message — no regression for other
+// failure shapes.
+function describeUpstreamFailure(status: string | undefined, fallback: string): string {
+  switch (status) {
+    case 'RATE_LIMITED':
+      return 'Rate limited by Google — try again in a moment'
+    case 'REQUEST_TIMEOUT':
+      return 'Request to Google Photos timed out'
+    default:
+      return fallback
+  }
+}
+
 export function useGooglePhotosUpload() {
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [photoStates, setPhotoStates] = useState<Map<string, PhotoUploadState>>(new Map())
@@ -88,13 +105,22 @@ export function useGooglePhotosUpload() {
         })
 
         if (!response.ok) {
-          const errorMessage = await response
-            .json()
-            .then((body: { error?: { message?: string } | string }) =>
-              typeof body.error === 'string' ? body.error : body.error?.message
-            )
-            .catch(() => undefined)
-          throw new Error(errorMessage || `HTTP ${response.status}`)
+          let errorMessage: string | undefined
+          let errorStatus: string | undefined
+          try {
+            const responseBody = (await response.json()) as {
+              error?: { message?: string; status?: string } | string
+            }
+            if (typeof responseBody.error === 'string') {
+              errorMessage = responseBody.error
+            } else {
+              errorMessage = responseBody.error?.message
+              errorStatus = responseBody.error?.status
+            }
+          } catch {
+            // Body couldn't be parsed — fall through to the generic fallback below.
+          }
+          throw new Error(describeUpstreamFailure(errorStatus, errorMessage || `HTTP ${response.status}`))
         }
 
         const uploadToken = await response.text()
@@ -163,7 +189,18 @@ export function useGooglePhotosUpload() {
         }
 
         if (!res.ok) {
-          markChunkFailed(batch, 'Batch create request failed')
+          // Try to read the specific failure reason (e.g. rate-limited,
+          // timed out) off the parsed error body; fall back to the
+          // generic message if the body can't be parsed or names no
+          // recognized status.
+          let errorStatus: string | undefined
+          try {
+            const errorBody = (await res.json()) as { error?: { status?: string } }
+            errorStatus = errorBody.error?.status
+          } catch {
+            // Body couldn't be parsed — errorStatus stays undefined, generic fallback below.
+          }
+          markChunkFailed(batch, describeUpstreamFailure(errorStatus, 'Batch create request failed'))
           anyChunkFailed = true
           continue
         }

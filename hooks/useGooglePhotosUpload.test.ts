@@ -794,3 +794,127 @@ describe('useGooglePhotosUpload — U4: per-photo done/failed status matches bat
     ])
   })
 })
+
+describe('useGooglePhotosUpload — U1: timeout and rate-limit message surfacing', () => {
+  it('batch-create chunk resolves with error.status REQUEST_TIMEOUT: every photo in the chunk is marked failed with the timeout-specific message', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // upload p2
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 504,
+      json: async () => ({ error: { message: 'Request to Google Photos timed out', status: 'REQUEST_TIMEOUT' } }),
+    }) // batchCreate times out
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('error')
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Request to Google Photos timed out')
+    expect(result.current.photoStates.get('p2')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p2')?.error).toBe('Request to Google Photos timed out')
+  })
+
+  it('uploadSinglePhoto receives a RATE_LIMITED-status error body: the photo is marked failed with a rate-limit-specific message', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: { message: 'Rate limited by Google Photos', status: 'RATE_LIMITED', retryAfterMs: 30000 },
+      }),
+    }) // upload p1 rate limited
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Rate limited by Google — try again in a moment')
+  })
+
+  it('an error body with an unrecognized error.status falls back to the body message, not a REQUEST_TIMEOUT/RATE_LIMITED message', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { message: 'Missing required field: filename', status: 'INVALID_REQUEST' } }),
+    }) // upload p1 fails with an unrelated status
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Missing required field: filename')
+  })
+
+  it('an error body with no status field at all (or an unparseable body) still falls back to the generic message — no regression for older failure shapes', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    // p1: response.json() throws (unparseable body) — falls back to HTTP status text
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new SyntaxError('Unexpected token')
+      },
+      text: async () => 'Internal Server Error',
+    })
+    // p2: uploads fine
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' })
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'b.jpg' } },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('HTTP 500')
+    expect(result.current.photoStates.get('p2')?.status).toBe('done')
+  })
+
+  it('batch-create chunk failing outright with an unparseable/absent error body still falls back to the generic "Batch create request failed" message', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'Internal Server Error' }) // batchCreate fails, no .json()
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('error')
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Batch create request failed')
+  })
+})
