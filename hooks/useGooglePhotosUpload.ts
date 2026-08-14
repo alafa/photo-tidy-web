@@ -11,6 +11,12 @@ export type PhotoUploadStatus = 'pending' | 'uploading' | 'done' | 'failed'
 export interface PhotoUploadState {
   status: PhotoUploadStatus
   error?: string
+  // Set as soon as batch-create reports item-creation success for this
+  // photo — independent of whether album-membership reconciliation then
+  // succeeds. Lets retryFailed tell "media item already exists, only
+  // reconciliation needs redoing" apart from "never got created, redo the
+  // full pipeline" (see retryFailed below).
+  mediaItemId?: string
 }
 
 // An upload token carrying the id of the photo it came from, so batch-create
@@ -157,17 +163,44 @@ export function useGooglePhotosUpload() {
     })
   }, [])
 
+  // Reconciles album membership for a set of already-created media items.
+  // This is the SOLE mechanism that ever adds an item to an album — the
+  // batch-create route no longer sends albumId to Google, since batchCreate's
+  // response only reports media-item-creation status, never album-attachment
+  // status (see KTD1). Returns true only on a confirmed 2xx from the
+  // reconciliation route; any non-2xx or thrown network error resolves to
+  // false rather than throwing, so callers can decide per-photo fallout
+  // without wrapping every call site in its own try/catch.
+  const reconcileAlbumMembership = useCallback(
+    async (albumId: string, mediaItemIds: string[], accessToken: string): Promise<boolean> => {
+      try {
+        const res = await fetch(`/api/google-photos/albums/${encodeURIComponent(albumId)}/batch-add`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ mediaItemIds }),
+        })
+        return res.ok
+      } catch {
+        return false
+      }
+    },
+    []
+  )
+
   const batchCreate = useCallback(
     async (tokens: PendingUploadToken[], albumId: string | undefined, accessToken: string) => {
       const batches = chunkArray(tokens, 50)
       let anyChunkFailed = false
 
       for (const batch of batches) {
-        const body: { uploadTokens: UploadToken[]; albumId?: string } = {
+        // Album membership is deliberately NOT requested here (see
+        // reconcileAlbumMembership above) — this call only creates media
+        // items.
+        const body: { uploadTokens: UploadToken[] } = {
           uploadTokens: batch.map(({ token, filename }) => ({ token, filename })),
-        }
-        if (albumId) {
-          body.albumId = albumId
         }
 
         let res: Response
@@ -220,12 +253,38 @@ export function useGooglePhotosUpload() {
           (data.newMediaItemResults ?? []).map((result) => [result.uploadToken, result])
         )
 
+        // KTD3: store mediaItemId as soon as batch-create reports
+        // item-creation success, regardless of whether reconciliation below
+        // then succeeds. KTD9: a success status with no mediaItem.id is its
+        // own distinct failure — not reconciled, no mediaItemId stored.
+        //
+        // This classification is computed here, from `batch` and
+        // `resultsByToken` directly, rather than inside the setPhotoStates
+        // updater below — a functional setState updater is not guaranteed to
+        // run synchronously before the code that follows it, so collecting
+        // `reconcilable` as a side effect of that updater would make the
+        // reconciliation call below see it as still empty.
+        const reconcilable: { photoId: string; mediaItemId: string }[] = []
+        for (const item of batch) {
+          const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
+          if (result && isBatchCreateSuccess(result.status) && result.mediaItem?.id) {
+            reconcilable.push({ photoId: item.photoId, mediaItemId: result.mediaItem.id })
+          }
+        }
+
         setPhotoStates((prev) => {
           const next = new Map(prev)
           for (const item of batch) {
             const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
             if (result && isBatchCreateSuccess(result.status)) {
-              next.set(item.photoId, { status: 'done' })
+              if (result.mediaItem?.id) {
+                next.set(item.photoId, { status: 'uploading', mediaItemId: result.mediaItem.id })
+              } else {
+                next.set(item.photoId, {
+                  status: 'failed',
+                  error: 'Google reported success but did not return a media item id',
+                })
+              }
             } else {
               next.set(item.photoId, {
                 status: 'failed',
@@ -235,13 +294,58 @@ export function useGooglePhotosUpload() {
           }
           return next
         })
+
+        // KTD2: reconcile once per batch-create chunk, immediately after
+        // that chunk resolves, using only this chunk's own successful media
+        // item ids — never one call across the whole run.
+        if (reconcilable.length > 0) {
+          if (!albumId) {
+            // Album creation is mandatory on every upload today, so this
+            // should not happen in practice — but without an album id there
+            // is nothing to confirm membership against.
+            setPhotoStates((prev) => {
+              const next = new Map(prev)
+              for (const { photoId } of reconcilable) {
+                next.set(photoId, {
+                  ...next.get(photoId),
+                  status: 'failed',
+                  error: 'No album to confirm membership against',
+                })
+              }
+              return next
+            })
+            anyChunkFailed = true
+          } else {
+            const confirmed = await reconcileAlbumMembership(
+              albumId,
+              reconcilable.map((r) => r.mediaItemId),
+              accessToken
+            )
+            setPhotoStates((prev) => {
+              const next = new Map(prev)
+              for (const { photoId } of reconcilable) {
+                if (confirmed) {
+                  next.set(photoId, { ...next.get(photoId), status: 'done' })
+                } else {
+                  next.set(photoId, {
+                    ...next.get(photoId),
+                    status: 'failed',
+                    error: 'Media item created but could not be confirmed in the album',
+                  })
+                }
+              }
+              return next
+            })
+            if (!confirmed) anyChunkFailed = true
+          }
+        }
       }
 
       if (anyChunkFailed) {
         throw new Error('One or more batch-create chunks failed')
       }
     },
-    [markChunkFailed]
+    [markChunkFailed, reconcileAlbumMembership]
   )
 
   const startUpload = useCallback(
@@ -331,23 +435,75 @@ export function useGooglePhotosUpload() {
       // reset() must not be able to null out the album this retry commits to.
       const albumId = albumIdRef.current
 
-      // Re-upload failed photos
-      const newTokens = await uploadWithConcurrency(failedPhotos, accessToken, uploadSinglePhoto)
+      // KTD4: a failed photo that already has a mediaItemId had its media
+      // item created successfully — only album-membership reconciliation
+      // failed. Retrying it must redo ONLY that reconciliation call; running
+      // the full upload-then-batch-create pipeline again would create a
+      // second media item for the same photo. A photo without a mediaItemId
+      // never got a media item created at all, so it still needs the full
+      // pipeline, unchanged from before.
+      const reconcileOnlyPhotos = failedPhotos.filter((p) => photoStates.get(p.id)?.mediaItemId)
+      const fullRetryPhotos = failedPhotos.filter((p) => !photoStates.get(p.id)?.mediaItemId)
 
-      // Only batch-create the newly retried tokens — previously successful tokens
-      // were already committed in the initial startUpload call
-      if (newTokens.length > 0) {
-        try {
-          await batchCreate(newTokens, albumId, accessToken)
-        } catch {
-          setUploadState('error')
-          return
+      let anyFailure = false
+
+      if (reconcileOnlyPhotos.length > 0) {
+        if (!albumId) {
+          setPhotoStates((prev) => {
+            const next = new Map(prev)
+            for (const p of reconcileOnlyPhotos) {
+              next.set(p.id, {
+                ...next.get(p.id),
+                status: 'failed',
+                error: 'No album to confirm membership against',
+              })
+            }
+            return next
+          })
+          anyFailure = true
+        } else {
+          // Chunked the same way as batch-create (50 per call, KTD2).
+          for (const chunk of chunkArray(reconcileOnlyPhotos, 50)) {
+            const mediaItemIds = chunk.map((p) => photoStates.get(p.id)!.mediaItemId!)
+            const confirmed = await reconcileAlbumMembership(albumId, mediaItemIds, accessToken)
+            setPhotoStates((prev) => {
+              const next = new Map(prev)
+              for (const p of chunk) {
+                if (confirmed) {
+                  next.set(p.id, { ...next.get(p.id), status: 'done' })
+                } else {
+                  next.set(p.id, {
+                    ...next.get(p.id),
+                    status: 'failed',
+                    error: 'Media item created but could not be confirmed in the album',
+                  })
+                }
+              }
+              return next
+            })
+            if (!confirmed) anyFailure = true
+          }
         }
       }
 
-      setUploadState('done')
+      if (fullRetryPhotos.length > 0) {
+        // Re-upload photos whose media item was never created, then
+        // batch-create (which performs its own reconciliation per chunk) —
+        // the existing full pipeline, unchanged.
+        const newTokens = await uploadWithConcurrency(fullRetryPhotos, accessToken, uploadSinglePhoto)
+
+        if (newTokens.length > 0) {
+          try {
+            await batchCreate(newTokens, albumId, accessToken)
+          } catch {
+            anyFailure = true
+          }
+        }
+      }
+
+      setUploadState(anyFailure ? 'error' : 'done')
     },
-    [uploadState, photoStates, uploadSinglePhoto, batchCreate]
+    [uploadState, photoStates, uploadSinglePhoto, batchCreate, reconcileAlbumMembership]
   )
 
   const reset = useCallback(() => {

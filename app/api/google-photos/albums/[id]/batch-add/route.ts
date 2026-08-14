@@ -5,13 +5,20 @@ import {
   parseRetryAfterMs,
   upstreamErrorBody,
 } from '@/lib/google-photos-server'
-import type { UploadToken, NewMediaItem } from '@/lib/google-photos-types'
 
-// Small JSON body — this and albums get a shorter budget than the raw-byte
-// upload route.
-const BATCH_CREATE_TIMEOUT_MS = 12_000
+// Small JSON body — matches albums/batch-create's budget, shorter than the
+// raw-byte upload route's.
+const BATCH_ADD_TIMEOUT_MS = 12_000
 
-export async function POST(request: Request): Promise<NextResponse> {
+// Reconciliation endpoint: confirms media items landed in the target album.
+// batchCreate's own response only reports media-item-creation status, never
+// album-attachment status, so this is the sole mechanism that ever adds an
+// item to an album (see the removal of `albumId` from the batch-create
+// route's request body).
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
   const authHeader = extractBearer(request)
   if (!authHeader) {
     return NextResponse.json(
@@ -20,47 +27,37 @@ export async function POST(request: Request): Promise<NextResponse> {
     )
   }
 
-  let body: { uploadTokens?: UploadToken[] }
+  let body: { mediaItemIds?: string[] }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json(upstreamErrorBody('Invalid JSON body', 'INVALID_REQUEST'), { status: 400 })
   }
 
-  const { uploadTokens } = body
-  if (!uploadTokens || uploadTokens.length === 0) {
+  const { mediaItemIds } = body
+  if (!mediaItemIds || mediaItemIds.length === 0) {
     return NextResponse.json(
-      upstreamErrorBody('Missing or empty required field: uploadTokens', 'INVALID_REQUEST'),
+      upstreamErrorBody('Missing or empty required field: mediaItemIds', 'INVALID_REQUEST'),
       { status: 400 },
     )
   }
 
-  const newMediaItems: NewMediaItem[] = uploadTokens.map(({ token, filename }) => ({
-    simpleMediaItem: {
-      fileName: filename,
-      uploadToken: token,
-    },
-  }))
-
-  // Album membership is no longer requested here — batchCreate's response
-  // only reports media-item-creation status, never album-attachment status,
-  // so passing albumId here would make Google attempt the album-add twice
-  // (once here, once via the explicit reconciliation call in
-  // albums/[id]/batch-add) without any confirmation this call's attempt
-  // even succeeded. Reconciliation is now the sole album-add mechanism.
-  const requestBody: { newMediaItems: NewMediaItem[] } = { newMediaItems }
+  const { id } = await params
 
   let upstream: Response
   try {
-    upstream = await fetch('https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate', {
-      method: 'POST',
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/json',
+    upstream = await fetch(
+      `https://photoslibrary.googleapis.com/v1/albums/${encodeURIComponent(id)}:batchAddMediaItems`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ mediaItemIds }),
+        signal: AbortSignal.timeout(BATCH_ADD_TIMEOUT_MS),
       },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(BATCH_CREATE_TIMEOUT_MS),
-    })
+    )
   } catch (err) {
     if (isTimeoutError(err)) {
       return NextResponse.json(
