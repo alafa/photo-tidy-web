@@ -49,6 +49,23 @@ function makeImageBlob(): Blob {
   return new Blob(['fake-image-bytes'], { type: 'image/jpeg' })
 }
 
+function makeVideoItem(id: string) {
+  return {
+    id,
+    type: 'VIDEO',
+    mediaFile: {
+      baseUrl: `https://lh3.googleusercontent.com/${id}`,
+      mimeType: 'video/mp4',
+      filename: `${id}.mp4`,
+    },
+    mediaMetadata: {
+      creationTime: '2025-01-15T10:00:00Z',
+      width: '1920',
+      height: '1080',
+    },
+  }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockWindowOpen.mockReturnValue(null)
@@ -506,6 +523,133 @@ describe('useGooglePhotosPicker', () => {
 
       expect(result.current.status).toBe('idle')
       expect(addPhotos).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('edge case: videos in picker selection are filtered out', () => {
+    it('calls addPhotos with only the photo files when selection is mixed photos and videos', async () => {
+      const session = makeSession()
+      const photoItems = makeMediaItemsResponse(2).mediaItems
+      const videoItems = [makeVideoItem('vid-0'), makeVideoItem('vid-1')]
+      const itemsResp = { mediaItems: [photoItems[0], videoItems[0], photoItems[1], videoItems[1]] }
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => itemsResp })
+        // Only 2 downloads should happen — one per photo, videos never reach downloadBatch
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValue({ ok: true }) // DELETE
+
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('idle')
+      expect(addPhotos).toHaveBeenCalledOnce()
+      const [files] = addPhotos.mock.calls[0]
+      expect(files).toHaveLength(2)
+
+      // Confirm no download request was made for either video item's baseUrl
+      const downloadCalls = mockFetch.mock.calls.filter((c) => c[0] === '/api/google-photos/download')
+      expect(downloadCalls).toHaveLength(2)
+      for (const call of downloadCalls) {
+        const body = JSON.parse(call[1].body)
+        expect(body.baseUrl).not.toBe(videoItems[0].mediaFile.baseUrl)
+        expect(body.baseUrl).not.toBe(videoItems[1].mediaFile.baseUrl)
+      }
+    })
+
+    it('behaves exactly like an empty selection when only videos were picked', async () => {
+      const session = makeSession()
+      const itemsResp = { mediaItems: [makeVideoItem('vid-0'), makeVideoItem('vid-1')] }
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => itemsResp })
+        .mockResolvedValue({ ok: true }) // DELETE cleanup
+
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('idle')
+      expect(result.current.error).toBeNull()
+      expect(addPhotos).not.toHaveBeenCalled()
+
+      // No download requests were ever made for the all-video selection
+      const downloadCalls = mockFetch.mock.calls.filter((c) => c[0] === '/api/google-photos/download')
+      expect(downloadCalls).toHaveLength(0)
+
+      // Cleaned up via the same path as "nothing selected": session DELETE fired
+      const deleteCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === `/api/google-photos/sessions/${session.id}` && c[1]?.method === 'DELETE'
+      )
+      expect(deleteCalls.length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('excludes an item whose type and mimeType disagree, in either direction', async () => {
+      const session = makeSession()
+      const mismatchedItems = [
+        // type: PHOTO but mimeType is not an image
+        {
+          id: 'mismatch-video-mime',
+          type: 'PHOTO',
+          mediaFile: {
+            baseUrl: 'https://lh3.googleusercontent.com/mismatch-video-mime',
+            mimeType: 'video/mp4',
+            filename: 'mismatch-video-mime.mp4',
+          },
+          mediaMetadata: { creationTime: '2025-01-15T10:00:00Z', width: '1920', height: '1080' },
+        },
+        // type: VIDEO but mimeType is an image
+        {
+          id: 'mismatch-image-mime',
+          type: 'VIDEO',
+          mediaFile: {
+            baseUrl: 'https://lh3.googleusercontent.com/mismatch-image-mime',
+            mimeType: 'image/jpeg',
+            filename: 'mismatch-image-mime.jpg',
+          },
+          mediaMetadata: { creationTime: '2025-01-15T10:00:00Z', width: '1920', height: '1080' },
+        },
+      ]
+      const itemsResp = { mediaItems: mismatchedItems }
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => itemsResp })
+        .mockResolvedValue({ ok: true }) // DELETE cleanup
+
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'tok', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('idle')
+      expect(addPhotos).not.toHaveBeenCalled()
+      const downloadCalls = mockFetch.mock.calls.filter((c) => c[0] === '/api/google-photos/download')
+      expect(downloadCalls).toHaveLength(0)
     })
   })
 })

@@ -301,7 +301,15 @@ export function useGooglePhotosPicker(opts: {
 
     if (!isCurrent()) return
 
-    const items = mediaItemsResponse.mediaItems ?? []
+    // The Google Photos Picker API has no way to restrict selection to
+    // photos-only, so users can select videos too. This app only supports
+    // photos, so silently drop anything that isn't one before it's ever
+    // downloaded or shown. Whitelist both signals (type AND mimeType) rather
+    // than blacklisting on type !== 'VIDEO', so an undocumented third `type`
+    // value fails closed instead of leaking through.
+    const items = (mediaItemsResponse.mediaItems ?? []).filter(
+      (item) => item.type === 'PHOTO' && item.mediaFile.mimeType.startsWith('image/'),
+    )
     if (items.length === 0) {
       // Nothing to import; clean up and go idle
       cleanupSession(session.id)
