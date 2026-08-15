@@ -44,12 +44,13 @@ const UPLOAD_CONCURRENCY = 5
 async function uploadWithConcurrency<T>(
   photos: PhotoEntry[],
   accessToken: string,
-  uploadFn: (photo: PhotoEntry, accessToken: string) => Promise<T | null>,
+  uploadFn: (photo: PhotoEntry, accessToken: string, isCurrent: () => boolean) => Promise<T | null>,
+  isCurrent: () => boolean,
 ): Promise<T[]> {
   const tokens: T[] = []
   for (let i = 0; i < photos.length; i += UPLOAD_CONCURRENCY) {
     const batch = photos.slice(i, i + UPLOAD_CONCURRENCY)
-    const results = await Promise.all(batch.map((photo) => uploadFn(photo, accessToken)))
+    const results = await Promise.all(batch.map((photo) => uploadFn(photo, accessToken, isCurrent)))
     for (const result of results) {
       if (result) tokens.push(result)
     }
@@ -94,13 +95,23 @@ export function useGooglePhotosUpload() {
   // Store albumId across startUpload/retryFailed calls
   const albumIdRef = useRef<string | undefined>(undefined)
 
+  // Identifies which startUpload()/retryFailed() call is still "current".
+  // reset() and a fresh startUpload()/retryFailed() all bump this — a
+  // superseded call whose async work (e.g. a slow-to-resolve reconciliation
+  // fetch) is still in flight can then tell it no longer owns photoStates
+  // instead of writing a stale confirmation into whatever session runs now.
+  // Mirrors importGenerationRef in hooks/useGooglePhotosPicker.ts.
+  const uploadGenerationRef = useRef(0)
+
   const uploadSinglePhoto = useCallback(
-    async (photo: PhotoEntry, accessToken: string): Promise<PendingUploadToken | null> => {
-      setPhotoStates((prev) => {
-        const next = new Map(prev)
-        next.set(photo.id, { status: 'uploading' })
-        return next
-      })
+    async (photo: PhotoEntry, accessToken: string, isCurrent: () => boolean): Promise<PendingUploadToken | null> => {
+      if (isCurrent()) {
+        setPhotoStates((prev) => {
+          const next = new Map(prev)
+          next.set(photo.id, { status: 'uploading' })
+          return next
+        })
+      }
 
       try {
         const modifiedBlob = await writeTimestamp(photo.file, photo.capturedAt ?? new Date())
@@ -147,11 +158,13 @@ export function useGooglePhotosUpload() {
         return { photoId: photo.id, token: uploadToken, filename: photo.filename }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err)
-        setPhotoStates((prev) => {
-          const next = new Map(prev)
-          next.set(photo.id, { status: 'failed', error: errorMessage })
-          return next
-        })
+        if (isCurrent()) {
+          setPhotoStates((prev) => {
+            const next = new Map(prev)
+            next.set(photo.id, { status: 'failed', error: errorMessage })
+            return next
+          })
+        }
         return null
       }
     },
@@ -161,17 +174,21 @@ export function useGooglePhotosUpload() {
   // Marks every photo submitted in a chunk as 'failed' with a shared
   // message. Used when the batch-create call for that chunk fails outright
   // (network error or non-2xx), so no row is left stuck 'uploading'.
-  const markChunkFailed = useCallback((batch: PendingUploadToken[], message: string) => {
-    setPhotoStates((prev) => {
-      const next = new Map(prev)
-      for (const item of batch) {
-        if (next.get(item.photoId)?.status === 'uploading') {
-          next.set(item.photoId, { status: 'failed', error: message })
+  const markChunkFailed = useCallback(
+    (batch: PendingUploadToken[], message: string, isCurrent: () => boolean) => {
+      if (!isCurrent()) return
+      setPhotoStates((prev) => {
+        const next = new Map(prev)
+        for (const item of batch) {
+          if (next.get(item.photoId)?.status === 'uploading') {
+            next.set(item.photoId, { status: 'failed', error: message })
+          }
         }
-      }
-      return next
-    })
-  }, [])
+        return next
+      })
+    },
+    []
+  )
 
   // Reconciles album membership for a set of already-created media items.
   // This is the SOLE mechanism that ever adds an item to an album — the
@@ -209,29 +226,43 @@ export function useGooglePhotosUpload() {
   // updates their status to 'done' or 'failed' based on the result. Shared
   // between batchCreate's per-chunk reconciliation and retryFailed's
   // reconciliation-only retry path, so the "no album to confirm membership
-  // against" edge case and the confirmed/failed status mapping are defined
-  // in exactly one place. Returns whether reconciliation was confirmed.
+  // against" edge case, the confirmed/failed status mapping, and the
+  // per-item fallback below are all defined in exactly one place — both
+  // callers benefit automatically. Returns whether every item in `items`
+  // ended up confirmed.
+  //
+  // Fallback: Google's batchAddMediaItems has no partial success — if the
+  // single call covering the whole chunk fails, that's uninformative about
+  // WHICH item (if any) is actually the problem. Retrying the exact same
+  // chunk-wide call forever would let one poisoned/stale media item id
+  // permanently block every other (up to 49) healthy id in the same chunk.
+  // So on a chunk-wide failure, fall back to one call per item — slower,
+  // but only paid on the failure path — so a single bad id can no longer
+  // hold the rest of the chunk hostage.
   const reconcileAndSetStatus = useCallback(
     async (
       items: { photoId: string; mediaItemId: string }[],
       albumId: string | undefined,
       accessToken: string,
+      isCurrent: () => boolean,
     ): Promise<boolean> => {
       if (!albumId) {
         // Album creation is mandatory on every upload today, so this
         // should not happen in practice — but without an album id there
         // is nothing to confirm membership against.
-        setPhotoStates((prev) => {
-          const next = new Map(prev)
-          for (const { photoId } of items) {
-            next.set(photoId, {
-              ...next.get(photoId),
-              status: 'failed',
-              error: 'No album to confirm membership against',
-            })
-          }
-          return next
-        })
+        if (isCurrent()) {
+          setPhotoStates((prev) => {
+            const next = new Map(prev)
+            for (const { photoId } of items) {
+              next.set(photoId, {
+                ...next.get(photoId),
+                status: 'failed',
+                error: 'No album to confirm membership against',
+              })
+            }
+            return next
+          })
+        }
         return false
       }
 
@@ -240,28 +271,61 @@ export function useGooglePhotosUpload() {
         items.map((i) => i.mediaItemId),
         accessToken
       )
-      setPhotoStates((prev) => {
-        const next = new Map(prev)
-        for (const { photoId } of items) {
-          if (confirmed) {
-            next.set(photoId, { ...next.get(photoId), status: 'done' })
-          } else {
-            next.set(photoId, {
-              ...next.get(photoId),
-              status: 'failed',
-              error: 'Media item created but could not be confirmed in the album',
+
+      if (confirmed) {
+        if (isCurrent()) {
+          setPhotoStates((prev) => {
+            const next = new Map(prev)
+            for (const { photoId } of items) {
+              next.set(photoId, { ...next.get(photoId), status: 'done' })
+            }
+            return next
+          })
+        }
+        return true
+      }
+
+      // The chunk-wide call failed — isolate the damage by retrying each
+      // item on its own. For a chunk already down to a single item this
+      // just repeats the same call again; there's no smaller unit to
+      // isolate, so no special-casing is needed to avoid it.
+      const perItemResults = await Promise.all(
+        items.map(async (item) => ({
+          item,
+          confirmed: await reconcileAlbumMembership(albumId, [item.mediaItemId], accessToken),
+        }))
+      )
+
+      if (isCurrent()) {
+        setPhotoStates((prev) => {
+          const next = new Map(prev)
+          for (const { item, confirmed: itemConfirmed } of perItemResults) {
+            next.set(item.photoId, {
+              ...next.get(item.photoId),
+              ...(itemConfirmed
+                ? { status: 'done' as const }
+                : {
+                    status: 'failed' as const,
+                    error: 'Media item created but could not be confirmed in the album',
+                  }),
             })
           }
-        }
-        return next
-      })
-      return confirmed
+          return next
+        })
+      }
+
+      return perItemResults.every((r) => r.confirmed)
     },
     [reconcileAlbumMembership]
   )
 
   const batchCreate = useCallback(
-    async (tokens: PendingUploadToken[], albumId: string | undefined, accessToken: string) => {
+    async (
+      tokens: PendingUploadToken[],
+      albumId: string | undefined,
+      accessToken: string,
+      isCurrent: () => boolean,
+    ) => {
       const batches = chunkArray(tokens, 50)
       let anyChunkFailed = false
 
@@ -286,7 +350,7 @@ export function useGooglePhotosUpload() {
         } catch {
           // Don't abandon later chunks on one chunk's failure — mark this
           // chunk failed and keep going so the rest still get a chance.
-          markChunkFailed(batch, 'Batch create request failed')
+          markChunkFailed(batch, 'Batch create request failed', isCurrent)
           anyChunkFailed = true
           continue
         }
@@ -307,7 +371,8 @@ export function useGooglePhotosUpload() {
           }
           markChunkFailed(
             batch,
-            describeUpstreamFailure(errorStatus, 'Batch create request failed', errorRetryAfterMs)
+            describeUpstreamFailure(errorStatus, 'Batch create request failed', errorRetryAfterMs),
+            isCurrent
           )
           anyChunkFailed = true
           continue
@@ -317,7 +382,7 @@ export function useGooglePhotosUpload() {
         try {
           data = (await res.json()) as BatchCreateResult
         } catch {
-          markChunkFailed(batch, 'Batch create returned an invalid response')
+          markChunkFailed(batch, 'Batch create returned an invalid response', isCurrent)
           anyChunkFailed = true
           continue
         }
@@ -347,34 +412,36 @@ export function useGooglePhotosUpload() {
           }
         }
 
-        setPhotoStates((prev) => {
-          const next = new Map(prev)
-          for (const item of batch) {
-            const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
-            if (result && isBatchCreateSuccess(result.status)) {
-              if (result.mediaItem?.id) {
-                next.set(item.photoId, { status: 'uploading', mediaItemId: result.mediaItem.id })
+        if (isCurrent()) {
+          setPhotoStates((prev) => {
+            const next = new Map(prev)
+            for (const item of batch) {
+              const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
+              if (result && isBatchCreateSuccess(result.status)) {
+                if (result.mediaItem?.id) {
+                  next.set(item.photoId, { status: 'uploading', mediaItemId: result.mediaItem.id })
+                } else {
+                  next.set(item.photoId, {
+                    status: 'failed',
+                    error: 'Google reported success but did not return a media item id',
+                  })
+                }
               } else {
                 next.set(item.photoId, {
                   status: 'failed',
-                  error: 'Google reported success but did not return a media item id',
+                  error: result?.status?.message ?? 'Batch create did not return a result for this photo',
                 })
               }
-            } else {
-              next.set(item.photoId, {
-                status: 'failed',
-                error: result?.status?.message ?? 'Batch create did not return a result for this photo',
-              })
             }
-          }
-          return next
-        })
+            return next
+          })
+        }
 
         // KTD2: reconcile once per batch-create chunk, immediately after
         // that chunk resolves, using only this chunk's own successful media
         // item ids — never one call across the whole run.
         if (reconcilable.length > 0) {
-          const confirmed = await reconcileAndSetStatus(reconcilable, albumId, accessToken)
+          const confirmed = await reconcileAndSetStatus(reconcilable, albumId, accessToken, isCurrent)
           if (!confirmed) anyChunkFailed = true
         }
       }
@@ -397,7 +464,15 @@ export function useGooglePhotosUpload() {
         return
       }
 
-      // Initialize all photo states to pending
+      // Claim this call's own generation before anything else — reset() and
+      // any later startUpload()/retryFailed() call bump uploadGenerationRef,
+      // which invalidates isCurrent() for every await below this point.
+      const myGeneration = ++uploadGenerationRef.current
+      const isCurrent = () => uploadGenerationRef.current === myGeneration
+
+      // Initialize all photo states to pending. These, and setUploadState
+      // below, run before any await — they establish this new session and
+      // must always apply, so they're intentionally not isCurrent()-gated.
       const initialStates = new Map<string, PhotoUploadState>()
       for (const photo of photos) {
         initialStates.set(photo.id, { status: 'pending' })
@@ -424,9 +499,13 @@ export function useGooglePhotosUpload() {
         }
 
         const albumData = await albumResponse.json() as Album
+        // A concurrent reset() + fresh startUpload() may already have run
+        // to completion during this await and set albumIdRef.current to its
+        // OWN album id — a superseded call writing here would clobber it.
+        if (!isCurrent()) return
         albumIdRef.current = albumData.id
       } catch {
-        setUploadState('error')
+        if (isCurrent()) setUploadState('error')
         return
       }
 
@@ -437,19 +516,21 @@ export function useGooglePhotosUpload() {
       // silently orphaning these photos outside any album.
       const albumId = albumIdRef.current
 
-      const tokens = await uploadWithConcurrency(photos, accessToken, uploadSinglePhoto)
+      const tokens = await uploadWithConcurrency(photos, accessToken, uploadSinglePhoto, isCurrent)
+
+      if (!isCurrent()) return
 
       // Batch create
       if (tokens.length > 0) {
         try {
-          await batchCreate(tokens, albumId, accessToken)
+          await batchCreate(tokens, albumId, accessToken, isCurrent)
         } catch {
-          setUploadState('error')
+          if (isCurrent()) setUploadState('error')
           return
         }
       }
 
-      setUploadState('done')
+      if (isCurrent()) setUploadState('done')
     },
     [uploadState, uploadSinglePhoto, batchCreate]
   )
@@ -467,6 +548,15 @@ export function useGooglePhotosUpload() {
 
       if (failedPhotos.length === 0) return
 
+      // Claim this call's own generation — see startUpload for why. Kept
+      // below the noop checks above, mirroring startImport() in
+      // useGooglePhotosPicker.ts: a call that's about to no-op shouldn't
+      // consume/invalidate a generation.
+      const myGeneration = ++uploadGenerationRef.current
+      const isCurrent = () => uploadGenerationRef.current === myGeneration
+
+      // Runs before any await — establishes this new session, so it's
+      // intentionally not isCurrent()-gated (same discipline as startUpload).
       setUploadState('uploading')
 
       // Capture locally for the same reason as startUpload — a concurrent
@@ -488,36 +578,47 @@ export function useGooglePhotosUpload() {
       if (reconcileOnlyPhotos.length > 0) {
         // Chunked the same way as batch-create (50 per call, KTD2).
         for (const chunk of chunkArray(reconcileOnlyPhotos, 50)) {
+          if (!isCurrent()) return
           const items = chunk.map((p) => ({
             photoId: p.id,
             mediaItemId: photoStates.get(p.id)!.mediaItemId!,
           }))
-          const confirmed = await reconcileAndSetStatus(items, albumId, accessToken)
+          const confirmed = await reconcileAndSetStatus(items, albumId, accessToken, isCurrent)
           if (!confirmed) anyFailure = true
         }
       }
+
+      if (!isCurrent()) return
 
       if (fullRetryPhotos.length > 0) {
         // Re-upload photos whose media item was never created, then
         // batch-create (which performs its own reconciliation per chunk) —
         // the existing full pipeline, unchanged.
-        const newTokens = await uploadWithConcurrency(fullRetryPhotos, accessToken, uploadSinglePhoto)
+        const newTokens = await uploadWithConcurrency(fullRetryPhotos, accessToken, uploadSinglePhoto, isCurrent)
+
+        if (!isCurrent()) return
 
         if (newTokens.length > 0) {
           try {
-            await batchCreate(newTokens, albumId, accessToken)
+            await batchCreate(newTokens, albumId, accessToken, isCurrent)
           } catch {
             anyFailure = true
           }
         }
       }
 
-      setUploadState(anyFailure ? 'error' : 'done')
+      if (isCurrent()) setUploadState(anyFailure ? 'error' : 'done')
     },
     [uploadState, photoStates, uploadSinglePhoto, batchCreate, reconcileAndSetStatus]
   )
 
   const reset = useCallback(() => {
+    // Invalidate any in-flight generation from a startUpload()/retryFailed()
+    // call that's still running — its later isCurrent() checks (guarding
+    // every setPhotoStates/setUploadState after an await) will now all
+    // return false, so a late-resolving confirmation from the superseded
+    // session can no longer land in whatever session runs next.
+    uploadGenerationRef.current += 1
     setUploadState('idle')
     setPhotoStates(new Map())
     albumIdRef.current = undefined
