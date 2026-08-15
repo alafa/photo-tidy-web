@@ -877,7 +877,7 @@ describe('useGooglePhotosUpload — U1: timeout and rate-limit message surfacing
     expect(result.current.photoStates.get('p2')?.error).toBe('Request to Google Photos timed out')
   })
 
-  it('uploadSinglePhoto receives a RATE_LIMITED-status error body: the photo is marked failed with a rate-limit-specific message', async () => {
+  it('uploadSinglePhoto receives a RATE_LIMITED-status error body with retryAfterMs: the photo is marked failed with the wait time included', async () => {
     const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
 
     const mockFetch = vi.fn()
@@ -889,6 +889,28 @@ describe('useGooglePhotosUpload — U1: timeout and rate-limit message surfacing
         error: { message: 'Rate limited by Google Photos', status: 'RATE_LIMITED', retryAfterMs: 30000 },
       }),
     }) // upload p1 rate limited
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('Rate limited by Google — try again in 30s')
+  })
+
+  it('uploadSinglePhoto receives a RATE_LIMITED-status error body with no retryAfterMs: falls back to the fixed message', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: { message: 'Rate limited by Google Photos', status: 'RATE_LIMITED' },
+      }),
+    }) // upload p1 rate limited, no retryAfterMs in the body
     vi.stubGlobal('fetch', mockFetch)
 
     const { result } = renderHook(() => useGooglePhotosUpload())
@@ -1065,6 +1087,44 @@ describe('useGooglePhotosUpload — U2: album membership reconciliation', () => 
     expect(result.current.photoStates.get('p1')?.status).toBe('failed')
     expect(result.current.photoStates.get('p1')?.error).toBe('Media item created but could not be confirmed in the album')
     expect(result.current.photoStates.get('p1')?.mediaItemId).toBe('m1')
+  })
+
+  it('album-creation response has no id (defensive branch): reconciliation is skipped and every photo is failed with "No album to confirm membership against"', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    // Album creation resolves ok, but the response body has no `id` field —
+    // albumIdRef.current (and thus the albumId captured for this upload)
+    // stays undefined even though the album-creation request itself succeeded.
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) }) // album, no id
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // upload p2
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'b.jpg' } },
+        ],
+      }),
+    }) // batchCreate — both succeed, so both are reconcilable
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('error')
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p1')?.error).toBe('No album to confirm membership against')
+    expect(result.current.photoStates.get('p2')?.status).toBe('failed')
+    expect(result.current.photoStates.get('p2')?.error).toBe('No album to confirm membership against')
+
+    // No call was made to the batch-add route — there was no albumId to call it with.
+    expect(mockFetch.mock.calls.some((c) => typeof c[0] === 'string' && c[0].includes('/batch-add'))).toBe(false)
+    // Exactly album + 2 uploads + batchCreate = 4 calls, nothing more.
+    expect(mockFetch.mock.calls.length).toBe(4)
   })
 
   it('KTD9: a batch-create result with success status but no mediaItem.id is its own distinct failure — no reconciliation attempted', async () => {
