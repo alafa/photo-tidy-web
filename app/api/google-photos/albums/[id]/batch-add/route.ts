@@ -40,6 +40,12 @@ export async function POST(
       { status: 400 },
     )
   }
+  if (mediaItemIds.length > 50) {
+    return NextResponse.json(
+      upstreamErrorBody('mediaItemIds exceeds the 50-item limit', 'INVALID_REQUEST'),
+      { status: 400 },
+    )
+  }
 
   const { id } = await params
 

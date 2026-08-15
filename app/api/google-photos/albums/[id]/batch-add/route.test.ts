@@ -64,6 +64,16 @@ describe('POST /api/google-photos/albums/[id]/batch-add', () => {
     expect(mockFetch).not.toHaveBeenCalled()
   })
 
+  it('returns 400 when mediaItemIds exceeds the 50-item limit', async () => {
+    const mediaItemIds = Array.from({ length: 51 }, (_, i) => `m${i}`)
+    const res = await POST(makeRequest('Bearer token-abc', { mediaItemIds }), makeParams())
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error.message).toBe('mediaItemIds exceeds the 50-item limit')
+    expect(body.error.status).toBe('INVALID_REQUEST')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
   it('passes an AbortSignal to the upstream fetch so the request can be bounded', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), json: async () => ({}) })
 
