@@ -16,9 +16,12 @@ export async function GET(
   const { id } = await params
   const { searchParams } = new URL(request.url)
   const items = searchParams.get('items') === 'true'
+  const pageToken = searchParams.get('pageToken')
 
   const url = items
-    ? `https://photospicker.googleapis.com/v1/mediaItems?sessionId=${encodeURIComponent(id)}`
+    ? `https://photospicker.googleapis.com/v1/mediaItems?sessionId=${encodeURIComponent(id)}${
+        pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''
+      }`
     : `https://photospicker.googleapis.com/v1/sessions/${encodeURIComponent(id)}`
 
   let upstream: Response

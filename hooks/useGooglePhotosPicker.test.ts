@@ -652,4 +652,78 @@ describe('useGooglePhotosPicker', () => {
       expect(downloadCalls).toHaveLength(0)
     })
   })
+
+  describe('edge case: media items response is paginated', () => {
+    it('follows nextPageToken across multiple pages and imports every item, not just the first page', async () => {
+      const session = makeSession()
+      const page1 = { mediaItems: makeMediaItemsResponse(2).mediaItems, nextPageToken: 'page-2-token' }
+      const page2 = { mediaItems: makeMediaItemsResponse(1).mediaItems }
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => page1 })
+        .mockResolvedValueOnce({ ok: true, json: async () => page2 })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValue({ ok: true }) // DELETE
+
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'test-token', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('idle')
+      expect(result.current.error).toBeNull()
+      expect(addPhotos).toHaveBeenCalledOnce()
+      const [files] = addPhotos.mock.calls[0]
+      // 2 items from page 1 + 1 item from page 2 = 3, not just page 1's 2.
+      expect(files).toHaveLength(3)
+
+      // The second items-fetch call must have carried the page-1 token.
+      const itemsCalls = mockFetch.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('items=true'),
+      )
+      expect(itemsCalls).toHaveLength(2)
+      expect(itemsCalls[0][0]).toBe('/api/google-photos/sessions/session-123?items=true')
+      expect(itemsCalls[1][0]).toBe(
+        '/api/google-photos/sessions/session-123?items=true&pageToken=page-2-token',
+      )
+    })
+
+    it('stops paginating once a page has no nextPageToken, making exactly one items-fetch call for a single page', async () => {
+      const session = makeSession()
+      const itemsResp = makeMediaItemsResponse(2)
+      const addPhotos = vi.fn().mockResolvedValue(undefined)
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => session })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ ...session, mediaItemsSet: true }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => itemsResp })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValueOnce({ ok: true, blob: async () => makeImageBlob() })
+        .mockResolvedValue({ ok: true }) // DELETE
+
+      const { result } = renderHook(() =>
+        useGooglePhotosPicker({ accessToken: 'test-token', addPhotos })
+      )
+
+      await act(async () => {
+        result.current.startImport()
+        await vi.runAllTimersAsync()
+      })
+
+      expect(result.current.status).toBe('idle')
+      const itemsCalls = mockFetch.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('items=true'),
+      )
+      expect(itemsCalls).toHaveLength(1)
+    })
+  })
 })

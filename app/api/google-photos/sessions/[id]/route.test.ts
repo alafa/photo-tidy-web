@@ -55,6 +55,23 @@ describe('GET /api/google-photos/sessions/[id]', () => {
     expect(await res.json()).toEqual(mediaItems)
   })
 
+  it('forwards pageToken to the upstream mediaItems.list call when present', async () => {
+    const mediaItems = { mediaItems: [{ id: 'item-2' }], nextPageToken: 'next-page' }
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => mediaItems })
+
+    const res = await GET(
+      makeRequest('http://localhost/api/google-photos/sessions/abc?items=true&pageToken=abc123', 'Bearer tok'),
+      makeParams('abc'),
+    )
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://photospicker.googleapis.com/v1/mediaItems?sessionId=abc&pageToken=abc123',
+      expect.objectContaining({ headers: { Authorization: 'Bearer tok' } }),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(mediaItems)
+  })
+
   it('returns a structured 502 JSON error when the fetch to Google throws', async () => {
     mockFetch.mockRejectedValueOnce(new TypeError('network error'))
 

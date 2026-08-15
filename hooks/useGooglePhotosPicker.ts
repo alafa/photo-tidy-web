@@ -256,12 +256,23 @@ export function useGooglePhotosPicker(opts: {
 
     if (!isCurrent() || !mediaItemsSet) return
 
-    // Step 4: Fetch media items
-    let mediaItemsResponse: MediaItemsResponse
-    {
+    // Step 4: Fetch media items. Google's mediaItems.list endpoint paginates
+    // — a selection larger than one page's worth returns a nextPageToken
+    // that must be followed, or the rest of the selection is silently
+    // dropped. Loop until Google reports no further pages. MAX_PAGES is a
+    // safety cap against a pathological/looping token, not an expected limit.
+    const MAX_PAGES = 50
+    const allMediaItems: PickedMediaItem[] = []
+    let pageToken: string | undefined
+    let pageCount = 0
+
+    do {
       let res: Response
+      const url = pageToken
+        ? `/api/google-photos/sessions/${session.id}?items=true&pageToken=${encodeURIComponent(pageToken)}`
+        : `/api/google-photos/sessions/${session.id}?items=true`
       try {
-        res = await fetch(`/api/google-photos/sessions/${session.id}?items=true`, {
+        res = await fetch(url, {
           headers: { Authorization: `Bearer ${accessToken}` },
           signal: controller.signal,
         })
@@ -286,8 +297,9 @@ export function useGooglePhotosPicker(opts: {
         return
       }
 
+      let page: MediaItemsResponse
       try {
-        mediaItemsResponse = await res.json() as MediaItemsResponse
+        page = await res.json() as MediaItemsResponse
       } catch {
         if (isCurrent()) {
           setStatus('error')
@@ -297,9 +309,13 @@ export function useGooglePhotosPicker(opts: {
         cleanupSession(session.id)
         return
       }
-    }
 
-    if (!isCurrent()) return
+      if (!isCurrent()) return
+
+      allMediaItems.push(...(page.mediaItems ?? []))
+      pageToken = page.nextPageToken
+      pageCount += 1
+    } while (pageToken && pageCount < MAX_PAGES)
 
     // The Google Photos Picker API has no way to restrict selection to
     // photos-only, so users can select videos too. This app only supports
@@ -307,7 +323,7 @@ export function useGooglePhotosPicker(opts: {
     // downloaded or shown. Whitelist both signals (type AND mimeType) rather
     // than blacklisting on type !== 'VIDEO', so an undocumented third `type`
     // value fails closed instead of leaking through.
-    const items = (mediaItemsResponse.mediaItems ?? []).filter(
+    const items = allMediaItems.filter(
       (item) => item.type === 'PHOTO' && item.mediaFile.mimeType.startsWith('image/'),
     )
     if (items.length === 0) {
