@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server'
 import {
   extractBearer,
-  isTimeoutError,
-  parseRetryAfterMs,
+  fetchUpstreamWithTimeout,
   upstreamErrorBody,
 } from '@/lib/google-photos-server'
 
@@ -24,9 +23,9 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const bytes = await request.arrayBuffer()
 
-  let upstream: Response
-  try {
-    upstream = await fetch('https://photoslibrary.googleapis.com/v1/uploads', {
+  const result = await fetchUpstreamWithTimeout(
+    'https://photoslibrary.googleapis.com/v1/uploads',
+    {
       method: 'POST',
       headers: {
         Authorization: authHeader,
@@ -36,28 +35,11 @@ export async function POST(request: Request): Promise<NextResponse> {
         'X-Goog-Upload-Protocol': 'raw',
       },
       body: bytes,
-      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-    })
-  } catch (err) {
-    if (isTimeoutError(err)) {
-      return NextResponse.json(
-        upstreamErrorBody('Request to Google Photos timed out', 'REQUEST_TIMEOUT'),
-        { status: 504 },
-      )
-    }
-    return NextResponse.json(
-      upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
-      { status: 502 },
-    )
-  }
-
-  if (upstream.status === 429) {
-    const retryAfterMs = parseRetryAfterMs(upstream.headers.get('Retry-After'))
-    return NextResponse.json(
-      upstreamErrorBody('Rate limited by Google Photos', 'RATE_LIMITED', retryAfterMs),
-      { status: 429 },
-    )
-  }
+    },
+    UPLOAD_TIMEOUT_MS,
+  )
+  if ('errorResponse' in result) return result.errorResponse
+  const upstream = result.response
 
   if (!upstream.ok) {
     return NextResponse.json(upstreamErrorBody('Upload failed', 'UPLOAD_FAILED'), { status: upstream.status })

@@ -1,3 +1,5 @@
+import { NextResponse } from 'next/server'
+
 export function extractBearer(request: Request): string | null {
   const auth = request.headers.get('Authorization')
   if (!auth || !auth.startsWith('Bearer ')) return null
@@ -46,4 +48,51 @@ export function isTimeoutError(err: unknown): boolean {
   if (typeof err !== 'object' || err === null || !('name' in err)) return false
   const name = (err as { name: unknown }).name
   return name === 'TimeoutError' || name === 'AbortError'
+}
+
+// Shared fetch-plus-timeout-plus-429 handling for every route that proxies a
+// request to the Google Photos API. Centralizes the try/catch around the
+// fetch (504 on timeout, 502 on any other failure to reach upstream) and the
+// 429 rate-limit check, so each route only owns the parts that differ:
+// building the request and interpreting a non-429 response.
+//
+// Returns the raw upstream Response on anything other than a timeout,
+// unreachable-host failure, or 429 — including other non-2xx statuses —
+// so callers keep their existing JSON-parsing/pass-through logic untouched.
+export async function fetchUpstreamWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<{ response: Response } | { errorResponse: NextResponse }> {
+  let response: Response
+  try {
+    response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      return {
+        errorResponse: NextResponse.json(
+          upstreamErrorBody('Request to Google Photos timed out', 'REQUEST_TIMEOUT'),
+          { status: 504 },
+        ),
+      }
+    }
+    return {
+      errorResponse: NextResponse.json(
+        upstreamErrorBody('Failed to reach Google Photos API', 'UPSTREAM_UNREACHABLE'),
+        { status: 502 },
+      ),
+    }
+  }
+
+  if (response.status === 429) {
+    const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'))
+    return {
+      errorResponse: NextResponse.json(
+        upstreamErrorBody('Rate limited by Google Photos', 'RATE_LIMITED', retryAfterMs),
+        { status: 429 },
+      ),
+    }
+  }
+
+  return { response }
 }
