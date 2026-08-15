@@ -18,3 +18,10 @@ A single photo the user selected inside a Picker Session, described by Google (f
 
 ### Album
 The destination Google Photos album a batch of photos is uploaded into. The app creates exactly one Album per upload run, named from the user-supplied batch name. Running the upload again in the same session — even with no changes since the last run — creates a new, separate Album rather than reusing the one from a prior run, because a photo's own uploaded bytes can never be replaced in place inside a previously-created item; the Album is the unit that gets replaced instead.
+
+## Photo Deduplication
+
+### Cluster
+A group of photos in the currently loaded batch that the app has detected as near-duplicates or identical to each other. A photo with no match to anything else in the batch is still a Cluster, just with a single member.
+
+Members within a Cluster relate to each other as Identical (the same photographic shot, differing only by resolution, format, or compression) or Similar (the same moment or scene, such as a burst or group-photo sequence, without being the same shot) — a single Cluster can contain both relationships across different subsets of its members. Identical members can be reduced to one best-quality copy without human judgment; Similar members always need a human pick, since there is no automatic "best" among genuinely different shots.
