@@ -56,17 +56,13 @@ function makeMetrics(hash: string | null, width = 100, height = 100, size = 1000
 describe('ClusterView', () => {
   // --- Grouping / clustering ------------------------------------------------
 
-  it('orders clusters by similarity-based discovery order, not by each cluster\'s earliest timestamp', () => {
+  it('orders clusters by their earliest member\'s timestamp, not array/discovery order', () => {
     // Cluster X ({p1,p2}) is placed first in the photos array but carries
     // LATER capturedAt timestamps than cluster Y ({p3,p4}), placed second
-    // in the array with EARLIER timestamps. The old chronological-by-
-    // earliest-member ordering would have rendered Y first. Pivot B
-    // replaces that with centroid + hierarchicalOrder similarity ordering
-    // — with exactly two clusters, hierarchicalOrder's single merge always
-    // preserves the clusters' original discovery order (see
-    // lib/photo-clustering.ts's hierarchicalOrder: with only two leaves,
-    // their indices are always {0,1}, so the left/right split trivially
-    // matches input order), so X should render first regardless of dates.
+    // in the array with EARLIER timestamps. Cluster position is driven by
+    // chronological order (earliest member's capturedAt) — the same rule
+    // every other view in the app uses (hooks/usePhotos.ts's sortPhotos) —
+    // so Y must render first despite appearing later in the input array.
     const p1 = makeEntry('p1', 'p1.jpg', '2024-06-01T00:00:00Z', 0)
     const p2 = makeEntry('p2', 'p2.jpg', '2024-06-02T00:00:00Z', 1)
     const p3 = makeEntry('p3', 'p3.jpg', '2024-01-01T00:00:00Z', 2)
@@ -92,7 +88,59 @@ describe('ClusterView', () => {
     const order = screen.getAllByRole('img').map((img) => img.getAttribute('alt'))
     const xIndices = [order.indexOf('p1.jpg'), order.indexOf('p2.jpg')]
     const yIndices = [order.indexOf('p3.jpg'), order.indexOf('p4.jpg')]
-    expect(Math.max(...xIndices)).toBeLessThan(Math.min(...yIndices))
+    expect(Math.max(...yIndices)).toBeLessThan(Math.min(...xIndices))
+  })
+
+  it('never reorders an individual photo when the similarity slider moves, even as an unrelated pair clusters', () => {
+    // a and b are a moderate-distance pair (0.3) that only clusters once
+    // the slider loosens; c and d are unrelated singles with no match to
+    // anything at any threshold this test uses. Before and after the
+    // slider change, c and d must stay exactly where their own timestamps
+    // place them — the bug this fixes was the whole grid reshuffling on
+    // every threshold tick even for photos whose clustering didn't change.
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
+    const d = makeEntry('d', 'd.jpg', '2024-01-04T00:00:00Z', 3)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(3, 12)))], // distance to a: 0.3
+      ['c', makeMetrics(hashFromPositions(range(50, 59)))], // orthogonal to everything
+      ['d', makeMetrics(hashFromPositions(range(80, 89)))], // orthogonal to everything
+    ])
+
+    render(
+      <ClusterView
+        photos={[a, b, c, d]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
+
+    // At the 40% default (threshold 0.2), a/b's 0.3 distance is too far —
+    // all four render as plain, chronologically-ordered singles.
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+    expect(screen.getAllByRole('img').map((img) => img.getAttribute('alt'))).toEqual([
+      'a.jpg',
+      'b.jpg',
+      'c.jpg',
+      'd.jpg',
+    ])
+
+    // 70% maps to threshold 0.35 — loose enough to merge a/b, but c and d
+    // remain untouched singles at their own chronological positions.
+    const slider = screen.getByRole('slider', { name: /similarity/i })
+    fireEvent.change(slider, { target: { value: '70' } })
+
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(1)
+    expect(screen.getAllByRole('img').map((img) => img.getAttribute('alt'))).toEqual([
+      'a.jpg',
+      'b.jpg',
+      'c.jpg',
+      'd.jpg',
+    ])
   })
 
   it('reorders members within a cluster by mutual similarity rather than preserving the original array order', () => {
@@ -330,6 +378,28 @@ describe('ClusterView', () => {
 
     const heading = screen.getByRole('heading', { level: 2 })
     expect(heading.textContent).toContain('2 related photos')
+  })
+
+  it('gives a cluster a visually distinct bordered/shaded container that a single photo does not have', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const solo = makeEntry('solo', 'solo.jpg', '2024-01-03T00:00:00Z', 2)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a: 0.2 (default threshold)
+      ['solo', makeMetrics(hashFromPositions(range(80, 89)))], // orthogonal — stays a single
+    ])
+
+    render(<ClusterView photos={[a, b, solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+
+    const heading = screen.getByRole('heading', { level: 2 })
+    const clusterContainer = heading.closest('section')
+    expect(clusterContainer?.className).toMatch(/border/)
+
+    // The single photo's own container (its PhotoCard wrapper div) carries
+    // no such border/background — only real clusters get the card chrome.
+    const soloContainer = screen.getByAltText('solo.jpg').closest('div.flex.flex-col')
+    expect(soloContainer?.className).not.toMatch(/border/)
   })
 
   it('renders a percentage-based similarity slider that re-clusters live as it moves looser', () => {

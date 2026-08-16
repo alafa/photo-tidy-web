@@ -5,7 +5,6 @@ import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import {
   buildDendrogram,
-  centroid,
   cosineDistance,
   cutDendrogram,
   hashToVector,
@@ -75,6 +74,27 @@ interface ClusterViewProps {
  */
 function clusterKey(cluster: Cluster): string {
   return [...cluster.members].sort().join(',')
+}
+
+/**
+ * Earliest `capturedAt` (in ms) among a cluster's members — the position a
+ * cluster's card takes in the grid. Null timestamps are excluded from the
+ * min and the result falls back to `Infinity` when every member is null,
+ * mirroring `hooks/usePhotos.ts`'s `sortPhotos` null-last convention, so an
+ * all-null cluster sorts after every dated cluster. For a single
+ * (unclustered) photo — a one-member "cluster" — this is just that photo's
+ * own `capturedAt`, so it sorts at exactly the position it already holds in
+ * the `photos` prop; changing the similarity threshold never moves a photo
+ * whose own cluster membership didn't change.
+ */
+function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
+  let earliest = Infinity
+  for (const id of cluster.members) {
+    const capturedAt = photosById.get(id)?.capturedAt ?? null
+    if (capturedAt === null) continue
+    earliest = Math.min(earliest, capturedAt.getTime())
+  }
+  return earliest
 }
 
 /**
@@ -277,20 +297,19 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     [hashInputs, dendrogram, distanceThreshold]
   )
 
-  // Orders both the clusters themselves (by centroid similarity) and each
-  // cluster's own members (by their direct similarity to each other) via
-  // the same hierarchical-clustering leaves_list technique — so visually
-  // related clusters land near each other, and the most similar photos
-  // within a cluster sit adjacent. Operates on the (small) cluster count
-  // and per-cluster member counts, not the full photo count, so it's cheap
-  // even though it reruns whenever the threshold-dependent `rawClusters`
-  // does.
+  // Reorders each cluster's own members by mutual similarity (most similar
+  // photos sit adjacent) via the hierarchical-clustering leaves_list
+  // technique, then places clusters — and single, unclustered photos, which
+  // are just one-member clusters — in chronological order by earliest
+  // member `capturedAt`. This is the app's one ordering rule everywhere
+  // else (`hooks/usePhotos.ts`'s `sortPhotos`), and critically means a
+  // photo's position never changes when the similarity slider moves unless
+  // its own cluster membership actually changes: an earlier similarity-only
+  // ordering (centroid + leaves_list across clusters) reshuffled the whole
+  // grid on every threshold tick, which read as random jumping even though
+  // the underlying clustering was stable.
   const displayClusters = useMemo(() => {
-    const reorderedByKey = new Map<string, Cluster>()
-    const centroidsWithVector: Array<{ id: string; vector: number[] }> = []
-    const withoutVector: Cluster[] = []
-
-    for (const cluster of rawClusters) {
+    const reordered: Cluster[] = rawClusters.map((cluster) => {
       const memberVectors = cluster.members
         .map((id) => ({ id, vector: vectorsById.get(id) }))
         .filter((m): m is { id: string; vector: number[] } => m.vector !== undefined)
@@ -300,30 +319,19 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
           ? [...hierarchicalOrder(memberVectors), ...cluster.members.filter((id) => !vectorsById.has(id))]
           : cluster.members
 
-      const key = clusterKey(cluster)
-      const reordered: Cluster = { id: cluster.id, members: orderedMemberIds }
-      reorderedByKey.set(key, reordered)
+      return { id: cluster.id, members: orderedMemberIds }
+    })
 
-      if (memberVectors.length > 0) {
-        centroidsWithVector.push({ id: key, vector: centroid(memberVectors.map((m) => m.vector)) })
-      } else {
-        // No member has a resolved hash yet (or ever will, if undecodable)
-        // — nothing to meaningfully place by similarity. Appended after
-        // every similarity-ordered cluster, in their original (discovery)
-        // order, as a stable fallback.
-        withoutVector.push(reordered)
-      }
-    }
-
-    const orderedKeys = hierarchicalOrder(centroidsWithVector)
-    return [...orderedKeys.map((key) => reorderedByKey.get(key)!), ...withoutVector]
-  }, [rawClusters, vectorsById])
+    return reordered.sort(
+      (a, b) => earliestCapturedAtMs(a, photosById) - earliestCapturedAtMs(b, photosById)
+    )
+  }, [rawClusters, vectorsById, photosById])
 
   // A cluster with only one member isn't a duplicate/near-duplicate of
   // anything and shouldn't visually read as a "cluster". Adjacent
-  // singletons in the similarity-ordered sequence are bundled into one
-  // plain grid block with no cluster chrome at all; a real (2+-member)
-  // cluster keeps its own section.
+  // singletons in the chronological sequence are bundled into one plain
+  // grid block with no cluster chrome at all; a real (2+-member) cluster
+  // keeps its own section.
   const renderBlocks = useMemo(() => {
     const blocks: Array<{ type: 'cluster'; cluster: Cluster } | { type: 'singles'; clusters: Cluster[] }> = []
     for (const cluster of displayClusters) {
@@ -482,7 +490,10 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
         const timestampSelected = timestampSelections.get(key) ?? new Set<string>()
 
         return (
-          <section key={key} className="flex flex-col gap-3">
+          <section
+            key={key}
+            className="flex flex-col gap-3 rounded-xl border border-zinc-300 dark:border-zinc-600 bg-zinc-100/70 dark:bg-zinc-800/40 p-4"
+          >
             <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
               {cluster.members.length} related photos
             </h2>
