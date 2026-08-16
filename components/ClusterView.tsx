@@ -69,6 +69,74 @@ function memberTier(cluster: Cluster, memberId: string): MemberTier {
 }
 
 /**
+ * A stable, content-derived identity for a cluster: the sorted-and-joined
+ * member id list. `clusterPhotos` reassigns `cluster.id` as `cluster-${N}`
+ * fresh on every call, purely from discovery order — as metrics resolve
+ * asynchronously (KTD12) and clusters merge/split/reorder, a given index can
+ * end up pointing at a completely different real-world group of photos than
+ * it did on a prior render. Using `cluster.id` as a React key or a
+ * `similarSelections`/`timestampSelections` Map key would let a stale
+ * selection from one cluster silently attach to an unrelated cluster that
+ * later inherits the same index. This key is used everywhere identity needs
+ * to survive a recompute; `cluster.id` itself is not used for that purpose
+ * anywhere in this component.
+ */
+function clusterKey(cluster: Cluster): string {
+  return [...cluster.members].sort().join(',')
+}
+
+/**
+ * Partitions a cluster's identical-tagged members into their own connected
+ * sub-groups, considering only `identical`-tier edges. A single connected
+ * component from `clusterPhotos` can contain two or more separate
+ * identical-tier duplicate pairs bridged together purely by a weaker
+ * `similar`-tier edge (e.g. a burst chain where frame 2 and 3 are identical,
+ * frame 5 and 6 are a separate identical pair, and frame 3~5 is only
+ * similar) — treating every identical-tagged member in the whole cluster as
+ * one group would auto-delete photos that are only weakly `similar` to the
+ * kept survivor, not actually duplicates of it. Each returned sub-group is
+ * resolved to its own single best-quality survivor independently.
+ */
+function identicalSubgroups(cluster: Cluster): string[][] {
+  const identicalIds = cluster.members.filter((id) => memberTier(cluster, id) === 'identical')
+  const parent = new Map<string, string>()
+  for (const id of identicalIds) parent.set(id, id)
+
+  function find(id: string): string {
+    let root = id
+    while (parent.get(root) !== root) root = parent.get(root) as string
+    let current = id
+    while (parent.get(current) !== root) {
+      const next = parent.get(current) as string
+      parent.set(current, root)
+      current = next
+    }
+    return root
+  }
+
+  function union(a: string, b: string): void {
+    const rootA = find(a)
+    const rootB = find(b)
+    if (rootA !== rootB) parent.set(rootA, rootB)
+  }
+
+  for (const relationship of cluster.relationships) {
+    if (relationship.tier === 'identical' && parent.has(relationship.a) && parent.has(relationship.b)) {
+      union(relationship.a, relationship.b)
+    }
+  }
+
+  const groups = new Map<string, string[]>()
+  for (const id of identicalIds) {
+    const root = find(id)
+    const group = groups.get(root) ?? []
+    group.push(id)
+    groups.set(root, group)
+  }
+  return [...groups.values()]
+}
+
+/**
  * Earliest `capturedAt` (in ms) among a cluster's members, for R3's
  * chronological ordering. Null timestamps are excluded from the min and the
  * result falls back to `Infinity` when every member is null — mirroring
@@ -262,18 +330,19 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   // tracks which removals have already been *initiated* so the effect below
   // never issues the same `removePhotos` call twice, and never reacts to the
   // smaller post-removal cluster shape as if it were a new duplicate set.
-  const identicalResolutions = useMemo(() => sortedClusters.flatMap((cluster) => {
-    const identicalIds = cluster.members.filter((id) => memberTier(cluster, id) === 'identical')
-    if (identicalIds.length < 2) return [] // nothing to compare against — defensive guard
-    const best = bestQualityMember(identicalIds, metrics)
-    const toRemove = identicalIds.filter((id) => id !== best)
-    if (toRemove.length === 0) return []
-    // Keyed by the sorted ids being removed (not `cluster.id`, which is
-    // reassigned on every `clusterPhotos` call) so the same real-world
-    // removal is recognized as already-handled even across recomputes.
-    const key = [...toRemove].sort().join(',')
-    return [{ key, toRemove }]
-  }), [sortedClusters, metrics])
+  const identicalResolutions = useMemo(() => sortedClusters.flatMap((cluster) =>
+    identicalSubgroups(cluster).flatMap((group) => {
+      if (group.length < 2) return [] // nothing to compare against — defensive guard
+      const best = bestQualityMember(group, metrics)
+      const toRemove = group.filter((id) => id !== best)
+      if (toRemove.length === 0) return []
+      // Keyed by the sorted ids being removed (not `cluster.id`, which is
+      // reassigned on every `clusterPhotos` call) so the same real-world
+      // removal is recognized as already-handled even across recomputes.
+      const key = [...toRemove].sort().join(',')
+      return [{ key, toRemove }]
+    })
+  ), [sortedClusters, metrics])
 
   const initiatedRemovalsRef = useRef<Set<string>>(new Set())
 
@@ -286,7 +355,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   })
 
   // R7: per-cluster similar-tier suggested-keep selection, scoped by
-  // `cluster.id`. A cluster with no recorded selection yet falls back to the
+  // `clusterKey` (not `cluster.id` — see its doc comment). A cluster with no recorded selection yet falls back to the
   // best-by-quality member as its suggested keep (KTD9) — computed lazily on
   // read rather than seeded via an effect, so there's no extra render/effect
   // cycle before the suggested selection is visible.
@@ -306,7 +375,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   }
 
   // U5: per-cluster "selected for timestamp edit" selection, keyed by
-  // `cluster.id`. Independent of `similarSelections` above — a different
+  // `clusterKey` (not `cluster.id`). Independent of `similarSelections` above — a different
   // concept (which similar-tier members survive dedup) even though both use
   // the same checkbox UI pattern. Every member of a cluster is eligible
   // (not just similar-tier), and defaults to empty (nothing selected) until
@@ -321,14 +390,15 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   return (
     <div className="flex flex-col gap-8">
       {sortedClusters.map((cluster) => {
+        const key = clusterKey(cluster)
         const similarIds = cluster.members.filter((id) => memberTier(cluster, id) === 'similar')
         const selectedKeepers = similarIds.length > 0
-          ? similarSelections.get(cluster.id) ?? defaultSimilarSelection(similarIds)
+          ? similarSelections.get(key) ?? defaultSimilarSelection(similarIds)
           : null
-        const timestampSelected = timestampSelections.get(cluster.id) ?? new Set<string>()
+        const timestampSelected = timestampSelections.get(key) ?? new Set<string>()
 
         return (
-          <section key={cluster.id} className="flex flex-col gap-3">
+          <section key={key} className="flex flex-col gap-3">
             <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
               {cluster.members.length > 1 ? `${cluster.members.length} related photos` : 'Photo'}
             </h2>
@@ -351,7 +421,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                       objectUrl={getObjectUrl(entry.file)}
                       onSelect={
                         isSimilar
-                          ? (checked) => toggleSimilarSelection(cluster.id, similarIds, id, checked)
+                          ? (checked) => toggleSimilarSelection(key, similarIds, id, checked)
                           : undefined
                       }
                       checked={isSimilar ? (selectedKeepers?.has(id) ?? false) : undefined}
@@ -366,7 +436,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                       <input
                         type="checkbox"
                         checked={timestampSelected.has(id)}
-                        onChange={(e) => toggleTimestampSelection(cluster.id, id, e.target.checked)}
+                        onChange={(e) => toggleTimestampSelection(key, id, e.target.checked)}
                         aria-label={`Select ${entry.filename} for timestamp edit`}
                         className="h-3.5 w-3.5"
                       />
@@ -380,7 +450,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
               <div>
                 <button
                   type="button"
-                  onClick={() => handleRemoveNonSelected(cluster.id, similarIds)}
+                  onClick={() => handleRemoveNonSelected(key, similarIds)}
                   disabled={selectedKeepers.size === 0}
                   className="px-3 py-1.5 text-xs font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >

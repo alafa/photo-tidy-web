@@ -250,6 +250,44 @@ describe('ClusterView', () => {
     expect(removePhotos.mock.calls[1][0]).not.toContain('p2')
   })
 
+  it('resolves two disjoint identical-tier pairs within one connected cluster independently, never removing a photo only weakly similar to the kept survivor', () => {
+    // p1-p2: identical (distance 0). p3-p4: identical (distance 0), a
+    // completely separate duplicate pair. p1/p2 to p3/p4: distance 4
+    // (similar) — this bridges the two pairs into ONE connected component
+    // (clusterPhotos merges transitively, KTD4), but they are NOT the same
+    // duplicate: p3/p4 must survive as their own pair, resolved
+    // independently of p1/p2's resolution.
+    const p1 = makeEntry('p1', 'p1.jpg', '2024-01-01T00:00:00Z', 0)
+    const p2 = makeEntry('p2', 'p2.jpg', '2024-01-02T00:00:00Z', 1)
+    const p3 = makeEntry('p3', 'p3.jpg', '2024-01-03T00:00:00Z', 2)
+    const p4 = makeEntry('p4', 'p4.jpg', '2024-01-04T00:00:00Z', 3)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['p1', makeMetrics('0000000000000000', 400, 300)], // p1-p2 pair, p1 higher quality
+      ['p2', makeMetrics('0000000000000000', 100, 100)],
+      ['p3', makeMetrics('000000000000000f', 300, 300)], // p3-p4 pair, p3 higher quality
+      ['p4', makeMetrics('000000000000000f', 100, 100)],
+    ])
+    const removePhotos = vi.fn()
+
+    render(
+      <ClusterView photos={[p1, p2, p3, p4]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
+    )
+
+    // All four are one connected component (single heading), but two
+    // independent identical-tier removals fire — never one removal that
+    // treats all four as a single "keep one" group.
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(1)
+    expect(removePhotos).toHaveBeenCalledTimes(2)
+    const removedIds = removePhotos.mock.calls.map((call) => call[0])
+    expect(removedIds).toContainEqual(['p2'])
+    expect(removedIds).toContainEqual(['p4'])
+    // Neither call ever removes more than one id, and the two calls never
+    // cross-contaminate (p2's removal never bundles in p3/p4, and vice versa).
+    for (const ids of removedIds) {
+      expect(ids).toHaveLength(1)
+    }
+  })
+
   it('KTD9: breaks a pixel-count tie by file size, keeping/pre-selecting the larger file', () => {
     const m1 = makeEntry('m1', 'm1.jpg', '2024-01-01T00:00:00Z', 0)
     const m2 = makeEntry('m2', 'm2.jpg', '2024-01-02T00:00:00Z', 1)
@@ -489,5 +527,82 @@ describe('ClusterView', () => {
 
     expect(batchSetTimestamps).toHaveBeenCalledTimes(1)
     expect(batchSetTimestamps.mock.calls[0][0].slice().sort()).toEqual(['w', 'x'])
+  })
+
+  it('does not misapply a similar-tier selection to a different cluster that inherits its old discovery-order id', () => {
+    // Three mutually-unrelated similar-tier pairs: {m1,m2}, {f,g}, {h,i}.
+    // clusterPhotos assigns cluster.id purely by discovery order over the
+    // `photos` array, so in this render {m1,m2}=cluster-0, {f,g}=cluster-1,
+    // {h,i}=cluster-2.
+    const m1 = makeEntry('m1', 'm1.jpg', '2024-01-01T00:00:00Z', 0)
+    const m2 = makeEntry('m2', 'm2.jpg', '2024-01-02T00:00:00Z', 1)
+    const f = makeEntry('f', 'f.jpg', '2024-01-03T00:00:00Z', 2)
+    const g = makeEntry('g', 'g.jpg', '2024-01-04T00:00:00Z', 3)
+    const h = makeEntry('h', 'h.jpg', '2024-01-05T00:00:00Z', 4)
+    const i = makeEntry('i', 'i.jpg', '2024-01-06T00:00:00Z', 5)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['m1', makeMetrics('ff00000000000000', 500, 500)],
+      ['m2', makeMetrics('fff0000000000000', 500, 500)], // distance to m1: 4 (similar)
+      ['f', makeMetrics('0000ff0000000000', 200, 200)],
+      ['g', makeMetrics('0000fff000000000', 1000, 1000)], // distance to f: 4 (similar); default keeper
+      ['h', makeMetrics('00000000ff000000', 1000, 1000)], // default keeper
+      ['i', makeMetrics('00000000fff00000', 200, 200)], // distance to h: 4 (similar)
+    ])
+    const removePhotos = vi.fn()
+
+    const { rerender } = render(
+      <ClusterView
+        photos={[m1, m2, f, g, h, i]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={removePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
+
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(3)
+
+    // Override {f,g}'s dedup selection: g is already the default keeper;
+    // also select f, so the {f,g} cluster's selection becomes {f, g} —
+    // ids that never overlap with {h,i}'s real member ids.
+    fireEvent.click(screen.getByAltText('f.jpg'))
+
+    // Simulate {m1,m2}'s cluster disappearing entirely from the batch (e.g.
+    // already resolved and removed via some earlier interaction). This
+    // shifts {f,g} from cluster-1 to cluster-0, and {h,i} from cluster-2 to
+    // cluster-1 — the exact numeric id that used to belong to {f,g}.
+    rerender(
+      <ClusterView
+        photos={[f, g, h, i]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={removePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
+
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(2)
+
+    // {f,g}'s own selection survives the shift correctly (content-derived
+    // key, not the reassigned numeric cluster.id): both f and g still show
+    // as selected keepers.
+    expect(screen.getByAltText('f.jpg').parentElement?.className).toContain('ring-zinc-900')
+    expect(screen.getByAltText('g.jpg').parentElement?.className).toContain('ring-zinc-900')
+
+    // {h,i} — now occupying the numeric slot {f,g} used to hold — must NOT
+    // inherit {f,g}'s stale selection. It falls back to its own fresh
+    // default: h (higher quality) pre-selected, i not.
+    expect(screen.getByAltText('h.jpg').parentElement?.className).toContain('ring-zinc-900')
+    expect(screen.getByAltText('i.jpg').parentElement?.className).not.toContain('ring-zinc-900')
+
+    // {f,g}'s section renders first (earlier capturedAt), {h,i}'s second.
+    const confirmButtons = screen.getAllByRole('button', { name: /remove non-selected/i })
+    expect(confirmButtons).toHaveLength(2)
+    fireEvent.click(confirmButtons[1]) // {h,i}'s confirm button
+
+    // Only i (the correctly-computed non-keeper) is removed — never both h
+    // and i, and never anything derived from {f,g}'s stale selection.
+    expect(removePhotos).toHaveBeenCalledTimes(1)
+    expect(removePhotos.mock.calls[0][0]).toEqual(['i'])
   })
 })
