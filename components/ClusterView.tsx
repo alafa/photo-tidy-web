@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import { clusterPhotos, type Cluster, type RelationshipTier } from '@/lib/photo-clustering'
+import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 import PhotoCard from './PhotoCard'
 
 // KTD2's starting Hamming-distance thresholds (out of a 64-bit hash) — kept
@@ -37,35 +38,28 @@ interface ClusterViewProps {
   batchSetTimestamps: (ids: string[], anchorDate: Date) => void
 }
 
-/** Parse a datetime-local string ("YYYY-MM-DDTHH:MM") as UTC clock time. Duplicated
- * from `PhotoCard.tsx`/`BatchEditPanel.tsx` per this codebase's established
- * convention of duplicating this small helper rather than extracting a shared
- * module. */
-function parseDatetimeLocalAsUTC(value: string): Date | null {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
-  if (!match) return null
-  const [, y, mo, d, h, mi] = match.map(Number)
-  return new Date(Date.UTC(y, mo - 1, d, h, mi, 0))
-}
-
 type MemberTier = RelationshipTier | null
 
 /**
- * A cluster's `relationships` are per-pair, not per-member. This derives a
- * single "highest tier this member participates in" label for rendering: a
- * member touched by any `identical`-tier relationship is identical-flagged
- * (identical wins over similar); else similar-flagged if touched by any
- * `similar`-tier relationship; else (a true singleton with zero
- * relationships) no flag at all.
+ * A cluster's `relationships` are per-pair, not per-member. This computes,
+ * in one O(edges) pass, a "highest tier this member participates in" label
+ * for every member: a member touched by any `identical`-tier relationship
+ * is identical-flagged (identical wins over similar); else similar-flagged
+ * if touched by any `similar`-tier relationship; else (a true singleton
+ * with zero relationships) no flag at all. Computed once per cluster
+ * (memoized alongside `sortedClusters`) rather than re-scanning
+ * `cluster.relationships` from scratch for every member on every render.
  */
-function memberTier(cluster: Cluster, memberId: string): MemberTier {
-  let sawSimilar = false
+function computeMemberTiers(cluster: Cluster): Map<string, MemberTier> {
+  const tiers = new Map<string, MemberTier>()
+  for (const id of cluster.members) tiers.set(id, null)
   for (const relationship of cluster.relationships) {
-    if (relationship.a !== memberId && relationship.b !== memberId) continue
-    if (relationship.tier === 'identical') return 'identical'
-    sawSimilar = true
+    for (const id of [relationship.a, relationship.b]) {
+      if (tiers.get(id) === 'identical') continue
+      tiers.set(id, relationship.tier === 'identical' ? 'identical' : 'similar')
+    }
   }
-  return sawSimilar ? 'similar' : null
+  return tiers
 }
 
 /**
@@ -97,8 +91,8 @@ function clusterKey(cluster: Cluster): string {
  * kept survivor, not actually duplicates of it. Each returned sub-group is
  * resolved to its own single best-quality survivor independently.
  */
-function identicalSubgroups(cluster: Cluster): string[][] {
-  const identicalIds = cluster.members.filter((id) => memberTier(cluster, id) === 'identical')
+function identicalSubgroups(cluster: Cluster, tiers: Map<string, MemberTier>): string[][] {
+  const identicalIds = cluster.members.filter((id) => tiers.get(id) === 'identical')
   const parent = new Map<string, string>()
   for (const id of identicalIds) parent.set(id, id)
 
@@ -325,13 +319,22 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     )
   }, [photos, metrics, photosById])
 
+  // Per-cluster member-tier maps, computed once per cluster (O(edges) each)
+  // alongside `sortedClusters` rather than re-scanning relationships from
+  // scratch for every member on every render (including renders triggered
+  // by unrelated selection-state updates elsewhere in this component).
+  const clusterTiers = useMemo(
+    () => new Map(sortedClusters.map((cluster) => [clusterKey(cluster), computeMemberTiers(cluster)])),
+    [sortedClusters]
+  )
+
   // R6: per-cluster identical-tier auto-resolution, derived from
   // `sortedClusters` so it only recomputes alongside it. A ref (not state)
   // tracks which removals have already been *initiated* so the effect below
   // never issues the same `removePhotos` call twice, and never reacts to the
   // smaller post-removal cluster shape as if it were a new duplicate set.
   const identicalResolutions = useMemo(() => sortedClusters.flatMap((cluster) =>
-    identicalSubgroups(cluster).flatMap((group) => {
+    identicalSubgroups(cluster, clusterTiers.get(clusterKey(cluster))!).flatMap((group) => {
       if (group.length < 2) return [] // nothing to compare against — defensive guard
       const best = bestQualityMember(group, metrics)
       const toRemove = group.filter((id) => id !== best)
@@ -342,7 +345,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
       const key = [...toRemove].sort().join(',')
       return [{ key, toRemove }]
     })
-  ), [sortedClusters, metrics])
+  ), [sortedClusters, clusterTiers, metrics])
 
   const initiatedRemovalsRef = useRef<Set<string>>(new Set())
 
@@ -391,7 +394,8 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     <div className="flex flex-col gap-8">
       {sortedClusters.map((cluster) => {
         const key = clusterKey(cluster)
-        const similarIds = cluster.members.filter((id) => memberTier(cluster, id) === 'similar')
+        const tiers = clusterTiers.get(key)!
+        const similarIds = cluster.members.filter((id) => tiers.get(id) === 'similar')
         const selectedKeepers = similarIds.length > 0
           ? similarSelections.get(key) ?? defaultSimilarSelection(similarIds)
           : null
@@ -406,7 +410,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
               {cluster.members.map((id) => {
                 const entry = photosById.get(id)
                 if (!entry) return null
-                const tier = memberTier(cluster, id)
+                const tier = tiers.get(id) ?? null
                 const isSimilar = tier === 'similar'
                 return (
                   <div

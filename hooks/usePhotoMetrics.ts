@@ -110,7 +110,13 @@ export function usePhotoMetrics(photos: PhotoEntry[]): Map<string, PhotoMetrics 
       }
     }
 
-    run()
+    run().catch((error: unknown) => {
+      // computePhotoMetrics is designed to never throw (KTD3) — this is a
+      // last-resort guard against an unexpected rejection so a single bad
+      // chunk halts this generation's loop loudly instead of silently
+      // leaving the remaining pending photos as "still computing" forever.
+      console.error('usePhotoMetrics: metrics computation failed', error)
+    })
     // No cleanup needed beyond the generation bump above: a superseded
     // run's remaining awaits will each find isCurrent() false and stop
     // before writing or scheduling further work.

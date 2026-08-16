@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
+import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'short',
@@ -25,14 +26,6 @@ function toDatetimeLocal(date: Date): string {
   const h = String(date.getUTCHours()).padStart(2, '0')
   const mi = String(date.getUTCMinutes()).padStart(2, '0')
   return `${y}-${mo}-${d}T${h}:${mi}`
-}
-
-/** Parse a datetime-local string ("YYYY-MM-DDTHH:MM") as UTC clock time. */
-function parseDatetimeLocalAsUTC(value: string): Date | null {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
-  if (!match) return null
-  const [, y, mo, d, h, mi] = match.map(Number)
-  return new Date(Date.UTC(y, mo - 1, d, h, mi, 0))
 }
 
 type Props = {
