@@ -297,7 +297,7 @@ export default function PhotoUploadPage() {
             )}
 
             {viewMode === 'clusters' ? (
-              <ClusterView photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />
+              <ClusterView photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />
             ) : (
               <DndContext
                 sensors={sensors}
