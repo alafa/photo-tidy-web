@@ -28,6 +28,24 @@ interface ClusterViewProps {
    * removal.
    */
   removePhotos: (ids: string[]) => void
+  /**
+   * `hooks/usePhotos.ts`'s `batchSetTimestamps`, called unchanged (KTD10,
+   * R10) for U5's cluster-scoped batch timestamp editing. It already applies
+   * the app's one-second-offset convention per selected photo in display
+   * order — this component just needs to call it with the right ids/date.
+   */
+  batchSetTimestamps: (ids: string[], anchorDate: Date) => void
+}
+
+/** Parse a datetime-local string ("YYYY-MM-DDTHH:MM") as UTC clock time. Duplicated
+ * from `PhotoCard.tsx`/`BatchEditPanel.tsx` per this codebase's established
+ * convention of duplicating this small helper rather than extracting a shared
+ * module. */
+function parseDatetimeLocalAsUTC(value: string): Date | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
+  if (!match) return null
+  const [, y, mo, d, h, mi] = match.map(Number)
+  return new Date(Date.UTC(y, mo - 1, d, h, mi, 0))
 }
 
 type MemberTier = 'identical' | 'similar' | null
@@ -102,7 +120,96 @@ const TIER_LABELS: Record<'identical' | 'similar', string> = {
   similar: 'Similar',
 }
 
-export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos }: ClusterViewProps) {
+/** "8/12/2025, 3:04 PM"-style label for a quick-pick timestamp button. Uses
+ * `timeZone: 'UTC'` because `capturedAt` clock times are stored as UTC values
+ * (see `PhotoCard.tsx`'s `dateFormatter`), so this displays them as-is. */
+const quickPickFormatter = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+  timeZone: 'UTC',
+})
+
+/**
+ * U5's cluster-scoped batch timestamp editor: quick-pick buttons for each
+ * distinct existing `capturedAt` among the selected members, plus a custom
+ * datetime-local input. Only rendered once `selectedIds` is non-empty (the
+ * caller gates this). A separate component (rather than inline JSX in the
+ * map callback) so the custom-date draft value is its own local state per
+ * cluster, isolated from other clusters' editors.
+ */
+function ClusterTimestampEditor({
+  selectedIds,
+  photosById,
+  batchSetTimestamps,
+}: {
+  selectedIds: string[]
+  photosById: Map<string, PhotoEntry>
+  batchSetTimestamps: (ids: string[], anchorDate: Date) => void
+}) {
+  const [customValue, setCustomValue] = useState('')
+
+  // R9: distinct existing timestamps among the selected members, deduped by
+  // ms value and sorted ascending. Members with a null capturedAt (nothing
+  // to offer) are skipped.
+  const seen = new Map<number, Date>()
+  for (const id of selectedIds) {
+    const capturedAt = photosById.get(id)?.capturedAt ?? null
+    if (capturedAt === null) continue
+    if (!seen.has(capturedAt.getTime())) seen.set(capturedAt.getTime(), capturedAt)
+  }
+  const distinctTimestamps = [...seen.values()].sort((a, b) => a.getTime() - b.getTime())
+
+  function applyCustom() {
+    const parsed = parseDatetimeLocalAsUTC(customValue)
+    if (!parsed) return
+    batchSetTimestamps(selectedIds, parsed)
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 p-3">
+      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase tracking-wide">
+        Set timestamp for {selectedIds.length} selected
+      </span>
+      {distinctTimestamps.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {distinctTimestamps.map((date) => (
+            <button
+              key={date.getTime()}
+              type="button"
+              onClick={() => batchSetTimestamps(selectedIds, date)}
+              className="px-2.5 py-1 text-xs font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+            >
+              Use {quickPickFormatter.format(date)}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          type="datetime-local"
+          value={customValue}
+          onChange={(e) => setCustomValue(e.target.value)}
+          aria-label="Custom timestamp"
+          className="flex-1 text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg px-3 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-400"
+        />
+        <button
+          type="button"
+          onClick={applyCustom}
+          disabled={!customValue}
+          className="px-3 py-1.5 text-xs font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Apply
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos, batchSetTimestamps }: ClusterViewProps) {
   const photosById = new Map(photos.map((p) => [p.id, p]))
 
   const hashInputs = photos.map((photo) => ({
@@ -174,6 +281,26 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     removePhotos(similarIds.filter((id) => !selected.has(id)))
   }
 
+  // U5: per-cluster "selected for timestamp edit" selection, keyed by
+  // `cluster.id`. Independent of `similarSelections` above — a different
+  // concept (which similar-tier members survive dedup) even though both use
+  // the same checkbox UI pattern. Every member of a cluster is eligible
+  // (not just similar-tier), and defaults to empty (nothing selected) until
+  // the user picks something, unlike `similarSelections`'s pre-selected
+  // default.
+  const [timestampSelections, setTimestampSelections] = useState<Map<string, Set<string>>>(new Map())
+
+  function toggleTimestampSelection(clusterId: string, id: string, checked: boolean) {
+    setTimestampSelections((prev) => {
+      const next = new Map(prev)
+      const current = new Set(prev.get(clusterId) ?? [])
+      if (checked) current.add(id)
+      else current.delete(id)
+      next.set(clusterId, current)
+      return next
+    })
+  }
+
   return (
     <div className="flex flex-col gap-8">
       {sortedClusters.map((cluster) => {
@@ -181,6 +308,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
         const selectedKeepers = similarIds.length > 0
           ? similarSelections.get(cluster.id) ?? defaultSimilarSelection(similarIds)
           : null
+        const timestampSelected = timestampSelections.get(cluster.id) ?? new Set<string>()
 
         return (
           <section key={cluster.id} className="flex flex-col gap-3">
@@ -211,6 +339,22 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                       }
                       checked={isSimilar ? (selectedKeepers?.has(id) ?? false) : undefined}
                     />
+                    {/*
+                      U5's timestamp-edit selection: a dedicated checkbox,
+                      independent of PhotoCard's own onSelect/checked pair
+                      above (which is U4's similar-tier dedup selection).
+                      Every member is eligible, not just similar-tier ones.
+                    */}
+                    <label className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={timestampSelected.has(id)}
+                        onChange={(e) => toggleTimestampSelection(cluster.id, id, e.target.checked)}
+                        aria-label={`Select ${entry.filename} for timestamp edit`}
+                        className="h-3.5 w-3.5"
+                      />
+                      Timestamp edit
+                    </label>
                   </div>
                 )
               })}
@@ -226,6 +370,13 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                   Remove non-selected
                 </button>
               </div>
+            )}
+            {timestampSelected.size > 0 && (
+              <ClusterTimestampEditor
+                selectedIds={[...timestampSelected]}
+                photosById={photosById}
+                batchSetTimestamps={batchSetTimestamps}
+              />
             )}
           </section>
         )

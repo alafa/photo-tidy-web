@@ -8,6 +8,7 @@ afterEach(cleanup)
 
 const getObjectUrl = (file: File) => `blob:${file.name}`
 const noopRemovePhotos = () => {}
+const noopBatchSetTimestamps = () => {}
 
 function makeEntry(id: string, name: string, capturedAt: string | null, uploadIndex: number): PhotoEntry {
   return {
@@ -41,7 +42,7 @@ describe('ClusterView', () => {
       ['d', makeMetrics('ffffffffffffffff')], // distance to everything: 64 (unrelated)
     ])
 
-    render(<ClusterView photos={[a, b, c, d]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+    render(<ClusterView photos={[a, b, c, d]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     const headings = screen.getAllByRole('heading', { level: 2 })
     // First section (cluster 1, earliest = b's 2024-01-15) should list a/b/c
@@ -57,7 +58,7 @@ describe('ClusterView', () => {
       ['solo', makeMetrics('ffffffffffffffff')],
     ])
 
-    render(<ClusterView photos={[solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+    render(<ClusterView photos={[solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(screen.getByText('solo.jpg')).toBeDefined()
     expect(screen.getAllByRole('img')).toHaveLength(1)
@@ -73,7 +74,7 @@ describe('ClusterView', () => {
       ['c', makeMetrics('000000000000000f')],
     ])
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(screen.getAllByRole('img')).toHaveLength(3)
     expect(screen.queryByRole('button', { name: /show more|expand|collapse/i })).toBeNull()
@@ -92,7 +93,7 @@ describe('ClusterView', () => {
       ['c', makeMetrics('000000000000000f')],
     ])
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     const identicalGroups = screen.getAllByRole('group', { name: 'Identical' })
     expect(identicalGroups.length).toBe(2) // a and b
@@ -122,7 +123,7 @@ describe('ClusterView', () => {
     // context, this would throw. It doesn't, and no sortable-specific
     // attributes appear anywhere in the output.
     expect(() =>
-      render(<ClusterView photos={[a]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+      render(<ClusterView photos={[a]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
     ).not.toThrow()
 
     expect(document.querySelector('[aria-roledescription="sortable item"]')).toBeNull()
@@ -135,7 +136,7 @@ describe('ClusterView', () => {
     // 'pending' has no entry at all in the map; 'a' is present but explicitly undefined.
     const metrics = new Map<string, PhotoMetrics | undefined>([['a', undefined]])
 
-    render(<ClusterView photos={[a, stillComputing]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} />)
+    render(<ClusterView photos={[a, stillComputing]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('pending.jpg')).toBeDefined()
@@ -159,7 +160,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     // Fired automatically, with no button/confirmation, exactly once, for the losers only.
     expect(removePhotos).toHaveBeenCalledTimes(1)
@@ -187,7 +188,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y, z]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    render(<ClusterView photos={[w, x, y, z]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     // Purely similar-tier — no automatic removal.
     expect(removePhotos).not.toHaveBeenCalled()
@@ -229,7 +230,7 @@ describe('ClusterView', () => {
     const removePhotos = vi.fn()
 
     render(
-      <ClusterView photos={[p1, p2, p3, p4, p5]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />
+      <ClusterView photos={[p1, p2, p3, p4, p5]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
     )
 
     // The identical pair (p1/p2) auto-resolved on render, keeping p1.
@@ -260,7 +261,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[m1, m2]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    render(<ClusterView photos={[m1, m2]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(screen.getByAltText('m2.jpg').parentElement?.className).toContain('ring-zinc-900')
     expect(screen.getByAltText('m1.jpg').parentElement?.className).not.toContain('ring-zinc-900')
@@ -277,7 +278,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     // Deselect the only pre-selected keeper (w) — selection becomes empty.
     fireEvent.click(screen.getByAltText('w.jpg'))
@@ -300,7 +301,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     // w is already pre-selected; select the remaining two as well.
     fireEvent.click(screen.getByAltText('x.jpg'))
@@ -327,16 +328,166 @@ describe('ClusterView', () => {
     const removePhotos = vi.fn()
 
     const { rerender } = render(
-      <ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />
+      <ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
     )
     expect(removePhotos).toHaveBeenCalledTimes(1)
 
     // Re-render with the exact same (unremoved, since this stub is a no-op)
     // photos/metrics — the same identical-tier subset recomputes identically
     // and must not be re-issued.
-    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
-    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} />)
+    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(removePhotos).toHaveBeenCalledTimes(1)
+  })
+
+  // --- U5: cluster-scoped batch timestamp editing --------------------------
+
+  it('does not show the timestamp-edit UI for a cluster until at least one member is selected for timestamp editing', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics('0000000000000000')],
+      ['b', makeMetrics('0000000000000000')],
+    ])
+
+    render(
+      <ClusterView
+        photos={[a, b]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
+
+    expect(screen.queryByLabelText('Custom timestamp')).toBeNull()
+    expect(screen.queryByText(/set timestamp for/i)).toBeNull()
+
+    fireEvent.click(screen.getByLabelText('Select a.jpg for timestamp edit'))
+
+    expect(screen.getByLabelText('Custom timestamp')).toBeDefined()
+    expect(screen.getByText(/set timestamp for 1 selected/i)).toBeDefined()
+  })
+
+  it('offers the cluster\'s distinct existing timestamps as quick-picks, deduping shared ones, once members are selected for timestamp editing', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T11:00:00Z', 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-03T12:00:00Z', 2)
+    // d shares a's exact timestamp — selecting both a and d should still
+    // produce only one quick-pick option for that shared timestamp.
+    const d = makeEntry('d', 'd.jpg', '2024-01-01T10:00:00Z', 3)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics('0000000000000000')],
+      ['b', makeMetrics('0000000000000000')],
+      ['c', makeMetrics('0000000000000000')],
+      ['d', makeMetrics('0000000000000000')],
+    ])
+    const batchSetTimestamps = vi.fn()
+
+    render(
+      <ClusterView
+        photos={[a, b, c, d]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={batchSetTimestamps}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText('Select a.jpg for timestamp edit'))
+    fireEvent.click(screen.getByLabelText('Select b.jpg for timestamp edit'))
+    fireEvent.click(screen.getByLabelText('Select c.jpg for timestamp edit'))
+    fireEvent.click(screen.getByLabelText('Select d.jpg for timestamp edit'))
+
+    // Three distinct timestamps (a/d share one) -> three quick-pick buttons.
+    const quickPicks = screen.getAllByRole('button', { name: /^use /i })
+    expect(quickPicks).toHaveLength(3)
+
+    // Custom date input is also present alongside the quick-picks.
+    expect(screen.getByLabelText('Custom timestamp')).toBeDefined()
+
+    // Choosing a quick-pick calls batchSetTimestamps with the cluster's
+    // currently-selected-for-timestamp-editing ids and the chosen date.
+    fireEvent.click(quickPicks[0])
+    expect(batchSetTimestamps).toHaveBeenCalledTimes(1)
+    expect(batchSetTimestamps.mock.calls[0][0].slice().sort()).toEqual(['a', 'b', 'c', 'd'])
+    expect(batchSetTimestamps.mock.calls[0][1]).toBeInstanceOf(Date)
+  })
+
+  it('applying a custom date calls batchSetTimestamps with the selected ids and the parsed custom date', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T11:00:00Z', 1)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics('0000000000000000')],
+      ['b', makeMetrics('0000000000000000')],
+    ])
+    const batchSetTimestamps = vi.fn()
+
+    render(
+      <ClusterView
+        photos={[a, b]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={batchSetTimestamps}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText('Select a.jpg for timestamp edit'))
+    fireEvent.click(screen.getByLabelText('Select b.jpg for timestamp edit'))
+
+    fireEvent.change(screen.getByLabelText('Custom timestamp'), { target: { value: '2025-06-15T09:30' } })
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }))
+
+    expect(batchSetTimestamps).toHaveBeenCalledTimes(1)
+    expect(batchSetTimestamps.mock.calls[0][0].slice().sort()).toEqual(['a', 'b'])
+    expect(batchSetTimestamps.mock.calls[0][1]).toEqual(new Date(Date.UTC(2025, 5, 15, 9, 30, 0)))
+  })
+
+  it('keeps timestamp-edit selection independent of a similar-tier member\'s dedup-keeper selection', () => {
+    const w = makeEntry('w', 'w.jpg', '2024-01-01T00:00:00Z', 0)
+    const x = makeEntry('x', 'x.jpg', '2024-01-02T00:00:00Z', 1)
+    const y = makeEntry('y', 'y.jpg', '2024-01-03T00:00:00Z', 2)
+    const z = makeEntry('z', 'z.jpg', '2024-01-04T00:00:00Z', 3)
+    // Same similar-tier cluster shape as the R7 test: w is the pre-selected
+    // dedup keeper.
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['w', makeMetrics('0000000000000000', 1000, 1000)],
+      ['x', makeMetrics('f000000000000000', 200, 200)],
+      ['y', makeMetrics('0f00000000000000', 200, 200)],
+      ['z', makeMetrics('00f0000000000000', 200, 200)],
+    ])
+    const removePhotos = vi.fn()
+    const batchSetTimestamps = vi.fn()
+
+    render(
+      <ClusterView
+        photos={[w, x, y, z]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={removePhotos}
+        batchSetTimestamps={batchSetTimestamps}
+      />
+    )
+
+    // w is already the dedup keeper by default. Also select w for timestamp
+    // editing — a second, independent selection on the same member.
+    fireEvent.click(screen.getByLabelText('Select w.jpg for timestamp edit'))
+    // Also select x for timestamp editing only (not touching dedup selection).
+    fireEvent.click(screen.getByLabelText('Select x.jpg for timestamp edit'))
+
+    // Dedup selection (w only) is unaffected by the timestamp-edit selection.
+    fireEvent.click(screen.getByRole('button', { name: /remove non-selected/i }))
+    expect(removePhotos).toHaveBeenCalledTimes(1)
+    expect(removePhotos.mock.calls[0][0].slice().sort()).toEqual(['x', 'y', 'z'])
+
+    // Timestamp-edit selection (w, x) is unaffected by the dedup removal call
+    // above — applying a custom date still targets exactly w and x.
+    fireEvent.change(screen.getByLabelText('Custom timestamp'), { target: { value: '2025-01-01T00:00' } })
+    fireEvent.click(screen.getByRole('button', { name: /^apply$/i }))
+
+    expect(batchSetTimestamps).toHaveBeenCalledTimes(1)
+    expect(batchSetTimestamps.mock.calls[0][0].slice().sort()).toEqual(['w', 'x'])
   })
 })
