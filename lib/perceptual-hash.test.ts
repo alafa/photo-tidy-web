@@ -5,12 +5,12 @@ import { computePhotoMetrics } from './perceptual-hash'
 //
 // jsdom can't decode real images, so createImageBitmap and the canvas 2D
 // context are mocked at the same boundary usePhotos.test.ts mocks
-// '@/lib/exif' — the fake ImageBitmap carries a pre-rendered 9x8 RGBA grid
-// (`__grid`) that the mocked canvas context "draws" verbatim in
+// '@/lib/exif' — the fake ImageBitmap carries a pre-rendered 16x17 RGBA
+// grid (`__grid`) that the mocked canvas context "draws" verbatim in
 // getImageData, standing in for the real drawImage downscale.
 
-const HASH_GRID_WIDTH = 9
-const HASH_GRID_HEIGHT = 8
+const HASH_GRID_WIDTH = 17
+const HASH_GRID_HEIGHT = 16
 
 interface FakeBitmap {
   width: number
@@ -19,10 +19,10 @@ interface FakeBitmap {
   __grid: Uint8ClampedArray
 }
 
-/** Builds a fake decoded bitmap from an 8-row x 9-col grayscale grid. */
-function makeFakeBitmap(rows: number[][], naturalWidth = 90, naturalHeight = 80): FakeBitmap {
+/** Builds a fake decoded bitmap from a HASH_GRID_HEIGHT-row x HASH_GRID_WIDTH-col grayscale grid. */
+function makeFakeBitmap(rows: number[][], naturalWidth = 170, naturalHeight = 160): FakeBitmap {
   if (rows.length !== HASH_GRID_HEIGHT || rows.some((r) => r.length !== HASH_GRID_WIDTH)) {
-    throw new Error('test grid must be 8 rows x 9 cols')
+    throw new Error(`test grid must be ${HASH_GRID_HEIGHT} rows x ${HASH_GRID_WIDTH} cols`)
   }
   const grid = new Uint8ClampedArray(HASH_GRID_WIDTH * HASH_GRID_HEIGHT * 4)
   for (let y = 0; y < HASH_GRID_HEIGHT; y++) {
@@ -40,13 +40,20 @@ function makeFakeBitmap(rows: number[][], naturalWidth = 90, naturalHeight = 80)
 
 // Monotonic increasing row -> every adjacent-pixel comparison is
 // left < right -> every bit is 0 -> hash is all zeros.
-const ASCENDING_ROW = [10, 40, 70, 100, 130, 160, 190, 220, 250]
+const ASCENDING_ROW = Array.from({ length: HASH_GRID_WIDTH }, (_, i) =>
+  Math.round((i * 255) / (HASH_GRID_WIDTH - 1))
+)
 // Same row with two adjacent values swapped near the end -> flips exactly
-// one of the 8 per-row bit comparisons (a "near duplicate" grid).
-const ASCENDING_ROW_PERTURBED = [10, 40, 70, 100, 130, 160, 220, 190, 250]
+// one of the per-row bit comparisons (a "near duplicate" grid).
+const ASCENDING_ROW_PERTURBED = (() => {
+  const row = [...ASCENDING_ROW]
+  const i = HASH_GRID_WIDTH - 3
+  ;[row[i], row[i + 1]] = [row[i + 1], row[i]]
+  return row
+})()
 // Monotonic decreasing row -> every bit is 1 -> hash is all ones, maximally
 // different from the ascending grids (unrelated content).
-const DESCENDING_ROW = [250, 220, 190, 160, 130, 100, 70, 40, 10]
+const DESCENDING_ROW = [...ASCENDING_ROW].reverse()
 
 function repeatRow(row: number[]): number[][] {
   return Array.from({ length: HASH_GRID_HEIGHT }, () => [...row])
@@ -91,8 +98,8 @@ beforeEach(() => {
         if (!bitmap) throw new Error(`no fake bitmap registered for file ${source.name}`)
         return bitmap
       }
-      // The resize call (decoded bitmap -> 9x8 hash-grid bitmap): test
-      // fixtures already carry the final 9x8 grid via `__grid` regardless
+      // The resize call (decoded bitmap -> hash-grid bitmap): test
+      // fixtures already carry the final grid via `__grid` regardless
       // of natural size, so "resizing" is a no-op passthrough — return a
       // fresh object with its own `close` spy so callers can close it
       // independently of the source bitmap.
@@ -143,7 +150,9 @@ describe('computePhotoMetrics', () => {
 
     expect(small.hash).not.toBeNull()
     expect(large.hash).not.toBeNull()
-    expect(hammingDistance(small.hash!, large.hash!)).toBeLessThanOrEqual(8)
+    // The single-column swap repeats once per row (16 rows now, not 8), so
+    // it can flip at most one bit per row -- 16 bits, not the old 8.
+    expect(hammingDistance(small.hash!, large.hash!)).toBeLessThanOrEqual(16)
   })
 
   it('produces far-apart hashes for unrelated content', async () => {
@@ -157,7 +166,10 @@ describe('computePhotoMetrics', () => {
 
     expect(a.hash).not.toBeNull()
     expect(b.hash).not.toBeNull()
-    expect(hammingDistance(a.hash!, b.hash!)).toBeGreaterThan(32)
+    // Full reversal flips every bit of the now-256-bit hash; half of that
+    // (128) is a loose "very different" bound, scaled up from the old 64-bit
+    // hash's 32-bit bound.
+    expect(hammingDistance(a.hash!, b.hash!)).toBeGreaterThan(128)
   })
 
   it('resolves with hash: null (not a thrown error) when decode fails', async () => {

@@ -3,20 +3,34 @@
 import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
-import { clusterPhotos, hammingDistance, type Cluster } from '@/lib/photo-clustering'
+import {
+  buildDendrogram,
+  centroid,
+  cosineDistance,
+  cutDendrogram,
+  hashToVector,
+  hierarchicalOrder,
+  l2Normalize,
+  MAX_DISTANCE_THRESHOLD,
+  type Cluster,
+} from '@/lib/photo-clustering'
 import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 import PhotoCard from './PhotoCard'
 
-// R1's grouping aggressiveness. This is the only clustering knob — there is
-// no separate "identical" tier or automatic behavior tied to it; grouping
-// is purely for display and manual review (feedback: automatic dedup was
-// confusing and is removed for now — see the plan's "Later iteration" note
-// for when smart auto-suggestions come back).
-const DEFAULT_THRESHOLD = 20
-const MIN_THRESHOLD = 0
-// Beyond ~half the hash's bit width, two hashes are no more alike than
-// chance — looser than this stops meaning "similar" at all.
-const MAX_THRESHOLD = 32
+// R1's grouping aggressiveness, exposed to the user as a 0-100% slider
+// rather than the raw cosine-distance threshold (0.0-0.5) — "23/32" was
+// meaningless to a user with no reason to know the hash's bit width.
+// 0% maps to distance_threshold 0.0 (only exact duplicates); 100% maps to
+// MAX_DISTANCE_THRESHOLD (very loose grouping). Default 40% == 0.2, the
+// starting distance_threshold this app has validated is a reasonable
+// middle ground.
+const DEFAULT_SIMILARITY_PERCENT = 40
+const MIN_SIMILARITY_PERCENT = 0
+const MAX_SIMILARITY_PERCENT = 100
+
+function percentToDistanceThreshold(percent: number): number {
+  return (percent / 100) * MAX_DISTANCE_THRESHOLD
+}
 
 interface ClusterViewProps {
   photos: PhotoEntry[]
@@ -46,36 +60,21 @@ interface ClusterViewProps {
 
 /**
  * A stable, content-derived identity for a cluster: the sorted-and-joined
- * member id list. `clusterPhotos` reassigns `cluster.id` as `cluster-${N}`
- * fresh on every call, purely from discovery order — as metrics resolve
- * asynchronously (KTD12), the threshold slider moves, or a delete shrinks
- * the batch, a given index can end up pointing at a completely different
- * real-world group of photos than it did on a prior render. Using
- * `cluster.id` as a React key or a selection-state Map key would let a
- * stale selection from one cluster silently attach to an unrelated cluster
- * that later inherits the same index. This key is used everywhere identity
- * needs to survive a recompute; `cluster.id` itself is not used for that
- * purpose anywhere in this component.
+ * member id list. `clusterPhotos`/`cutDendrogram` reassign `cluster.id` as
+ * `cluster-${N}` fresh on every call, purely from union-find discovery
+ * order — as metrics resolve asynchronously (KTD12), the threshold slider
+ * moves, or a delete shrinks the batch, a given index can end up pointing
+ * at a completely different real-world group of photos than it did on a
+ * prior render. Using `cluster.id` as a React key or a selection-state Map
+ * key would let a stale selection from one cluster silently attach to an
+ * unrelated cluster that later inherits the same index. This key is used
+ * everywhere identity needs to survive a recompute; `cluster.id` itself is
+ * not used for that purpose anywhere in this component. Order-independent
+ * (sorts before joining), so reordering a cluster's `members` for display
+ * never changes its key.
  */
 function clusterKey(cluster: Cluster): string {
   return [...cluster.members].sort().join(',')
-}
-
-/**
- * Earliest `capturedAt` (in ms) among a cluster's members, for R3's
- * chronological ordering. Null timestamps are excluded from the min and the
- * result falls back to `Infinity` when every member is null — mirroring
- * `hooks/usePhotos.ts`'s `sortPhotos` null-last convention, so an all-null
- * cluster sorts after every dated cluster.
- */
-function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
-  let earliest = Infinity
-  for (const id of cluster.members) {
-    const capturedAt = photosById.get(id)?.capturedAt ?? null
-    if (capturedAt === null) continue
-    earliest = Math.min(earliest, capturedAt.getTime())
-  }
-  return earliest
 }
 
 /**
@@ -193,18 +192,18 @@ function ClusterTimestampEditor({
 }
 
 /**
- * Debug view: the Hamming distance between every pair of members in a
+ * Debug view: the cosine distance between every pair of members in a
  * cluster, so the user can verify whether the hashing/threshold is behaving
  * as expected rather than guessing from grouping outcomes alone.
  */
 function PairwiseDistances({
   cluster,
   photosById,
-  metrics,
+  vectorsById,
 }: {
   cluster: Cluster
   photosById: Map<string, PhotoEntry>
-  metrics: Map<string, PhotoMetrics | undefined>
+  vectorsById: Map<string, number[]>
 }) {
   if (cluster.members.length < 2) return null
 
@@ -213,13 +212,13 @@ function PairwiseDistances({
     for (let j = i + 1; j < cluster.members.length; j++) {
       const idA = cluster.members[i]
       const idB = cluster.members[j]
-      const hashA = metrics.get(idA)?.hash ?? null
-      const hashB = metrics.get(idB)?.hash ?? null
+      const vectorA = vectorsById.get(idA)
+      const vectorB = vectorsById.get(idB)
       pairs.push({
         id: `${idA}-${idB}`,
         a: idA,
         b: idB,
-        distance: hashA !== null && hashB !== null ? hammingDistance(hashA, hashB) : null,
+        distance: vectorA && vectorB ? cosineDistance(vectorA, vectorB) : null,
       })
     }
   }
@@ -229,7 +228,7 @@ function PairwiseDistances({
       {pairs.map(({ id, a, b, distance }) => (
         <li key={id}>
           {photosById.get(a)?.filename} ↔ {photosById.get(b)?.filename}:{' '}
-          {distance !== null ? `${distance} bits` : 'hash pending/unavailable'}
+          {distance !== null ? `${distance.toFixed(3)} cosine distance` : 'hash pending/unavailable'}
         </li>
       ))}
     </ul>
@@ -239,35 +238,95 @@ function PairwiseDistances({
 export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos, batchSetTimestamps }: ClusterViewProps) {
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
 
-  const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD)
+  const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
+  const distanceThreshold = percentToDistanceThreshold(similarityPercent)
 
-  // The clustering pipeline (O(n^2) pairwise Hamming distance) only needs to
-  // rerun when its actual inputs — `photos`/`metrics`/the slider — change,
-  // not on every local selection-state update (a delete-checkbox toggle, a
-  // timestamp-edit checkbox) that also re-renders this component.
-  const sortedClusters = useMemo(() => {
-    const hashInputs = photos.map((photo) => ({
-      id: photo.id,
-      // A photo whose metrics are still in flight (absent map entry, or
-      // present-but-`undefined`) is treated the same as "no hash" — it
-      // renders as a temporary singleton and re-clusters correctly once its
-      // real hash lands and `metrics` updates (KTD12).
-      hash: metrics.get(photo.id)?.hash ?? null,
-    }))
-    const clusters = clusterPhotos(hashInputs, threshold)
-    return [...clusters].sort(
-      (a, b) => earliestCapturedAtMs(a, photosById) - earliestCapturedAtMs(b, photosById)
-    )
-  }, [photos, metrics, photosById, threshold])
+  // Hash inputs for the clustering pipeline, and L2-normalized vectors for
+  // every photo with a resolved hash (reused for centroids, hierarchical
+  // ordering, and the debug panel — no need to recompute per use site).
+  const hashInputs = useMemo(
+    () =>
+      photos.map((photo) => ({
+        id: photo.id,
+        // A photo whose metrics are still in flight (absent map entry, or
+        // present-but-`undefined`) is treated the same as "no hash" — it
+        // renders as a temporary singleton and re-clusters correctly once
+        // its real hash lands and `metrics` updates (KTD12).
+        hash: metrics.get(photo.id)?.hash ?? null,
+      })),
+    [photos, metrics]
+  )
+  const vectorsById = useMemo(() => {
+    const map = new Map<string, number[]>()
+    for (const { id, hash } of hashInputs) {
+      if (hash !== null) map.set(id, l2Normalize(hashToVector(hash)))
+    }
+    return map
+  }, [hashInputs])
+
+  // The expensive O(n^3)-ish complete-linkage dendrogram build only
+  // depends on the batch's hashes, not the similarity threshold — building
+  // it once and cutting it cheaply (below) on every slider change is what
+  // keeps live re-clustering responsive without a Web Worker at this app's
+  // stated scale (~200+ photos). See lib/photo-clustering.ts's top comment.
+  const dendrogram = useMemo(() => buildDendrogram(hashInputs), [hashInputs])
+
+  // Cheap O(n) cut — safe to re-run on every threshold-slider tick.
+  const rawClusters = useMemo(
+    () => cutDendrogram(hashInputs, dendrogram, distanceThreshold),
+    [hashInputs, dendrogram, distanceThreshold]
+  )
+
+  // Orders both the clusters themselves (by centroid similarity) and each
+  // cluster's own members (by their direct similarity to each other) via
+  // the same hierarchical-clustering leaves_list technique — so visually
+  // related clusters land near each other, and the most similar photos
+  // within a cluster sit adjacent. Operates on the (small) cluster count
+  // and per-cluster member counts, not the full photo count, so it's cheap
+  // even though it reruns whenever the threshold-dependent `rawClusters`
+  // does.
+  const displayClusters = useMemo(() => {
+    const reorderedByKey = new Map<string, Cluster>()
+    const centroidsWithVector: Array<{ id: string; vector: number[] }> = []
+    const withoutVector: Cluster[] = []
+
+    for (const cluster of rawClusters) {
+      const memberVectors = cluster.members
+        .map((id) => ({ id, vector: vectorsById.get(id) }))
+        .filter((m): m is { id: string; vector: number[] } => m.vector !== undefined)
+
+      const orderedMemberIds =
+        memberVectors.length > 1
+          ? [...hierarchicalOrder(memberVectors), ...cluster.members.filter((id) => !vectorsById.has(id))]
+          : cluster.members
+
+      const key = clusterKey(cluster)
+      const reordered: Cluster = { id: cluster.id, members: orderedMemberIds }
+      reorderedByKey.set(key, reordered)
+
+      if (memberVectors.length > 0) {
+        centroidsWithVector.push({ id: key, vector: centroid(memberVectors.map((m) => m.vector)) })
+      } else {
+        // No member has a resolved hash yet (or ever will, if undecodable)
+        // — nothing to meaningfully place by similarity. Appended after
+        // every similarity-ordered cluster, in their original (discovery)
+        // order, as a stable fallback.
+        withoutVector.push(reordered)
+      }
+    }
+
+    const orderedKeys = hierarchicalOrder(centroidsWithVector)
+    return [...orderedKeys.map((key) => reorderedByKey.get(key)!), ...withoutVector]
+  }, [rawClusters, vectorsById])
 
   // A cluster with only one member isn't a duplicate/near-duplicate of
   // anything and shouldn't visually read as a "cluster". Adjacent
-  // singletons in the chronological sort are bundled into one plain grid
-  // block with no cluster chrome at all; a real (2+-member) cluster keeps
-  // its own section.
+  // singletons in the similarity-ordered sequence are bundled into one
+  // plain grid block with no cluster chrome at all; a real (2+-member)
+  // cluster keeps its own section.
   const renderBlocks = useMemo(() => {
     const blocks: Array<{ type: 'cluster'; cluster: Cluster } | { type: 'singles'; clusters: Cluster[] }> = []
-    for (const cluster of sortedClusters) {
+    for (const cluster of displayClusters) {
       if (cluster.members.length > 1) {
         blocks.push({ type: 'cluster', cluster })
         continue
@@ -277,7 +336,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
       else blocks.push({ type: 'singles', clusters: [cluster] })
     }
     return blocks
-  }, [sortedClusters])
+  }, [displayClusters])
 
   // Manual "select for deletion" per cluster. No auto-suggestion, no
   // pre-selected keeper, no automatic removal of any kind — the user picks
@@ -324,30 +383,34 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     })
   }
 
-  const compareHashA = comparePair ? metrics.get(comparePair[0])?.hash ?? null : null
-  const compareHashB = comparePair?.[1] ? metrics.get(comparePair[1])?.hash ?? null : null
+  const compareHashA = comparePair ? hashInputs.find((h) => h.id === comparePair[0])?.hash ?? null : null
+  const compareHashB = comparePair?.[1]
+    ? hashInputs.find((h) => h.id === comparePair[1])?.hash ?? null
+    : null
+  const compareVectorA = comparePair ? vectorsById.get(comparePair[0]) ?? null : null
+  const compareVectorB = comparePair?.[1] ? vectorsById.get(comparePair[1]) ?? null : null
   const compareDistance =
-    compareHashA !== null && compareHashB !== null ? hammingDistance(compareHashA, compareHashB) : null
+    compareVectorA && compareVectorB ? cosineDistance(compareVectorA, compareVectorB) : null
 
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-3">
           <label htmlFor="similarity-threshold" className="text-xs font-medium text-zinc-600 dark:text-zinc-400 whitespace-nowrap">
-            Grouping strictness
+            Similarity
           </label>
           <input
             id="similarity-threshold"
             type="range"
-            min={MIN_THRESHOLD}
-            max={MAX_THRESHOLD}
-            value={threshold}
-            onChange={(e) => setThreshold(Number(e.target.value))}
-            aria-label="Similarity grouping threshold — drag left for stricter, right for looser"
+            min={MIN_SIMILARITY_PERCENT}
+            max={MAX_SIMILARITY_PERCENT}
+            value={similarityPercent}
+            onChange={(e) => setSimilarityPercent(Number(e.target.value))}
+            aria-label="Similarity — drag left for only exact duplicates, right for looser grouping"
             className="flex-1 max-w-xs"
           />
-          <span className="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap">
-            {threshold === MIN_THRESHOLD ? 'Strict' : threshold === MAX_THRESHOLD ? 'Loose' : `${threshold}/${MAX_THRESHOLD}`}
+          <span className="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap tabular-nums">
+            {similarityPercent}%
           </span>
           <label className="ml-auto flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 cursor-pointer">
             <input
@@ -366,13 +429,13 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
             {!comparePair && <p>Click &quot;Compare&quot; on any two photos to see their hashes and distance.</p>}
             {comparePair && (
               <div className="flex flex-col gap-1">
-                <p>A: {photosById.get(comparePair[0])?.filename} — hash: {compareHashA ?? 'pending/undecodable'}</p>
+                <p className="break-all">A: {photosById.get(comparePair[0])?.filename} — hash: {compareHashA ?? 'pending/undecodable'}</p>
                 {comparePair[1] ? (
                   <>
-                    <p>B: {photosById.get(comparePair[1])?.filename} — hash: {compareHashB ?? 'pending/undecodable'}</p>
+                    <p className="break-all">B: {photosById.get(comparePair[1])?.filename} — hash: {compareHashB ?? 'pending/undecodable'}</p>
                     <p className="font-semibold text-zinc-900 dark:text-zinc-50">
                       {compareDistance !== null
-                        ? `Distance: ${compareDistance} bits`
+                        ? `Cosine distance: ${compareDistance.toFixed(3)}`
                         : 'Distance: unavailable (one or both hashes not resolved)'}
                     </p>
                   </>
@@ -458,7 +521,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                 )
               })}
             </div>
-            {debugMode && <PairwiseDistances cluster={cluster} photosById={photosById} metrics={metrics} />}
+            {debugMode && <PairwiseDistances cluster={cluster} photosById={photosById} vectorsById={vectorsById} />}
             <div>
               <button
                 type="button"

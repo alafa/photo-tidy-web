@@ -22,8 +22,10 @@ The destination Google Photos album a batch of photos is uploaded into. The app 
 ## Photo Deduplication
 
 ### Cluster
-A group of photos in the currently loaded batch that fall within a single similarity threshold (Hamming distance between perceptual hashes) of each other, purely for display and manual review — a Cluster carries no automatic behavior of its own. A photo with no match to anything else in the batch renders plainly (not as a one-photo Cluster). The threshold is user-adjustable live via a slider; moving it re-groups the batch immediately.
+A group of photos in the currently loaded batch produced by complete-linkage agglomerative clustering over cosine distance between perceptual hashes (each hash read as a bit vector, L2-normalized), purely for display and manual review — a Cluster carries no automatic behavior of its own. A photo with no match to anything else in the batch renders plainly (not as a one-photo Cluster). The grouping aggressiveness is user-adjustable live via a "Similarity" slider shown as a 0-100% value (0% = only exact duplicates, 100% = very loose grouping), mapped internally to a cosine-distance threshold; moving it re-groups the batch immediately.
+
+Clusters are ordered by visual similarity, not chronologically: each Cluster's centroid is compared against every other Cluster's via the same hierarchical-clustering technique (`leaves_list`-style traversal), so related Clusters land near each other. Within a Cluster, members are ordered the same way by their direct similarity to each other, so the most similar photos sit adjacent — this supersedes an earlier, session-settled decision to order Clusters chronologically.
 
 The user manually selects which member(s) of a Cluster to delete; nothing is ever removed automatically. (An earlier iteration auto-resolved "identical" photos without confirmation — removed after it proved confusing that removed photos weren't visible. Smart auto-suggestions may return once grouping itself is trustworthy.)
 
-A Debug Mode toggle shows the Hamming distance between every pair of photos within a Cluster, plus a click-any-two-photos comparison showing their raw hashes and distance — for verifying the hashing/threshold behavior directly rather than inferring it from grouping outcomes.
+A Debug Mode toggle shows the cosine distance between every pair of photos within a Cluster, plus a click-any-two-photos comparison showing their raw hashes and distance — for verifying the hashing/threshold behavior directly rather than inferring it from grouping outcomes.

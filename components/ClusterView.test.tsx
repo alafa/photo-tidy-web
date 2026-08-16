@@ -10,6 +10,34 @@ const getObjectUrl = (file: File) => `blob:${file.name}`
 const noopRemovePhotos = () => {}
 const noopBatchSetTimestamps = () => {}
 
+// --- test helpers -------------------------------------------------------
+//
+// Hashes are built from explicit "on" bit positions (not raw hex literals)
+// so cosine distances between fixtures are exactly predictable by hand —
+// same technique as lib/photo-clustering.test.ts. This matters here because
+// an all-zero hash is a *zero vector*, and cosineDistance special-cases
+// zero vectors (0 vs. another zero is "identical", 0 vs. anything non-zero
+// is "maximally distant") rather than reflecting bit overlap — a trap for
+// hand-picked hex literals meant to encode a specific Hamming distance.
+
+const HASH_TOTAL_BITS = 128
+
+function range(start: number, end: number): number[] {
+  const out: number[] = []
+  for (let i = start; i <= end; i++) out.push(i)
+  return out
+}
+
+function hashFromPositions(positions: number[]): string {
+  const bits = new Array(HASH_TOTAL_BITS).fill(0)
+  for (const position of positions) bits[position] = 1
+  let hex = ''
+  for (let i = 0; i < bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16)
+  }
+  return hex
+}
+
 function makeEntry(id: string, name: string, capturedAt: string | null, uploadIndex: number): PhotoEntry {
   return {
     id,
@@ -28,37 +56,80 @@ function makeMetrics(hash: string | null, width = 100, height = 100, size = 1000
 describe('ClusterView', () => {
   // --- Grouping / clustering ------------------------------------------------
 
-  it('renders clusters ordered ascending by earliest member capturedAt', () => {
-    // Cluster 1: A, B, C — all mutually within the default threshold,
-    // earliest member is B (2024-01-15).
-    const a = makeEntry('a', 'a.jpg', '2024-03-01T00:00:00Z', 0)
-    const b = makeEntry('b', 'b.jpg', '2024-01-15T00:00:00Z', 1)
-    const c = makeEntry('c', 'c.jpg', '2024-02-01T00:00:00Z', 2)
-    // Cluster 2 (singleton): D — later than cluster 1's earliest member.
-    const d = makeEntry('d', 'd.jpg', '2024-05-01T00:00:00Z', 3)
-
+  it('orders clusters by similarity-based discovery order, not by each cluster\'s earliest timestamp', () => {
+    // Cluster X ({p1,p2}) is placed first in the photos array but carries
+    // LATER capturedAt timestamps than cluster Y ({p3,p4}), placed second
+    // in the array with EARLIER timestamps. The old chronological-by-
+    // earliest-member ordering would have rendered Y first. Pivot B
+    // replaces that with centroid + hierarchicalOrder similarity ordering
+    // — with exactly two clusters, hierarchicalOrder's single merge always
+    // preserves the clusters' original discovery order (see
+    // lib/photo-clustering.ts's hierarchicalOrder: with only two leaves,
+    // their indices are always {0,1}, so the left/right split trivially
+    // matches input order), so X should render first regardless of dates.
+    const p1 = makeEntry('p1', 'p1.jpg', '2024-06-01T00:00:00Z', 0)
+    const p2 = makeEntry('p2', 'p2.jpg', '2024-06-02T00:00:00Z', 1)
+    const p3 = makeEntry('p3', 'p3.jpg', '2024-01-01T00:00:00Z', 2)
+    const p4 = makeEntry('p4', 'p4.jpg', '2024-01-02T00:00:00Z', 3)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')], // distance to a: 0
-      ['c', makeMetrics('000000000000000f')], // distance to a/b: 4
-      ['d', makeMetrics('ffffffffffffffff')], // distance to everything: 64 (unrelated)
+      ['p1', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['p2', makeMetrics(hashFromPositions(range(0, 9)))], // identical to p1
+      ['p3', makeMetrics(hashFromPositions(range(60, 69)))],
+      ['p4', makeMetrics(hashFromPositions(range(60, 69)))], // identical to p3, orthogonal to p1/p2
     ])
 
-    render(<ClusterView photos={[a, b, c, d]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(
+      <ClusterView
+        photos={[p1, p2, p3, p4]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
 
-    const headings = screen.getAllByRole('heading', { level: 2 })
-    // First section (cluster 1, earliest = b's 2024-01-15) should list a/b/c
-    // before the singleton d, which renders plainly (no heading — singles
-    // don't display as clusters).
-    const sections = screen.getAllByRole('img').map((img) => img.getAttribute('alt'))
-    expect(sections.indexOf('d.jpg')).toBeGreaterThan(sections.indexOf('b.jpg'))
-    expect(headings.length).toBe(1)
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(2)
+    const order = screen.getAllByRole('img').map((img) => img.getAttribute('alt'))
+    const xIndices = [order.indexOf('p1.jpg'), order.indexOf('p2.jpg')]
+    const yIndices = [order.indexOf('p3.jpg'), order.indexOf('p4.jpg')]
+    expect(Math.max(...xIndices)).toBeLessThan(Math.min(...yIndices))
+  })
+
+  it('reorders members within a cluster by mutual similarity rather than preserving the original array order', () => {
+    // a and c are hash-identical; b is a moderate outlier that still falls
+    // within the default threshold. Input order is [a, b, c] (the outlier
+    // in the middle) — similarity ordering should surface the outlier
+    // adjacent to, not between, the identical pair: b merges into the
+    // dendrogram last, and hierarchicalOrder's leaf-index tie-break always
+    // visits the item outside the closest pair first (its leaf index is
+    // necessarily lower than any synthetic merge-node index).
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a and c: 0.2
+      ['c', makeMetrics(hashFromPositions(range(0, 9)))], // identical to a
+    ])
+
+    render(
+      <ClusterView
+        photos={[a, b, c]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+      />
+    )
+
+    const order = screen.getAllByRole('img').map((img) => img.getAttribute('alt'))
+    expect(order).toEqual(['b.jpg', 'a.jpg', 'c.jpg'])
   })
 
   it('renders a photo with no similarity match plainly, not as a one-member cluster', () => {
     const solo = makeEntry('solo', 'solo.jpg', '2024-01-01T00:00:00Z', 0)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['solo', makeMetrics('ffffffffffffffff')],
+      ['solo', makeMetrics(hashFromPositions(range(0, 9)))],
     ])
 
     render(<ClusterView photos={[solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
@@ -73,9 +144,9 @@ describe('ClusterView', () => {
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
-      ['c', makeMetrics('000000000000000f')],
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(0, 9)))], // identical to a
+      ['c', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a/b: 0.2
     ])
 
     render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
@@ -122,10 +193,11 @@ describe('ClusterView', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
+    const sharedHash = hashFromPositions(range(0, 9))
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000', 400, 300)],
-      ['b', makeMetrics('0000000000000000', 100, 100)],
-      ['c', makeMetrics('0000000000000000', 100, 100)],
+      ['a', makeMetrics(sharedHash, 400, 300)],
+      ['b', makeMetrics(sharedHash, 100, 100)],
+      ['c', makeMetrics(sharedHash, 100, 100)],
     ])
     const removePhotos = vi.fn()
 
@@ -144,9 +216,9 @@ describe('ClusterView', () => {
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
-      ['c', makeMetrics('000000000000000f')],
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(0, 9)))], // identical to a
+      ['c', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a/b: 0.2
     ])
     const removePhotos = vi.fn()
 
@@ -172,25 +244,23 @@ describe('ClusterView', () => {
   })
 
   it('does not misapply a delete selection to a different cluster that inherits its old discovery-order id', () => {
-    // Three mutually-unrelated pairs: {m1,m2}, {f,g}, {h,i}. clusterPhotos
-    // assigns cluster.id purely by discovery order over the `photos` array,
-    // so in this render {m1,m2}=cluster-0, {f,g}=cluster-1, {h,i}=cluster-2.
+    // Three mutually-unrelated pairs: {m1,m2}, {f,g}, {h,i}, each an
+    // internal-shift-by-2 pair (distance 0.2, right at the default
+    // threshold) with bit ranges far enough apart that every cross-pair
+    // distance is 1.0 (orthogonal) — comfortably outside the threshold.
     const m1 = makeEntry('m1', 'm1.jpg', '2024-01-01T00:00:00Z', 0)
     const m2 = makeEntry('m2', 'm2.jpg', '2024-01-02T00:00:00Z', 1)
     const f = makeEntry('f', 'f.jpg', '2024-01-03T00:00:00Z', 2)
     const g = makeEntry('g', 'g.jpg', '2024-01-04T00:00:00Z', 3)
     const h = makeEntry('h', 'h.jpg', '2024-01-05T00:00:00Z', 4)
     const i = makeEntry('i', 'i.jpg', '2024-01-06T00:00:00Z', 5)
-    // Marker nibbles are 3-wide (12 bits) per pair, at non-overlapping
-    // positions, so every cross-pair distance is >=24 bits — comfortably
-    // above the default threshold (20).
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['m1', makeMetrics('fff0000000000000')],
-      ['m2', makeMetrics('ffff000000000000')], // distance to m1: 4
-      ['f', makeMetrics('00000fff00000000')],
-      ['g', makeMetrics('00000ffff0000000')], // distance to f: 4
-      ['h', makeMetrics('0000000000fff000')],
-      ['i', makeMetrics('0000000000ffff00')], // distance to h: 4
+      ['m1', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['m2', makeMetrics(hashFromPositions(range(2, 11)))],
+      ['f', makeMetrics(hashFromPositions(range(30, 39)))],
+      ['g', makeMetrics(hashFromPositions(range(32, 41)))],
+      ['h', makeMetrics(hashFromPositions(range(60, 69)))],
+      ['i', makeMetrics(hashFromPositions(range(62, 71)))],
     ])
     const removePhotos = vi.fn()
 
@@ -211,8 +281,8 @@ describe('ClusterView', () => {
     fireEvent.click(screen.getByAltText('f.jpg'))
 
     // Simulate {m1,m2}'s cluster disappearing entirely from the batch. This
-    // shifts {f,g} from cluster-1 to cluster-0, and {h,i} from cluster-2 to
-    // cluster-1 — the exact numeric id that used to belong to {f,g}.
+    // shifts {f,g} and {h,i} up by one discovery-order slot each — the
+    // exact numeric cluster.id churn this test guards against.
     rerender(
       <ClusterView
         photos={[f, g, h, i]}
@@ -234,7 +304,8 @@ describe('ClusterView', () => {
     expect(screen.getByAltText('h.jpg').parentElement?.className).not.toContain('ring-zinc-900')
     expect(screen.getByAltText('i.jpg').parentElement?.className).not.toContain('ring-zinc-900')
 
-    // {f,g}'s section renders first (earlier capturedAt), {h,i}'s second.
+    // {f,g} was discovered first in the rerendered array, so its section
+    // (and delete button) renders first; {h,i}'s second.
     const deleteButtons = screen.getAllByRole('button', { name: /delete selected/i })
     expect(deleteButtons).toHaveLength(2)
     expect(deleteButtons[1]).toHaveProperty('disabled', true) // {h,i}: nothing selected
@@ -247,13 +318,12 @@ describe('ClusterView', () => {
 
   // --- Threshold + live slider -----------------------------------------------
 
-  it('clusters two photos with a moderate difference (e.g. one has a line drawn on it) under the default threshold', () => {
+  it('clusters two photos with a moderate difference under the default threshold', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
-    // Distance 16: within the default threshold (20).
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('ffff000000000000')], // distance to a: 16
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a: 0.2 (default threshold)
     ])
 
     render(<ClusterView photos={[a, b]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
@@ -262,23 +332,25 @@ describe('ClusterView', () => {
     expect(heading.textContent).toContain('2 related photos')
   })
 
-  it('renders a similarity threshold slider that re-clusters live as it moves', () => {
+  it('renders a percentage-based similarity slider that re-clusters live as it moves looser', () => {
     const x = makeEntry('x', 'x.jpg', '2024-01-01T00:00:00Z', 0)
-    // Distance 24: outside the default threshold (20), so x/y start out
-    // unrelated (rendered plainly, no cluster heading).
     const y = makeEntry('y', 'y.jpg', '2024-01-02T00:00:00Z', 1)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['x', makeMetrics('0000000000000000')],
-      ['y', makeMetrics('ffffff0000000000')], // distance to x: 24
+      ['x', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['y', makeMetrics(hashFromPositions(range(3, 12)))], // distance to x: 0.3 — outside the 40%/0.2 default
     ])
 
     render(<ClusterView photos={[x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
+    expect(screen.getByText('40%')).toBeDefined()
     expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
 
-    const slider = screen.getByRole('slider', { name: /similarity grouping threshold/i })
-    fireEvent.change(slider, { target: { value: '25' } })
+    // 70% maps to a distance_threshold of 0.35 (0.7 * MAX_DISTANCE_THRESHOLD
+    // of 0.5) — loose enough to merge the 0.3-distance pair.
+    const slider = screen.getByRole('slider', { name: /similarity/i })
+    fireEvent.change(slider, { target: { value: '70' } })
 
+    expect(screen.getByText('70%')).toBeDefined()
     const heading = screen.getByRole('heading', { level: 2 })
     expect(heading.textContent).toContain('2 related photos')
   })
@@ -287,15 +359,16 @@ describe('ClusterView', () => {
     const x = makeEntry('x', 'x.jpg', '2024-01-01T00:00:00Z', 0)
     const y = makeEntry('y', 'y.jpg', '2024-01-02T00:00:00Z', 1)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['x', makeMetrics('0000000000000000')],
-      ['y', makeMetrics('ffff000000000000')], // distance to x: 16 — within default (20)
+      ['x', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['y', makeMetrics(hashFromPositions(range(2, 11)))], // distance to x: 0.2 — within the default
     ])
 
     render(<ClusterView photos={[x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     expect(screen.getByRole('heading', { level: 2 })).toBeDefined()
 
-    const slider = screen.getByRole('slider', { name: /similarity grouping threshold/i })
+    // 10% maps to a distance_threshold of 0.05 — too strict for the 0.2 pair.
+    const slider = screen.getByRole('slider', { name: /similarity/i })
     fireEvent.change(slider, { target: { value: '10' } })
 
     expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
@@ -306,42 +379,48 @@ describe('ClusterView', () => {
   it('debug mode is off by default and shows no distance info or Compare affordance', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const sharedHash = hashFromPositions(range(0, 9))
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
+      ['a', makeMetrics(sharedHash)],
+      ['b', makeMetrics(sharedHash)],
     ])
 
     render(<ClusterView photos={[a, b]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
-    expect(screen.queryByText(/bits/i)).toBeNull()
+    expect(screen.queryByText(/cosine distance/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /^compare$/i })).toBeNull()
   })
 
-  it('debug mode shows the Hamming distance between every pair of photos in a cluster', () => {
+  it('debug mode shows the cosine distance between every pair of photos in a cluster', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')], // distance to a: 0
-      ['c', makeMetrics('000000000000000f')], // distance to a/b: 4
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(0, 9)))], // identical to a: distance 0
+      ['c', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a/b: 0.2
     ])
 
     render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     fireEvent.click(screen.getByRole('checkbox', { name: /debug mode/i }))
 
-    expect(screen.getByText(/a\.jpg ↔ b\.jpg: 0 bits/)).toBeDefined()
-    expect(screen.getByText(/a\.jpg ↔ c\.jpg: 4 bits/)).toBeDefined()
-    expect(screen.getByText(/b\.jpg ↔ c\.jpg: 4 bits/)).toBeDefined()
+    // c is the outlier relative to the identical a/b pair, so similarity
+    // ordering places it first within the cluster (see the member-reorder
+    // test above for why) — pairs are listed in that [c, a, b] order.
+    expect(screen.getByText(/c\.jpg ↔ a\.jpg: 0\.200 cosine distance/)).toBeDefined()
+    expect(screen.getByText(/c\.jpg ↔ b\.jpg: 0\.200 cosine distance/)).toBeDefined()
+    expect(screen.getByText(/a\.jpg ↔ b\.jpg: 0\.000 cosine distance/)).toBeDefined()
   })
 
   it('lets the user click any two photos in debug mode to see their hashes and distance', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const hashA = hashFromPositions(range(0, 9))
+    const hashB = hashFromPositions(range(2, 11)) // distance to a: 0.2
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('000000000000000f')], // distance to a: 4
+      ['a', makeMetrics(hashA)],
+      ['b', makeMetrics(hashB)],
     ])
 
     render(<ClusterView photos={[a, b]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
@@ -352,37 +431,43 @@ describe('ClusterView', () => {
     expect(compareButtons).toHaveLength(2)
 
     fireEvent.click(compareButtons[0])
-    expect(screen.getByText(/a\.jpg — hash: 0000000000000000/)).toBeDefined()
+    expect(screen.getByText(new RegExp(`a\\.jpg — hash: ${hashA}`))).toBeDefined()
     expect(screen.getByText(/click a second photo to compare/i)).toBeDefined()
 
     fireEvent.click(compareButtons[1])
-    expect(screen.getByText(/b\.jpg — hash: 000000000000000f/)).toBeDefined()
-    expect(screen.getByText(/distance: 4 bits/i)).toBeDefined()
+    expect(screen.getByText(new RegExp(`b\\.jpg — hash: ${hashB}`))).toBeDefined()
+    expect(screen.getByText(/cosine distance: 0\.200/i)).toBeDefined()
   })
 
   it('resets the debug compare selection to a fresh pick after a third click', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
     const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
+    const hashC = hashFromPositions(range(50, 59)) // orthogonal to a and b
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('000000000000000f')],
-      ['c', makeMetrics('ffffffffffffffff')],
+      ['a', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['b', makeMetrics(hashFromPositions(range(2, 11)))], // distance to a: 0.2 — clusters with a
+      ['c', makeMetrics(hashC)],
     ])
 
     render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
 
     fireEvent.click(screen.getByRole('checkbox', { name: /debug mode/i }))
 
+    // a and b cluster together (compare buttons render in that cluster's
+    // member order); c renders separately as a single. With only two
+    // top-level items feeding the cluster-ordering pass (the {a,b} cluster
+    // and c), hierarchicalOrder preserves discovery order, so DOM order is
+    // a, b, then c — matching the array order below.
     const [compareA, compareB, compareC] = screen.getAllByRole('button', { name: /^compare$/i })
     fireEvent.click(compareA)
     fireEvent.click(compareB)
-    expect(screen.getByText(/distance: 4 bits/i)).toBeDefined()
+    expect(screen.getByText(/cosine distance: 0\.200/i)).toBeDefined()
 
     // Third click starts a fresh comparison rather than adding a third slot.
     fireEvent.click(compareC)
     expect(screen.getByText(/click a second photo to compare/i)).toBeDefined()
-    expect(screen.getByText(/c\.jpg — hash: ffffffffffffffff/)).toBeDefined()
+    expect(screen.getByText(new RegExp(`c\\.jpg — hash: ${hashC}`))).toBeDefined()
   })
 
   // --- U5: cluster-scoped batch timestamp editing --------------------------
@@ -390,9 +475,10 @@ describe('ClusterView', () => {
   it('does not show the timestamp-edit UI for a cluster until at least one member is selected for timestamp editing', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const sharedHash = hashFromPositions(range(0, 9))
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
+      ['a', makeMetrics(sharedHash)],
+      ['b', makeMetrics(sharedHash)],
     ])
 
     render(
@@ -421,11 +507,12 @@ describe('ClusterView', () => {
     // d shares a's exact timestamp — selecting both a and d should still
     // produce only one quick-pick option for that shared timestamp.
     const d = makeEntry('d', 'd.jpg', '2024-01-01T10:00:00Z', 3)
+    const sharedHash = hashFromPositions(range(0, 9))
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
-      ['c', makeMetrics('0000000000000000')],
-      ['d', makeMetrics('0000000000000000')],
+      ['a', makeMetrics(sharedHash)],
+      ['b', makeMetrics(sharedHash)],
+      ['c', makeMetrics(sharedHash)],
+      ['d', makeMetrics(sharedHash)],
     ])
     const batchSetTimestamps = vi.fn()
 
@@ -462,9 +549,10 @@ describe('ClusterView', () => {
   it('applying a custom date calls batchSetTimestamps with the selected ids and the parsed custom date', () => {
     const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
     const b = makeEntry('b', 'b.jpg', '2024-01-02T11:00:00Z', 1)
+    const sharedHash = hashFromPositions(range(0, 9))
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a', makeMetrics('0000000000000000')],
-      ['b', makeMetrics('0000000000000000')],
+      ['a', makeMetrics(sharedHash)],
+      ['b', makeMetrics(sharedHash)],
     ])
     const batchSetTimestamps = vi.fn()
 
@@ -493,10 +581,12 @@ describe('ClusterView', () => {
     const w = makeEntry('w', 'w.jpg', '2024-01-01T00:00:00Z', 0)
     const x = makeEntry('x', 'x.jpg', '2024-01-02T00:00:00Z', 1)
     const y = makeEntry('y', 'y.jpg', '2024-01-03T00:00:00Z', 2)
+    // Sliding window: dist(w,x)=0.1, dist(x,y)=0.1, dist(w,y)=0.2 — all
+    // within the default 0.2 threshold, so all three merge into one cluster.
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['w', makeMetrics('0000000000000000')],
-      ['x', makeMetrics('f000000000000000')], // distance to w: 4
-      ['y', makeMetrics('0f00000000000000')], // distance to w: 4, to x: 8
+      ['w', makeMetrics(hashFromPositions(range(0, 9)))],
+      ['x', makeMetrics(hashFromPositions(range(1, 10)))],
+      ['y', makeMetrics(hashFromPositions(range(2, 11)))],
     ])
     const removePhotos = vi.fn()
     const batchSetTimestamps = vi.fn()

@@ -10,7 +10,7 @@ export interface PhotoMetrics {
   height: number
   size: number
   /**
-   * A 64-bit difference-hash (dHash), rendered as 16 lowercase hex
+   * A 256-bit difference-hash (dHash), rendered as 64 lowercase hex
    * characters (4 bits each). `null` means the file could not be decoded
    * (e.g. HEIC in a browser without HEIC support) — this is a permanent
    * "no hash available" result, not "still computing" (see
@@ -21,10 +21,11 @@ export interface PhotoMetrics {
 }
 
 // dHash grid: one column wider than it is tall so every row yields exactly
-// (HASH_GRID_WIDTH - 1) horizontal adjacent-pixel comparisons. 9x8 gives
-// 8 comparisons/row * 8 rows = 64 bits total, the conventional dHash size.
-const HASH_GRID_WIDTH = 9
-const HASH_GRID_HEIGHT = 8
+// (HASH_GRID_WIDTH - 1) horizontal adjacent-pixel comparisons. 17x16 gives
+// 16 comparisons/row * 16 rows = 256 bits total — a 16x16 hash, upsized from
+// the original 8x8/64-bit hash to preserve more image detail per hash.
+const HASH_GRID_WIDTH = 17
+const HASH_GRID_HEIGHT = 16
 
 /**
  * Computes width, height, file size, and a perceptual hash for a photo
@@ -67,7 +68,7 @@ export async function computePhotoMetrics(file: File): Promise<PhotoMetrics> {
  * Hand-rolled difference-hash (dHash): downscale to a small fixed grid,
  * convert to grayscale, and record — per row — whether each pixel is
  * brighter than its right-hand neighbor. No DCT, no external library
- * (KTD1). Represented as 16 hex characters (64 bits, 4 bits per hex digit),
+ * (KTD1). Represented as 64 hex characters (256 bits, 4 bits per hex digit),
  * most-significant bit first, rows concatenated top to bottom.
  *
  * The downscale to 9x8 is done via a *second* `createImageBitmap` call with
