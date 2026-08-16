@@ -22,6 +22,8 @@ The destination Google Photos album a batch of photos is uploaded into. The app 
 ## Photo Deduplication
 
 ### Cluster
-A group of photos in the currently loaded batch that the app has detected as near-duplicates or identical to each other. A photo with no match to anything else in the batch is still a Cluster, just with a single member.
+A group of photos in the currently loaded batch that fall within a single similarity threshold (Hamming distance between perceptual hashes) of each other, purely for display and manual review — a Cluster carries no automatic behavior of its own. A photo with no match to anything else in the batch renders plainly (not as a one-photo Cluster). The threshold is user-adjustable live via a slider; moving it re-groups the batch immediately.
 
-Members within a Cluster relate to each other as Identical (the same photographic shot, differing only by resolution, format, or compression) or Similar (the same moment or scene, such as a burst or group-photo sequence, without being the same shot) — a single Cluster can contain both relationships across different subsets of its members. Identical members can be reduced to one best-quality copy without human judgment; Similar members always need a human pick, since there is no automatic "best" among genuinely different shots.
+The user manually selects which member(s) of a Cluster to delete; nothing is ever removed automatically. (An earlier iteration auto-resolved "identical" photos without confirmation — removed after it proved confusing that removed photos weren't visible. Smart auto-suggestions may return once grouping itself is trustworthy.)
+
+A Debug Mode toggle shows the Hamming distance between every pair of photos within a Cluster, plus a click-any-two-photos comparison showing their raw hashes and distance — for verifying the hashing/threshold behavior directly rather than inferring it from grouping outcomes.

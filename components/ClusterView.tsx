@@ -1,26 +1,22 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
-import { clusterPhotos, type Cluster, type RelationshipTier } from '@/lib/photo-clustering'
+import { clusterPhotos, hammingDistance, type Cluster } from '@/lib/photo-clustering'
 import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 import PhotoCard from './PhotoCard'
 
-// KTD2's starting Hamming-distance thresholds (out of a 64-bit hash). The
-// identical tier stays fixed — it drives automatic, no-confirmation removal
-// (R6), so it is deliberately not user-adjustable: loosening it would make
-// auto-delete more aggressive, which is a different and riskier axis than
-// "how much shows up together for review." The similar tier is
-// user-adjustable via the slider below (feedback: the original fixed value
-// of 12 was too strict — two copies of the same photo with a hand-drawn
-// line added didn't cluster as similar).
-const IDENTICAL_THRESHOLD = 3
-const DEFAULT_SIMILAR_THRESHOLD = 20
-const MIN_SIMILAR_THRESHOLD = IDENTICAL_THRESHOLD + 1
+// R1's grouping aggressiveness. This is the only clustering knob — there is
+// no separate "identical" tier or automatic behavior tied to it; grouping
+// is purely for display and manual review (feedback: automatic dedup was
+// confusing and is removed for now — see the plan's "Later iteration" note
+// for when smart auto-suggestions come back).
+const DEFAULT_THRESHOLD = 20
+const MIN_THRESHOLD = 0
 // Beyond ~half the hash's bit width, two hashes are no more alike than
 // chance — looser than this stops meaning "similar" at all.
-const MAX_SIMILAR_THRESHOLD = 32
+const MAX_THRESHOLD = 32
 
 interface ClusterViewProps {
   photos: PhotoEntry[]
@@ -34,9 +30,9 @@ interface ClusterViewProps {
    */
   getObjectUrl: (file: File) => string
   /**
-   * `hooks/usePhotos.ts`'s `removePhotos`, called unchanged (KTD10) both for
-   * U4's automatic identical-tier resolution and its confirmed similar-tier
-   * removal.
+   * `hooks/usePhotos.ts`'s `removePhotos`, called unchanged only when the
+   * user explicitly clicks "Delete selected" within a cluster — there is no
+   * automatic removal anywhere in this component.
    */
   removePhotos: (ids: string[]) => void
   /**
@@ -46,104 +42,23 @@ interface ClusterViewProps {
    * order — this component just needs to call it with the right ids/date.
    */
   batchSetTimestamps: (ids: string[], anchorDate: Date) => void
-  /**
-   * `hooks/usePhotos.ts`'s `restorePhoto`, used to undo an automatic
-   * identical-tier removal — re-inserts the exact removed `PhotoEntry` back
-   * into the batch.
-   */
-  restorePhoto: (entry: PhotoEntry) => void
-}
-
-type MemberTier = RelationshipTier | null
-
-/**
- * A cluster's `relationships` are per-pair, not per-member. This computes,
- * in one O(edges) pass, a "highest tier this member participates in" label
- * for every member: a member touched by any `identical`-tier relationship
- * is identical-flagged (identical wins over similar); else similar-flagged
- * if touched by any `similar`-tier relationship; else (a true singleton
- * with zero relationships) no flag at all. Computed once per cluster
- * (memoized alongside `sortedClusters`) rather than re-scanning
- * `cluster.relationships` from scratch for every member on every render.
- */
-function computeMemberTiers(cluster: Cluster): Map<string, MemberTier> {
-  const tiers = new Map<string, MemberTier>()
-  for (const id of cluster.members) tiers.set(id, null)
-  for (const relationship of cluster.relationships) {
-    for (const id of [relationship.a, relationship.b]) {
-      if (tiers.get(id) === 'identical') continue
-      tiers.set(id, relationship.tier === 'identical' ? 'identical' : 'similar')
-    }
-  }
-  return tiers
 }
 
 /**
  * A stable, content-derived identity for a cluster: the sorted-and-joined
  * member id list. `clusterPhotos` reassigns `cluster.id` as `cluster-${N}`
  * fresh on every call, purely from discovery order — as metrics resolve
- * asynchronously (KTD12) and clusters merge/split/reorder, a given index can
- * end up pointing at a completely different real-world group of photos than
- * it did on a prior render. Using `cluster.id` as a React key or a
- * `similarSelections`/`timestampSelections` Map key would let a stale
- * selection from one cluster silently attach to an unrelated cluster that
- * later inherits the same index. This key is used everywhere identity needs
- * to survive a recompute; `cluster.id` itself is not used for that purpose
- * anywhere in this component.
+ * asynchronously (KTD12), the threshold slider moves, or a delete shrinks
+ * the batch, a given index can end up pointing at a completely different
+ * real-world group of photos than it did on a prior render. Using
+ * `cluster.id` as a React key or a selection-state Map key would let a
+ * stale selection from one cluster silently attach to an unrelated cluster
+ * that later inherits the same index. This key is used everywhere identity
+ * needs to survive a recompute; `cluster.id` itself is not used for that
+ * purpose anywhere in this component.
  */
 function clusterKey(cluster: Cluster): string {
   return [...cluster.members].sort().join(',')
-}
-
-/**
- * Partitions a cluster's identical-tagged members into their own connected
- * sub-groups, considering only `identical`-tier edges. A single connected
- * component from `clusterPhotos` can contain two or more separate
- * identical-tier duplicate pairs bridged together purely by a weaker
- * `similar`-tier edge (e.g. a burst chain where frame 2 and 3 are identical,
- * frame 5 and 6 are a separate identical pair, and frame 3~5 is only
- * similar) — treating every identical-tagged member in the whole cluster as
- * one group would auto-delete photos that are only weakly `similar` to the
- * kept survivor, not actually duplicates of it. Each returned sub-group is
- * resolved to its own single best-quality survivor independently.
- */
-function identicalSubgroups(cluster: Cluster, tiers: Map<string, MemberTier>): string[][] {
-  const identicalIds = cluster.members.filter((id) => tiers.get(id) === 'identical')
-  const parent = new Map<string, string>()
-  for (const id of identicalIds) parent.set(id, id)
-
-  function find(id: string): string {
-    let root = id
-    while (parent.get(root) !== root) root = parent.get(root) as string
-    let current = id
-    while (parent.get(current) !== root) {
-      const next = parent.get(current) as string
-      parent.set(current, root)
-      current = next
-    }
-    return root
-  }
-
-  function union(a: string, b: string): void {
-    const rootA = find(a)
-    const rootB = find(b)
-    if (rootA !== rootB) parent.set(rootA, rootB)
-  }
-
-  for (const relationship of cluster.relationships) {
-    if (relationship.tier === 'identical' && parent.has(relationship.a) && parent.has(relationship.b)) {
-      union(relationship.a, relationship.b)
-    }
-  }
-
-  const groups = new Map<string, string[]>()
-  for (const id of identicalIds) {
-    const root = find(id)
-    const group = groups.get(root) ?? []
-    group.push(id)
-    groups.set(root, group)
-  }
-  return [...groups.values()]
 }
 
 /**
@@ -164,38 +79,12 @@ function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEnt
 }
 
 /**
- * KTD9's "best quality" ordering: pixel count (width * height) descending,
- * file size descending as a tie-breaker. A member with no metrics yet (still
- * computing) sorts as 0x0/0 bytes, i.e. last — this only matters in practice
- * for members that already participate in an identical/similar relationship,
- * which requires a resolved (non-null) hash and therefore resolved metrics.
- */
-function compareByQualityDescending(
-  a: string,
-  b: string,
-  metrics: Map<string, PhotoMetrics | undefined>
-): number {
-  const metricsA = metrics.get(a)
-  const metricsB = metrics.get(b)
-  const pixelsA = (metricsA?.width ?? 0) * (metricsA?.height ?? 0)
-  const pixelsB = (metricsB?.width ?? 0) * (metricsB?.height ?? 0)
-  if (pixelsA !== pixelsB) return pixelsB - pixelsA
-  return (metricsB?.size ?? 0) - (metricsA?.size ?? 0)
-}
-
-/** The single best-by-quality (KTD9) member id among `ids`. `ids` must be non-empty. */
-function bestQualityMember(ids: string[], metrics: Map<string, PhotoMetrics | undefined>): string {
-  return [...ids].sort((a, b) => compareByQualityDescending(a, b, metrics))[0]
-}
-
-/**
- * Shared toggle mechanics for a per-cluster `Map<clusterId, Set<memberId>>`
+ * Shared toggle mechanics for a per-cluster `Map<clusterKey, Set<memberId>>`
  * selection: copy-or-default the cluster's current `Set`, add/delete `id`,
- * write it back into a new `Map`. Used by both `similarSelections` (U4's
- * dedup-keeper choice) and `timestampSelections` (U5's timestamp-edit
- * choice) — the two Maps stay separate (they represent independently
- * toggleable concepts a member can carry at once), only this update
- * mechanic is shared.
+ * write it back into a new `Map`. Used by both the manual delete-selection
+ * and the timestamp-edit selection (U5) — the two Maps stay separate (they
+ * represent independently toggleable concepts a member can carry at once),
+ * only this update mechanic is shared.
  */
 function toggleInClusterSelection(
   setSelections: Dispatch<SetStateAction<Map<string, Set<string>>>>,
@@ -212,16 +101,6 @@ function toggleInClusterSelection(
     next.set(clusterId, current)
     return next
   })
-}
-
-const TIER_STYLES: Record<RelationshipTier, string> = {
-  identical: 'ring-2 ring-emerald-500 dark:ring-emerald-400 rounded-lg',
-  similar: 'ring-2 ring-amber-500 dark:ring-amber-400 rounded-lg',
-}
-
-const TIER_LABELS: Record<RelationshipTier, string> = {
-  identical: 'Identical',
-  similar: 'Similar',
 }
 
 /** "8/12/2025, 3:04 PM"-style label for a quick-pick timestamp button. Uses
@@ -313,17 +192,58 @@ function ClusterTimestampEditor({
   )
 }
 
-export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos, batchSetTimestamps, restorePhoto }: ClusterViewProps) {
+/**
+ * Debug view: the Hamming distance between every pair of members in a
+ * cluster, so the user can verify whether the hashing/threshold is behaving
+ * as expected rather than guessing from grouping outcomes alone.
+ */
+function PairwiseDistances({
+  cluster,
+  photosById,
+  metrics,
+}: {
+  cluster: Cluster
+  photosById: Map<string, PhotoEntry>
+  metrics: Map<string, PhotoMetrics | undefined>
+}) {
+  if (cluster.members.length < 2) return null
+
+  const pairs: Array<{ id: string; a: string; b: string; distance: number | null }> = []
+  for (let i = 0; i < cluster.members.length; i++) {
+    for (let j = i + 1; j < cluster.members.length; j++) {
+      const idA = cluster.members[i]
+      const idB = cluster.members[j]
+      const hashA = metrics.get(idA)?.hash ?? null
+      const hashB = metrics.get(idB)?.hash ?? null
+      pairs.push({
+        id: `${idA}-${idB}`,
+        a: idA,
+        b: idB,
+        distance: hashA !== null && hashB !== null ? hammingDistance(hashA, hashB) : null,
+      })
+    }
+  }
+
+  return (
+    <ul className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 flex flex-col gap-0.5">
+      {pairs.map(({ id, a, b, distance }) => (
+        <li key={id}>
+          {photosById.get(a)?.filename} ↔ {photosById.get(b)?.filename}:{' '}
+          {distance !== null ? `${distance} bits` : 'hash pending/unavailable'}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos, batchSetTimestamps }: ClusterViewProps) {
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
 
-  // R1's grouping aggressiveness, live-adjustable via the slider below.
-  // The identical tier is deliberately not part of this state — see
-  // IDENTICAL_THRESHOLD's comment.
-  const [similarThreshold, setSimilarThreshold] = useState(DEFAULT_SIMILAR_THRESHOLD)
+  const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD)
 
-  // The clustering pipeline (O(n^2) pairwise Hamming distance, KTD5) only
-  // needs to rerun when its actual inputs — `photos`/`metrics`/the slider —
-  // change, not on every local selection-state update (a keeper toggle, a
+  // The clustering pipeline (O(n^2) pairwise Hamming distance) only needs to
+  // rerun when its actual inputs — `photos`/`metrics`/the slider — change,
+  // not on every local selection-state update (a delete-checkbox toggle, a
   // timestamp-edit checkbox) that also re-renders this component.
   const sortedClusters = useMemo(() => {
     const hashInputs = photos.map((photo) => ({
@@ -334,141 +254,14 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
       // real hash lands and `metrics` updates (KTD12).
       hash: metrics.get(photo.id)?.hash ?? null,
     }))
-    const clusters = clusterPhotos(hashInputs, { identical: IDENTICAL_THRESHOLD, similar: similarThreshold })
+    const clusters = clusterPhotos(hashInputs, threshold)
     return [...clusters].sort(
       (a, b) => earliestCapturedAtMs(a, photosById) - earliestCapturedAtMs(b, photosById)
     )
-  }, [photos, metrics, photosById, similarThreshold])
+  }, [photos, metrics, photosById, threshold])
 
-  // Per-cluster member-tier maps, computed once per cluster (O(edges) each)
-  // alongside `sortedClusters` rather than re-scanning relationships from
-  // scratch for every member on every render (including renders triggered
-  // by unrelated selection-state updates elsewhere in this component).
-  const clusterTiers = useMemo(
-    () => new Map(sortedClusters.map((cluster) => [clusterKey(cluster), computeMemberTiers(cluster)])),
-    [sortedClusters]
-  )
-
-  // Ids the user has explicitly undone an automatic removal for. Excluded
-  // from `toRemove` below permanently for this session — without this, an
-  // undo on a 3+-way identical group (restore one of several duplicates)
-  // would recompute a fresh sub-group containing just the restored photo
-  // and immediately auto-remove it again.
-  const [undoneIds, setUndoneIds] = useState<Set<string>>(new Set())
-
-  // R6: per-cluster identical-tier auto-resolution, derived from
-  // `sortedClusters` so it only recomputes alongside it.
-  const identicalResolutions = useMemo(() => sortedClusters.flatMap((cluster) =>
-    identicalSubgroups(cluster, clusterTiers.get(clusterKey(cluster))!).flatMap((group) => {
-      if (group.length < 2) return [] // nothing to compare against — defensive guard
-      const best = bestQualityMember(group, metrics)
-      const toRemove = group.filter((id) => id !== best && !undoneIds.has(id))
-      if (toRemove.length === 0) return []
-      return [{ owner: best, toRemove }]
-    })
-  ), [sortedClusters, clusterTiers, metrics, undoneIds])
-
-  // Tracks *individual* ids already sent to `removePhotos`, not whole
-  // removal groups — a per-group key (e.g. the sorted `toRemove` list)
-  // would under-guard a partial undo: undoing one member of a 3+-way
-  // identical group recomputes a *smaller* sub-group containing ids already
-  // removed in an earlier firing (e.g. undoing p2 from {p1 best, p2, p3}
-  // recomputes toRemove=[p3], a group never seen before), which would
-  // re-send an already-removed id and double-record it in `removedByOwner`.
-  // Tracking per id makes "already sent to removePhotos" the actual
-  // invariant, so it can never re-fire regardless of how the group reshapes.
-  const initiatedRemovalsRef = useRef<Set<string>>(new Set())
-
-  // Duplicates auto-removed this session, kept visible (feedback: users
-  // couldn't see or undo what got auto-deleted) — keyed by the surviving
-  // member's id (a real, permanent photo id, unlike `cluster.id`/`clusterKey`
-  // which can both change once membership shrinks). Captured from
-  // `photosById` *before* `removePhotos` fires, since the entry disappears
-  // from `photos` the moment the parent's state updates.
-  const [removedByOwner, setRemovedByOwner] = useState<Map<string, PhotoEntry[]>>(new Map())
-  const [expandedOwners, setExpandedOwners] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    for (const { owner, toRemove } of identicalResolutions) {
-      const freshIds = toRemove.filter((id) => !initiatedRemovalsRef.current.has(id))
-      if (freshIds.length === 0) continue
-      for (const id of freshIds) initiatedRemovalsRef.current.add(id)
-      const removedEntries = freshIds
-        .map((id) => photosById.get(id))
-        .filter((entry): entry is PhotoEntry => entry !== undefined)
-      if (removedEntries.length > 0) {
-        setRemovedByOwner((prev) => {
-          const next = new Map(prev)
-          next.set(owner, [...(next.get(owner) ?? []), ...removedEntries])
-          return next
-        })
-      }
-      removePhotos(freshIds)
-    }
-    // `identicalResolutions` is itself memoized (stable unless sortedClusters/
-    // clusterTiers/metrics/undoneIds change), so this only needs to rerun
-    // when one of those actually changes — not on every render (e.g. an
-    // unrelated `expandedOwners` toggle). The per-id `initiatedRemovalsRef`
-    // guard above is what makes this safe regardless.
-  }, [identicalResolutions, removePhotos, photosById])
-
-  function toggleExpandedRemoved(owner: string) {
-    setExpandedOwners((prev) => {
-      const next = new Set(prev)
-      if (next.has(owner)) next.delete(owner)
-      else next.add(owner)
-      return next
-    })
-  }
-
-  function handleUndoRemoval(owner: string, entry: PhotoEntry) {
-    setUndoneIds((prev) => new Set(prev).add(entry.id))
-    setRemovedByOwner((prev) => {
-      const next = new Map(prev)
-      const remaining = (next.get(owner) ?? []).filter((e) => e.id !== entry.id)
-      if (remaining.length > 0) next.set(owner, remaining)
-      else next.delete(owner)
-      return next
-    })
-    restorePhoto(entry)
-  }
-
-  // R7: per-cluster similar-tier suggested-keep selection, scoped by
-  // `clusterKey` (not `cluster.id` — see its doc comment). A cluster with no recorded selection yet falls back to the
-  // best-by-quality member as its suggested keep (KTD9) — computed lazily on
-  // read rather than seeded via an effect, so there's no extra render/effect
-  // cycle before the suggested selection is visible.
-  const [similarSelections, setSimilarSelections] = useState<Map<string, Set<string>>>(new Map())
-
-  function defaultSimilarSelection(similarIds: string[]): Set<string> {
-    return new Set([bestQualityMember(similarIds, metrics)])
-  }
-
-  function toggleSimilarSelection(clusterId: string, similarIds: string[], id: string, checked: boolean) {
-    toggleInClusterSelection(setSimilarSelections, clusterId, id, checked, () => defaultSimilarSelection(similarIds))
-  }
-
-  function handleRemoveNonSelected(clusterId: string, similarIds: string[]) {
-    const selected = similarSelections.get(clusterId) ?? defaultSimilarSelection(similarIds)
-    removePhotos(similarIds.filter((id) => !selected.has(id)))
-  }
-
-  // U5: per-cluster "selected for timestamp edit" selection, keyed by
-  // `clusterKey` (not `cluster.id`). Independent of `similarSelections` above — a different
-  // concept (which similar-tier members survive dedup) even though both use
-  // the same checkbox UI pattern. Every member of a cluster is eligible
-  // (not just similar-tier), and defaults to empty (nothing selected) until
-  // the user picks something, unlike `similarSelections`'s pre-selected
-  // default.
-  const [timestampSelections, setTimestampSelections] = useState<Map<string, Set<string>>>(new Map())
-
-  function toggleTimestampSelection(clusterId: string, id: string, checked: boolean) {
-    toggleInClusterSelection(setTimestampSelections, clusterId, id, checked, () => new Set<string>())
-  }
-
-  // A cluster with only one member no longer being a duplicate/near-duplicate
-  // of anything shouldn't visually read as a "cluster" (feedback: it looked
-  // like a group of one, complete with a heading and border). Adjacent
+  // A cluster with only one member isn't a duplicate/near-duplicate of
+  // anything and shouldn't visually read as a "cluster". Adjacent
   // singletons in the chronological sort are bundled into one plain grid
   // block with no cluster chrome at all; a real (2+-member) cluster keeps
   // its own section.
@@ -486,25 +279,110 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     return blocks
   }, [sortedClusters])
 
+  // Manual "select for deletion" per cluster. No auto-suggestion, no
+  // pre-selected keeper, no automatic removal of any kind — the user picks
+  // which member(s) to delete and nothing is removed until they click
+  // "Delete selected".
+  const [deleteSelections, setDeleteSelections] = useState<Map<string, Set<string>>>(new Map())
+
+  function toggleDeleteSelection(key: string, id: string, checked: boolean) {
+    toggleInClusterSelection(setDeleteSelections, key, id, checked, () => new Set())
+  }
+
+  function handleDeleteSelected(key: string) {
+    const selected = deleteSelections.get(key)
+    if (!selected || selected.size === 0) return
+    removePhotos([...selected])
+    setDeleteSelections((prev) => {
+      const next = new Map(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  // U5: per-cluster "selected for timestamp edit" selection, keyed by
+  // `clusterKey`. Independent of the delete-selection above — a different
+  // concept (which members get a corrected timestamp) even though both use
+  // the same checkbox UI pattern.
+  const [timestampSelections, setTimestampSelections] = useState<Map<string, Set<string>>>(new Map())
+
+  function toggleTimestampSelection(clusterId: string, id: string, checked: boolean) {
+    toggleInClusterSelection(setTimestampSelections, clusterId, id, checked, () => new Set<string>())
+  }
+
+  // --- Debug mode: verify hash/threshold behavior directly ----------------
+  const [debugMode, setDebugMode] = useState(false)
+  // Up to two ids selected for direct hash/distance comparison, in click
+  // order. Clicking a third photo resets to a fresh single selection.
+  const [comparePair, setComparePair] = useState<[string, string | null] | null>(null)
+
+  function handleCompareClick(id: string) {
+    setComparePair((prev) => {
+      if (!prev || prev[1] !== null) return [id, null]
+      if (prev[0] === id) return prev
+      return [prev[0], id]
+    })
+  }
+
+  const compareHashA = comparePair ? metrics.get(comparePair[0])?.hash ?? null : null
+  const compareHashB = comparePair?.[1] ? metrics.get(comparePair[1])?.hash ?? null : null
+  const compareDistance =
+    compareHashA !== null && compareHashB !== null ? hammingDistance(compareHashA, compareHashB) : null
+
   return (
     <div className="flex flex-col gap-8">
-      <div className="flex items-center gap-3">
-        <label htmlFor="similarity-threshold" className="text-xs font-medium text-zinc-600 dark:text-zinc-400 whitespace-nowrap">
-          Grouping strictness
-        </label>
-        <input
-          id="similarity-threshold"
-          type="range"
-          min={MIN_SIMILAR_THRESHOLD}
-          max={MAX_SIMILAR_THRESHOLD}
-          value={similarThreshold}
-          onChange={(e) => setSimilarThreshold(Number(e.target.value))}
-          aria-label="Similarity grouping threshold — drag left for stricter, right for looser"
-          className="flex-1 max-w-xs"
-        />
-        <span className="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap">
-          {similarThreshold === MIN_SIMILAR_THRESHOLD ? 'Strict' : similarThreshold === MAX_SIMILAR_THRESHOLD ? 'Loose' : `${similarThreshold}/${MAX_SIMILAR_THRESHOLD}`}
-        </span>
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <label htmlFor="similarity-threshold" className="text-xs font-medium text-zinc-600 dark:text-zinc-400 whitespace-nowrap">
+            Grouping strictness
+          </label>
+          <input
+            id="similarity-threshold"
+            type="range"
+            min={MIN_THRESHOLD}
+            max={MAX_THRESHOLD}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            aria-label="Similarity grouping threshold — drag left for stricter, right for looser"
+            className="flex-1 max-w-xs"
+          />
+          <span className="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap">
+            {threshold === MIN_THRESHOLD ? 'Strict' : threshold === MAX_THRESHOLD ? 'Loose' : `${threshold}/${MAX_THRESHOLD}`}
+          </span>
+          <label className="ml-auto flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={debugMode}
+              onChange={(e) => {
+                setDebugMode(e.target.checked)
+                setComparePair(null)
+              }}
+            />
+            Debug mode
+          </label>
+        </div>
+        {debugMode && (
+          <div className="text-xs font-mono text-zinc-600 dark:text-zinc-400 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 p-3">
+            {!comparePair && <p>Click &quot;Compare&quot; on any two photos to see their hashes and distance.</p>}
+            {comparePair && (
+              <div className="flex flex-col gap-1">
+                <p>A: {photosById.get(comparePair[0])?.filename} — hash: {compareHashA ?? 'pending/undecodable'}</p>
+                {comparePair[1] ? (
+                  <>
+                    <p>B: {photosById.get(comparePair[1])?.filename} — hash: {compareHashB ?? 'pending/undecodable'}</p>
+                    <p className="font-semibold text-zinc-900 dark:text-zinc-50">
+                      {compareDistance !== null
+                        ? `Distance: ${compareDistance} bits`
+                        : 'Distance: unavailable (one or both hashes not resolved)'}
+                    </p>
+                  </>
+                ) : (
+                  <p>Click a second photo to compare.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {renderBlocks.map((block) => {
@@ -516,7 +394,20 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
                 const id = cluster.members[0]
                 const entry = photosById.get(id)
                 if (!entry) return null
-                return <PhotoCard key={id} entry={entry} objectUrl={getObjectUrl(entry.file)} />
+                return (
+                  <div key={id} className="flex flex-col gap-1">
+                    <PhotoCard entry={entry} objectUrl={getObjectUrl(entry.file)} />
+                    {debugMode && (
+                      <button
+                        type="button"
+                        onClick={() => handleCompareClick(id)}
+                        className="text-[11px] text-zinc-500 dark:text-zinc-400 underline text-left"
+                      >
+                        Compare
+                      </button>
+                    )}
+                  </div>
+                )
               })}
             </div>
           )
@@ -524,11 +415,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
 
         const cluster = block.cluster
         const key = clusterKey(cluster)
-        const tiers = clusterTiers.get(key)!
-        const similarIds = cluster.members.filter((id) => tiers.get(id) === 'similar')
-        const selectedKeepers = similarIds.length > 0
-          ? similarSelections.get(key) ?? defaultSimilarSelection(similarIds)
-          : null
+        const deleteSelected = deleteSelections.get(key) ?? new Set<string>()
         const timestampSelected = timestampSelections.get(key) ?? new Set<string>()
 
         return (
@@ -540,99 +427,48 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
               {cluster.members.map((id) => {
                 const entry = photosById.get(id)
                 if (!entry) return null
-                const tier = tiers.get(id) ?? null
-                const isSimilar = tier === 'similar'
-                const removedDuplicates = removedByOwner.get(id) ?? []
-                const isExpanded = expandedOwners.has(id)
                 return (
                   <div key={id} className="flex flex-col gap-1.5">
-                    <div
-                      role={tier ? 'group' : undefined}
-                      aria-label={tier ? TIER_LABELS[tier] : undefined}
-                      className={tier ? TIER_STYLES[tier] : undefined}
-                    >
-                      {tier && <span className="sr-only">{TIER_LABELS[tier]}</span>}
-                      <PhotoCard
-                        entry={entry}
-                        objectUrl={getObjectUrl(entry.file)}
-                        onSelect={
-                          isSimilar
-                            ? (checked) => toggleSimilarSelection(key, similarIds, id, checked)
-                            : undefined
-                        }
-                        checked={isSimilar ? (selectedKeepers?.has(id) ?? false) : undefined}
+                    <PhotoCard
+                      entry={entry}
+                      objectUrl={getObjectUrl(entry.file)}
+                      onSelect={(checked) => toggleDeleteSelection(key, id, checked)}
+                      checked={deleteSelected.has(id)}
+                    />
+                    <label className="flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={timestampSelected.has(id)}
+                        onChange={(e) => toggleTimestampSelection(key, id, e.target.checked)}
+                        aria-label={`Select ${entry.filename} for timestamp edit`}
+                        className="h-3.5 w-3.5"
                       />
-                      {/*
-                        U5's timestamp-edit selection: a dedicated checkbox,
-                        independent of PhotoCard's own onSelect/checked pair
-                        above (which is U4's similar-tier dedup selection).
-                        Every member is eligible, not just similar-tier ones.
-                      */}
-                      <label className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={timestampSelected.has(id)}
-                          onChange={(e) => toggleTimestampSelection(key, id, e.target.checked)}
-                          aria-label={`Select ${entry.filename} for timestamp edit`}
-                          className="h-3.5 w-3.5"
-                        />
-                        Timestamp edit
-                      </label>
-                    </div>
-                    {removedDuplicates.length > 0 && (
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => toggleExpandedRemoved(id)}
-                          className="text-[11px] text-zinc-500 dark:text-zinc-400 underline"
-                        >
-                          {isExpanded
-                            ? 'Hide removed'
-                            : `${removedDuplicates.length} duplicate${removedDuplicates.length !== 1 ? 's' : ''} removed`}
-                        </button>
-                        {isExpanded && (
-                          <ul className="mt-1.5 flex flex-col gap-1.5">
-                            {removedDuplicates.map((removedEntry) => (
-                              <li
-                                key={removedEntry.id}
-                                className="flex items-center gap-2 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 p-1.5"
-                              >
-                                {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
-                                <img
-                                  src={getObjectUrl(removedEntry.file)}
-                                  alt={removedEntry.filename}
-                                  className="w-10 h-10 object-cover rounded blur-[1px] opacity-50"
-                                />
-                                <span className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">Removed</span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleUndoRemoval(id, removedEntry)}
-                                  className="ml-auto text-[11px] font-medium text-zinc-700 dark:text-zinc-200 underline whitespace-nowrap"
-                                >
-                                  Undo
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
+                      Timestamp edit
+                    </label>
+                    {debugMode && (
+                      <button
+                        type="button"
+                        onClick={() => handleCompareClick(id)}
+                        className="text-[11px] text-zinc-500 dark:text-zinc-400 underline text-left"
+                      >
+                        Compare
+                      </button>
                     )}
                   </div>
                 )
               })}
             </div>
-            {selectedKeepers && (
-              <div>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveNonSelected(key, similarIds)}
-                  disabled={selectedKeepers.size === 0}
-                  className="px-3 py-1.5 text-xs font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Remove non-selected
-                </button>
-              </div>
-            )}
+            {debugMode && <PairwiseDistances cluster={cluster} photosById={photosById} metrics={metrics} />}
+            <div>
+              <button
+                type="button"
+                onClick={() => handleDeleteSelected(key)}
+                disabled={deleteSelected.size === 0}
+                className="px-3 py-1.5 text-xs font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors dark:bg-red-500 dark:hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Delete selected ({deleteSelected.size})
+              </button>
+            </div>
             {timestampSelected.size > 0 && (
               <ClusterTimestampEditor
                 selectedIds={[...timestampSelected]}

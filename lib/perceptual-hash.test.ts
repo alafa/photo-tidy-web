@@ -82,13 +82,21 @@ beforeEach(() => {
 
   vi.stubGlobal(
     'createImageBitmap',
-    vi.fn(async (file: File) => {
-      if (rejectFiles.has(file)) {
-        throw new Error('decode failed')
+    vi.fn(async (source: File | FakeBitmap) => {
+      if (source instanceof File) {
+        if (rejectFiles.has(source)) {
+          throw new Error('decode failed')
+        }
+        const bitmap = bitmapByFile.get(source)
+        if (!bitmap) throw new Error(`no fake bitmap registered for file ${source.name}`)
+        return bitmap
       }
-      const bitmap = bitmapByFile.get(file)
-      if (!bitmap) throw new Error(`no fake bitmap registered for file ${file.name}`)
-      return bitmap
+      // The resize call (decoded bitmap -> 9x8 hash-grid bitmap): test
+      // fixtures already carry the final 9x8 grid via `__grid` regardless
+      // of natural size, so "resizing" is a no-op passthrough — return a
+      // fresh object with its own `close` spy so callers can close it
+      // independently of the source bitmap.
+      return { ...source, close: vi.fn() }
     })
   )
 

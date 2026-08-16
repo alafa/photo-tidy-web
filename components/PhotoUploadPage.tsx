@@ -35,7 +35,6 @@ export default function PhotoUploadPage() {
     batchUpdateNames,
     batchSetTimestamps,
     removePhotos,
-    restorePhoto,
   } = usePhotos()
   const { getObjectUrl, releaseObjectUrl } = useObjectUrls()
   const { isSignedIn, accountEmail, isExpiringSoon, accessToken, signIn, signOut } = useGoogleAuth()
@@ -304,7 +303,6 @@ export default function PhotoUploadPage() {
                 getObjectUrl={getObjectUrl}
                 removePhotos={removePhotos}
                 batchSetTimestamps={batchSetTimestamps}
-                restorePhoto={restorePhoto}
               />
             ) : (
               <DndContext

@@ -47,10 +47,11 @@ export async function computePhotoMetrics(file: File): Promise<PhotoMetrics> {
     const height = bitmap.height
     let hash: string | null
     try {
-      hash = computeDHash(bitmap)
+      hash = await computeDHash(bitmap)
     } catch {
-      // Canvas 2D context unavailable, or some other draw-time failure —
-      // still report the dimensions we already decoded, just no hash.
+      // Canvas 2D context unavailable, or some other draw/resize-time
+      // failure — still report the dimensions we already decoded, just no
+      // hash.
       hash = null
     }
     return { width, height, size, hash }
@@ -68,16 +69,37 @@ export async function computePhotoMetrics(file: File): Promise<PhotoMetrics> {
  * brighter than its right-hand neighbor. No DCT, no external library
  * (KTD1). Represented as 16 hex characters (64 bits, 4 bits per hex digit),
  * most-significant bit first, rows concatenated top to bottom.
+ *
+ * The downscale to 9x8 is done via a *second* `createImageBitmap` call with
+ * `resizeWidth`/`resizeHeight`/`resizeQuality: 'high'`, not a single
+ * `canvas.drawImage` at the final size. A single-step canvas draw at an
+ * extreme ratio (a multi-thousand-pixel photo down to 9px) is a known
+ * source of inconsistent, recompression-sensitive hashes — canvas 2D's
+ * general-purpose draw path isn't guaranteed to do a proper area-average
+ * for ratios that large, unlike the browser's dedicated bitmap-resize
+ * path. This is the leading suspect for reports of clearly-similar photos
+ * not landing close in Hamming distance.
  */
-function computeDHash(bitmap: ImageBitmap): string {
-  const canvas = document.createElement('canvas')
-  canvas.width = HASH_GRID_WIDTH
-  canvas.height = HASH_GRID_HEIGHT
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('2D canvas context unavailable')
+async function computeDHash(bitmap: ImageBitmap): Promise<string> {
+  const resized = await createImageBitmap(bitmap, {
+    resizeWidth: HASH_GRID_WIDTH,
+    resizeHeight: HASH_GRID_HEIGHT,
+    resizeQuality: 'high',
+  })
 
-  ctx.drawImage(bitmap, 0, 0, HASH_GRID_WIDTH, HASH_GRID_HEIGHT)
-  const { data } = ctx.getImageData(0, 0, HASH_GRID_WIDTH, HASH_GRID_HEIGHT)
+  let data: Uint8ClampedArray
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = HASH_GRID_WIDTH
+    canvas.height = HASH_GRID_HEIGHT
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('2D canvas context unavailable')
+
+    ctx.drawImage(resized, 0, 0)
+    data = ctx.getImageData(0, 0, HASH_GRID_WIDTH, HASH_GRID_HEIGHT).data
+  } finally {
+    resized.close()
+  }
 
   const grayscale = new Array<number>(HASH_GRID_WIDTH * HASH_GRID_HEIGHT)
   for (let i = 0; i < grayscale.length; i++) {
