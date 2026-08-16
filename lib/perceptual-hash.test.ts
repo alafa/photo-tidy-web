@@ -183,4 +183,16 @@ describe('computePhotoMetrics', () => {
 
     expect(bitmap.close).toHaveBeenCalledTimes(1)
   })
+
+  it('resolves with real dimensions but hash: null when the bitmap decodes but no 2D canvas context is available', async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => null)
+    const file = makeFile('a.jpg', 100)
+    const bitmap = makeFakeBitmap(repeatRow(ASCENDING_ROW), 4032, 3024)
+    bitmapByFile.set(file, bitmap)
+
+    const result = await computePhotoMetrics(file)
+
+    expect(result).toEqual({ width: 4032, height: 3024, size: 100, hash: null })
+    expect(bitmap.close).toHaveBeenCalledTimes(1)
+  })
 })
