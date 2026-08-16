@@ -77,26 +77,36 @@ function makeFile(name: string, byteLength: number): File {
 }
 
 // Routes fake bitmaps to specific File instances, and lets a test force a
-// decode rejection for a given file.
+// decode rejection, or a hang (never resolve/reject), for a given file.
 let bitmapByFile: Map<File, FakeBitmap>
 let rejectFiles: Set<File>
+let hangFiles: Set<File>
+let hangResize: boolean
 let lastDrawnBitmap: FakeBitmap | null
 
 beforeEach(() => {
   bitmapByFile = new Map()
   rejectFiles = new Set()
+  hangFiles = new Set()
+  hangResize = false
   lastDrawnBitmap = null
 
   vi.stubGlobal(
     'createImageBitmap',
     vi.fn(async (source: File | FakeBitmap) => {
       if (source instanceof File) {
+        if (hangFiles.has(source)) {
+          return new Promise<never>(() => {}) // never settles
+        }
         if (rejectFiles.has(source)) {
           throw new Error('decode failed')
         }
         const bitmap = bitmapByFile.get(source)
         if (!bitmap) throw new Error(`no fake bitmap registered for file ${source.name}`)
         return bitmap
+      }
+      if (hangResize) {
+        return new Promise<never>(() => {}) // never settles
       }
       // The resize call (decoded bitmap -> hash-grid bitmap): test
       // fixtures already carry the final grid via `__grid` regardless
@@ -214,5 +224,46 @@ describe('computePhotoMetrics', () => {
 
     expect(result).toEqual({ width: 4032, height: 3024, size: 100, hash: null })
     expect(bitmap.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves with hash: null (not a hang) when the initial decode never settles', async () => {
+    vi.useFakeTimers()
+    try {
+      const file = makeFile('stuck.jpg', 100)
+      hangFiles.add(file)
+
+      const resultPromise = computePhotoMetrics(file)
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      await expect(resultPromise).resolves.toEqual({
+        width: 0,
+        height: 0,
+        size: 100,
+        hash: null,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resolves with real dimensions but hash: null (not a hang) when the resize step never settles', async () => {
+    vi.useFakeTimers()
+    try {
+      const file = makeFile('a.jpg', 100)
+      bitmapByFile.set(file, makeFakeBitmap(repeatRow(ASCENDING_ROW), 4032, 3024))
+      hangResize = true
+
+      const resultPromise = computePhotoMetrics(file)
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      await expect(resultPromise).resolves.toEqual({
+        width: 4032,
+        height: 3024,
+        size: 100,
+        hash: null,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

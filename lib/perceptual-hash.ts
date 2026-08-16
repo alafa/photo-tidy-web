@@ -27,6 +27,33 @@ export interface PhotoMetrics {
 const HASH_GRID_WIDTH = 17
 const HASH_GRID_HEIGHT = 16
 
+// `createImageBitmap` is documented to never throw synchronously, but a
+// pathological/corrupt file can make it hang -- neither resolve nor reject
+// -- rather than fail cleanly. `computePhotoMetrics`'s try/catch only
+// guards rejection; without a timeout, a hung decode would stall every
+// remaining photo in the batch, since usePhotoMetrics's chunk loop awaits
+// each chunk before starting the next. 10s is generous for a legitimate
+// decode (even a large photo) while still giving up on a stuck one.
+const DECODE_TIMEOUT_MS = 10_000
+
+/** Races `promise` against a timer; a timeout rejects the same way a real
+ * decode failure would, so callers handle both identically. */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
 /**
  * Computes width, height, file size, and a perceptual hash for a photo
  * File. Never throws: a decode failure (unsupported format/codec in this
@@ -38,7 +65,11 @@ export async function computePhotoMetrics(file: File): Promise<PhotoMetrics> {
 
   let bitmap: ImageBitmap
   try {
-    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+    bitmap = await withTimeout(
+      createImageBitmap(file, { imageOrientation: 'from-image' }),
+      DECODE_TIMEOUT_MS,
+      'createImageBitmap timed out decoding file'
+    )
   } catch {
     return { width: 0, height: 0, size, hash: null }
   }
@@ -82,11 +113,15 @@ export async function computePhotoMetrics(file: File): Promise<PhotoMetrics> {
  * not landing close in Hamming distance.
  */
 async function computeDHash(bitmap: ImageBitmap): Promise<string> {
-  const resized = await createImageBitmap(bitmap, {
-    resizeWidth: HASH_GRID_WIDTH,
-    resizeHeight: HASH_GRID_HEIGHT,
-    resizeQuality: 'high',
-  })
+  const resized = await withTimeout(
+    createImageBitmap(bitmap, {
+      resizeWidth: HASH_GRID_WIDTH,
+      resizeHeight: HASH_GRID_HEIGHT,
+      resizeQuality: 'high',
+    }),
+    DECODE_TIMEOUT_MS,
+    'createImageBitmap timed out resizing bitmap'
+  )
 
   let data: Uint8ClampedArray
   try {

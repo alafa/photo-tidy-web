@@ -7,7 +7,6 @@ import {
   hashToVector,
   hierarchicalOrder,
   l2Normalize,
-  centroid,
   type PhotoHashInput,
 } from './photo-clustering'
 
@@ -87,22 +86,6 @@ describe('cosineDistance', () => {
 
   it('treats a zero vector vs. a non-zero vector as maximally distant (distance 1), never NaN', () => {
     expect(cosineDistance([0, 0, 0], [1, 0, 0])).toBe(1)
-  })
-})
-
-describe('centroid', () => {
-  it('averages vectors and re-normalizes the result to unit length', () => {
-    const c = centroid([
-      [1, 0],
-      [0, 1],
-    ])
-    // Mean is [0.5, 0.5]; re-normalized to unit length.
-    expect(c[0]).toBeCloseTo(Math.SQRT1_2)
-    expect(c[1]).toBeCloseTo(Math.SQRT1_2)
-  })
-
-  it('returns the input unchanged when there is only one vector (already unit length)', () => {
-    expect(centroid([[0.6, 0.8]])).toEqual([0.6, 0.8])
   })
 })
 
@@ -271,5 +254,33 @@ describe('buildDendrogram + cutDendrogram', () => {
 
     const clusters = cutDendrogram(photos, merges, 0.5)
     expect(clusterOf(clusters, 'undecodable').members).toEqual(['undecodable'])
+  })
+
+  it('ignores a merge referencing an id no longer in the current photo set, rather than corrupting the union-find', () => {
+    // Simulates a caller (ClusterView) memoizing `merges` from an earlier,
+    // larger batch than the `photos` it cuts against now -- e.g. debouncing
+    // the expensive build step separately from the cheap live cut, where a
+    // photo present when `merges` was built has since been deleted. Before
+    // the ids-known guard, unioning against a never-added id silently
+    // collapsed unrelated clusters under a shared `undefined` root.
+    const photos: PhotoHashInput[] = [
+      { id: 'a', hash: hashFromPositions(range(0, 9)) },
+      { id: 'c', hash: hashFromPositions(range(100, 109)) }, // orthogonal to a
+    ]
+    // 'b' (close to 'a') and 'd' (close to 'c') are in these merges but not
+    // in the current `photos` -- as if they were deleted after the
+    // dendrogram was built from a batch that still included them.
+    const staleMerges = [
+      { a: 'a', b: 'b', distance: 0.05 },
+      { a: 'c', b: 'd', distance: 0.05 },
+    ]
+
+    const clusters = cutDendrogram(photos, staleMerges, 0.2)
+
+    // 'a' and 'c' are orthogonal to each other and must stay in separate
+    // clusters -- the stale merges (each referencing one live + one
+    // now-deleted id) must not bridge them together.
+    expect(clusterOf(clusters, 'a').members).toEqual(['a'])
+    expect(clusterOf(clusters, 'c').members).toEqual(['c'])
   })
 })

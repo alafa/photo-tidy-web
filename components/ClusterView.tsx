@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import {
@@ -31,6 +31,41 @@ function percentToDistanceThreshold(percent: number): number {
   return (percent / 100) * MAX_DISTANCE_THRESHOLD
 }
 
+// How long `hashInputs` must stay unchanged before the expensive dendrogram
+// build (below) re-runs on it. `usePhotoMetrics` commits a new metrics Map
+// after every 5-photo chunk resolves, which otherwise gives `hashInputs` a
+// new identity roughly that often during a large import -- rebuilding the
+// full O(n^3)-ish dendrogram on every one of those ticks instead of once.
+const DENDROGRAM_REBUILD_DEBOUNCE_MS = 200
+
+/**
+ * Returns `value`, but only updates to a new value after it has stayed the
+ * same reference for `delayMs` -- except the very first value, which
+ * commits immediately (so opening cluster view onto an already-settled
+ * batch, the common case, shows clusters right away instead of behind a
+ * fixed delay). Used to decouple the expensive dendrogram build from every
+ * individual metrics-arrival tick during an in-progress import; the cheap
+ * per-tick cut (`cutDendrogram`) still runs on the live, undebounced value.
+ */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value)
+  const isFirstRef = useRef(true)
+
+  useEffect(() => {
+    // `useState(value)` above already seeded `debounced` with the initial
+    // value at mount time, so the first effect run has nothing to commit --
+    // only later changes need debouncing.
+    if (isFirstRef.current) {
+      isFirstRef.current = false
+      return
+    }
+    const timer = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(timer)
+  }, [value, delayMs])
+
+  return debounced
+}
+
 interface ClusterViewProps {
   photos: PhotoEntry[]
   metrics: Map<string, PhotoMetrics | undefined>
@@ -43,9 +78,11 @@ interface ClusterViewProps {
    */
   getObjectUrl: (file: File) => string
   /**
-   * `hooks/usePhotos.ts`'s `removePhotos`, called unchanged only when the
-   * user explicitly clicks "Delete selected" within a cluster — there is no
-   * automatic removal anywhere in this component.
+   * Called only when the user explicitly clicks "Delete selected" within a
+   * cluster — there is no automatic removal anywhere in this component. The
+   * caller (`PhotoUploadPage`) wraps `hooks/usePhotos.ts`'s `removePhotos`
+   * with its own object-URL release and selection cleanup, mirroring what
+   * the timeline view's delete path already does.
    */
   removePhotos: (ids: string[]) => void
   /**
@@ -262,8 +299,8 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   const distanceThreshold = percentToDistanceThreshold(similarityPercent)
 
   // Hash inputs for the clustering pipeline, and L2-normalized vectors for
-  // every photo with a resolved hash (reused for centroids, hierarchical
-  // ordering, and the debug panel — no need to recompute per use site).
+  // every photo with a resolved hash (reused for hierarchical ordering and
+  // the debug panel — no need to recompute per use site).
   const hashInputs = useMemo(
     () =>
       photos.map((photo) => ({
@@ -289,9 +326,21 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   // it once and cutting it cheaply (below) on every slider change is what
   // keeps live re-clustering responsive without a Web Worker at this app's
   // stated scale (~200+ photos). See lib/photo-clustering.ts's top comment.
-  const dendrogram = useMemo(() => buildDendrogram(hashInputs), [hashInputs])
+  // Debounced separately from `hashInputs` itself: `usePhotoMetrics` gives
+  // `hashInputs` a new identity roughly every 5 photos during a large
+  // import, and without debouncing this build reran on every one of those
+  // ticks instead of once. `cutDendrogram` below still cuts against the
+  // live, undebounced `hashInputs` — a photo that resolves mid-debounce
+  // just stays a temporary singleton (already the documented/tested
+  // behavior for in-flight metrics) until the next debounced build catches
+  // it up.
+  const debouncedHashInputs = useDebouncedValue(hashInputs, DENDROGRAM_REBUILD_DEBOUNCE_MS)
+  const dendrogram = useMemo(() => buildDendrogram(debouncedHashInputs), [debouncedHashInputs])
 
-  // Cheap O(n) cut — safe to re-run on every threshold-slider tick.
+  // Cheap O(n) cut — safe to re-run on every threshold-slider tick, and on
+  // every live (non-debounced) hashInputs change. cutDendrogram tolerates
+  // `dendrogram` lagging behind `hashInputs` (a merge referencing an id no
+  // longer present in the current batch is simply ignored).
   const rawClusters = useMemo(
     () => cutDendrogram(hashInputs, dendrogram, distanceThreshold),
     [hashInputs, dendrogram, distanceThreshold]

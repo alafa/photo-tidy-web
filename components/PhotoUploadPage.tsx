@@ -133,6 +133,31 @@ export default function PhotoUploadPage() {
     clearSelection()
   }
 
+  // Cluster view's own delete action calls this in place of the raw
+  // removePhotos -- it needs the same two follow-up steps handleBatchDelete
+  // already does for the timeline path: release the deleted photos' object
+  // URLs (otherwise every cluster-view delete leaks a blob: URL), and prune
+  // any of the deleted ids out of the page-level selectedIds so a stale
+  // selection from a prior timeline-view session doesn't survive a
+  // cluster-view delete and inflate BatchEditPanel's count after switching
+  // back.
+  function handleClusterDelete(ids: string[]) {
+    const idSet = new Set(ids)
+    for (const photo of photos) {
+      if (idSet.has(photo.id)) releaseObjectUrl(photo.file)
+    }
+    removePhotos(ids)
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev
+      const next = new Set(prev)
+      let changed = false
+      for (const id of idSet) {
+        if (next.delete(id)) changed = true
+      }
+      return changed ? next : prev
+    })
+  }
+
   function handleImportClick() {
     setNamePromptValue(albumName)
     setIsNamePromptOpen(true)
@@ -301,7 +326,7 @@ export default function PhotoUploadPage() {
                 photos={photos}
                 metrics={metrics}
                 getObjectUrl={getObjectUrl}
-                removePhotos={removePhotos}
+                removePhotos={handleClusterDelete}
                 batchSetTimestamps={batchSetTimestamps}
               />
             ) : (

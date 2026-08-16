@@ -238,8 +238,21 @@ export function buildDendrogram(photos: PhotoHashInput[]): DendrogramMerge[] {
  */
 export function cutDendrogram(photos: PhotoHashInput[], merges: DendrogramMerge[], threshold: number): Cluster[] {
   const uf = new UnionFind()
-  for (const photo of photos) uf.add(photo.id)
+  const knownIds = new Set<string>()
+  for (const photo of photos) {
+    uf.add(photo.id)
+    knownIds.add(photo.id)
+  }
   for (const merge of merges) {
+    // Guards against a caller memoizing `merges` separately from `photos`
+    // (e.g. debouncing the expensive dendrogram build while cutting stays
+    // live on every tick, per components/ClusterView.tsx): a merge built
+    // from an earlier, larger photo set can reference an id that's since
+    // been deleted from the batch. Unioning against an id `uf` never added
+    // would corrupt the union-find (its "root" resolves to `undefined`,
+    // silently merging unrelated clusters under that shared undefined
+    // root), so skip any merge whose endpoint isn't in the current batch.
+    if (!knownIds.has(merge.a) || !knownIds.has(merge.b)) continue
     // A small epsilon absorbs residual floating-point noise so a merge
     // distance that is *mathematically* exactly at the threshold (e.g. two
     // equal-magnitude vectors sharing exactly 80% of their bits, at a 0.2
@@ -281,9 +294,8 @@ export function clusterPhotos(photos: PhotoHashInput[], threshold: number): Clus
  * dendrogram (no threshold — merge all the way to one cluster), then
  * recursively read leaves left-to-right off the resulting binary merge
  * tree. Similar items end up adjacent as far as the tree topology allows.
- * Used both to order clusters by centroid similarity and to order photos
- * within a cluster by their own hash similarity — same technique, applied
- * to different input sets.
+ * Used to order photos within a cluster by their own hash similarity, so
+ * the most similar members sit adjacent.
  */
 export function hierarchicalOrder(items: Array<{ id: string; vector: number[] }>): string[] {
   if (items.length <= 1) return items.map((item) => item.id)
@@ -361,18 +373,4 @@ export function hierarchicalOrder(items: Array<{ id: string; vector: number[] }>
   visit(root)
 
   return order.map((index) => items[index].id)
-}
-
-/** Mean of a set of (already L2-normalized) vectors, re-normalized to unit
- * length — the centroid used to order clusters by similarity to each
- * other. Re-normalizing keeps the centroid comparable via cosine distance
- * the same way its member vectors are. */
-export function centroid(vectors: number[][]): number[] {
-  const dimensions = vectors[0]?.length ?? 0
-  const sum = new Array<number>(dimensions).fill(0)
-  for (const vector of vectors) {
-    for (let i = 0; i < dimensions; i++) sum[i] += vector[i]
-  }
-  const mean = sum.map((value) => value / vectors.length)
-  return l2Normalize(mean)
 }

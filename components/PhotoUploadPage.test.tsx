@@ -27,9 +27,18 @@ vi.mock('@/hooks/usePhotoMetrics', () => ({
 // ClusterView has its own dedicated test suite (ClusterView.test.tsx). Here
 // it's mocked to a distinctive placeholder so PhotoUploadPage's tests can
 // assert *that* it's rendered (or not) in the right view mode, without
-// depending on its internal clustering/rendering details.
+// depending on its internal clustering/rendering details. The removePhotos
+// prop it's given is captured so a test can invoke it directly, the same
+// way capturedOnDragEnd captures dnd-kit's callback below -- this is what
+// lets a test prove PhotoUploadPage wraps the raw removePhotos with its own
+// object-URL release + selection cleanup before handing it to ClusterView.
+let capturedClusterViewRemovePhotos: ((ids: string[]) => void) | null = null
+
 vi.mock('./ClusterView', () => ({
-  default: () => <div data-testid="cluster-view" />,
+  default: ({ removePhotos }: { removePhotos: (ids: string[]) => void }) => {
+    capturedClusterViewRemovePhotos = removePhotos
+    return <div data-testid="cluster-view" />
+  },
 }))
 
 // Capture dnd-kit callbacks so tests can invoke them directly
@@ -93,6 +102,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
+  capturedClusterViewRemovePhotos = null
   mockUseObjectUrls.mockReturnValue({
     getObjectUrl: (file: File) => `blob:${file.name}`,
     releaseObjectUrl: vi.fn(),
@@ -731,5 +741,92 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
     // viewMode defaults to 'timeline').
     expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
     expect(screen.queryByTestId('cluster-view')).toBeNull()
+  })
+})
+
+describe('PhotoUploadPage — cluster-view delete cleanup', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[], removePhotos = vi.fn()) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos,
+    }
+  }
+
+  // The removePhotos ClusterView is actually handed must release each
+  // deleted photo's object URL and prune it out of the page-level
+  // selectedIds -- neither of which the raw usePhotos removePhotos does on
+  // its own. This test drives that wrapper directly via the captured prop,
+  // the same way the drag-and-drop tests above drive dnd-kit's captured
+  // callbacks, since the ClusterView mock renders no interactive UI itself.
+  it("cluster view's delete wrapper releases object URLs and prunes them from page-level selectedIds", () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    const removePhotosMock = vi.fn()
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    // Select a.jpg and b.jpg in timeline view first, mirroring a user who
+    // had an in-progress timeline selection before switching to cluster view.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
+    expect(capturedClusterViewRemovePhotos).not.toBeNull()
+
+    // Cluster view deletes only b.jpg -- a subset of the pre-existing
+    // timeline selection.
+    act(() => {
+      capturedClusterViewRemovePhotos?.([photos[1].id])
+    })
+
+    expect(releaseObjectUrlMock).toHaveBeenCalledExactlyOnceWith(photos[1].file)
+    expect(removePhotosMock).toHaveBeenCalledExactlyOnceWith([photos[1].id])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
+
+    // a.jpg's selection survived; b.jpg's was pruned rather than lingering
+    // as a stale id for a now-deleted photo.
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+  })
+
+  it("cluster view's delete wrapper is a no-op on selectedIds when nothing was selected in timeline view", () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    const removePhotosMock = vi.fn()
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
+    act(() => {
+      capturedClusterViewRemovePhotos?.([photos[0].id])
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
+
+    expect(screen.queryByText(/photo(s)? selected/)).toBeNull()
   })
 })

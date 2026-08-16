@@ -1,8 +1,18 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, act } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import ClusterView from './ClusterView'
+
+// Spies on the real buildDendrogram (all other exports pass through
+// unmocked) so the debounce test below can count how many times the
+// expensive build actually ran, without faking the clustering math itself.
+vi.mock('@/lib/photo-clustering', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/photo-clustering')>()
+  return { ...actual, buildDendrogram: vi.fn(actual.buildDendrogram) }
+})
+import { buildDendrogram } from '@/lib/photo-clustering'
+const mockBuildDendrogram = vi.mocked(buildDendrogram)
 
 afterEach(cleanup)
 
@@ -686,5 +696,83 @@ describe('ClusterView', () => {
 
     expect(batchSetTimestamps).toHaveBeenCalledTimes(1)
     expect(batchSetTimestamps.mock.calls[0][0].slice().sort()).toEqual(['w', 'x'])
+  })
+
+  // --- Dendrogram rebuild debounce -------------------------------------------
+
+  it('debounces the expensive dendrogram rebuild across rapid metrics-arrival ticks instead of rebuilding on every one', () => {
+    // Mirrors usePhotoMetrics's own shape: a new metrics Map identity lands
+    // every ~5-photo chunk during an import. Without debouncing, each of
+    // these ticks re-triggers the full O(n^3)-ish dendrogram build; with
+    // it, they should collapse into one build after the batch goes quiet.
+    vi.useFakeTimers()
+    mockBuildDendrogram.mockClear()
+    try {
+      const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+      const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+      const c = makeEntry('c', 'c.jpg', '2024-01-03T00:00:00Z', 2)
+      const hashA = hashFromPositions(range(0, 9))
+
+      const tick1 = new Map<string, PhotoMetrics | undefined>([['a', makeMetrics(hashA)]])
+      const { rerender } = render(
+        <ClusterView
+          photos={[a, b, c]}
+          metrics={tick1}
+          getObjectUrl={getObjectUrl}
+          removePhotos={noopRemovePhotos}
+          batchSetTimestamps={noopBatchSetTimestamps}
+        />
+      )
+
+      // The very first value commits immediately -- one build on mount.
+      expect(mockBuildDendrogram).toHaveBeenCalledTimes(1)
+
+      // Two more metrics ticks land in quick succession (well within the
+      // debounce window between each).
+      const tick2 = new Map<string, PhotoMetrics | undefined>([...tick1, ['b', makeMetrics(hashA)]])
+      rerender(
+        <ClusterView
+          photos={[a, b, c]}
+          metrics={tick2}
+          getObjectUrl={getObjectUrl}
+          removePhotos={noopRemovePhotos}
+          batchSetTimestamps={noopBatchSetTimestamps}
+        />
+      )
+      act(() => {
+        vi.advanceTimersByTime(50)
+      })
+
+      const tick3 = new Map<string, PhotoMetrics | undefined>([...tick2, ['c', makeMetrics(hashA)]])
+      rerender(
+        <ClusterView
+          photos={[a, b, c]}
+          metrics={tick3}
+          getObjectUrl={getObjectUrl}
+          removePhotos={noopRemovePhotos}
+          batchSetTimestamps={noopBatchSetTimestamps}
+        />
+      )
+
+      // Still within the debounce window since tick2 -- no rebuild yet from
+      // either subsequent tick.
+      expect(mockBuildDendrogram).toHaveBeenCalledTimes(1)
+
+      // Let the debounce settle after the batch has gone quiet.
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+
+      // Exactly one more build -- tick2 and tick3 collapsed into it, not
+      // two additional rebuilds (one per tick).
+      expect(mockBuildDendrogram).toHaveBeenCalledTimes(2)
+
+      // And the settled result reflects the final, fully-resolved batch:
+      // a, b, and c all share the same hash, so they cluster together.
+      expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(1)
+      expect(screen.getByRole('heading', { level: 2 }).textContent).toContain('3 related photos')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
