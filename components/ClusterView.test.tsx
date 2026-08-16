@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import ClusterView from './ClusterView'
@@ -9,6 +9,7 @@ afterEach(cleanup)
 const getObjectUrl = (file: File) => `blob:${file.name}`
 const noopRemovePhotos = () => {}
 const noopBatchSetTimestamps = () => {}
+const noopRestorePhoto = () => {}
 
 function makeEntry(id: string, name: string, capturedAt: string | null, uploadIndex: number): PhotoEntry {
   return {
@@ -42,26 +43,30 @@ describe('ClusterView', () => {
       ['d', makeMetrics('ffffffffffffffff')], // distance to everything: 64 (unrelated)
     ])
 
-    render(<ClusterView photos={[a, b, c, d]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[a, b, c, d]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     const headings = screen.getAllByRole('heading', { level: 2 })
     // First section (cluster 1, earliest = b's 2024-01-15) should list a/b/c
-    // before the singleton cluster containing d.
+    // before the singleton d, which renders plainly (no heading — singles
+    // don't display as clusters).
     const sections = screen.getAllByRole('img').map((img) => img.getAttribute('alt'))
     expect(sections.indexOf('d.jpg')).toBeGreaterThan(sections.indexOf('b.jpg'))
-    expect(headings.length).toBe(2)
+    expect(headings.length).toBe(1)
   })
 
-  it('renders a singleton photo (no relationships) as its own one-member cluster', () => {
+  it('renders a photo with no similarity match plainly, not as a one-member cluster', () => {
     const solo = makeEntry('solo', 'solo.jpg', '2024-01-01T00:00:00Z', 0)
     const metrics = new Map<string, PhotoMetrics | undefined>([
       ['solo', makeMetrics('ffffffffffffffff')],
     ])
 
-    render(<ClusterView photos={[solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[solo]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     expect(screen.getByText('solo.jpg')).toBeDefined()
     expect(screen.getAllByRole('img')).toHaveLength(1)
+    // No cluster chrome at all: no heading, no tier ring/badge.
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+    expect(screen.queryByRole('group')).toBeNull()
   })
 
   it('renders all cluster members fully expanded with no collapse/expand interaction', () => {
@@ -74,7 +79,7 @@ describe('ClusterView', () => {
       ['c', makeMetrics('000000000000000f')],
     ])
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     expect(screen.getAllByRole('img')).toHaveLength(3)
     expect(screen.queryByRole('button', { name: /show more|expand|collapse/i })).toBeNull()
@@ -93,7 +98,7 @@ describe('ClusterView', () => {
       ['c', makeMetrics('000000000000000f')],
     ])
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     const identicalGroups = screen.getAllByRole('group', { name: 'Identical' })
     expect(identicalGroups.length).toBe(2) // a and b
@@ -123,7 +128,7 @@ describe('ClusterView', () => {
     // context, this would throw. It doesn't, and no sortable-specific
     // attributes appear anywhere in the output.
     expect(() =>
-      render(<ClusterView photos={[a]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+      render(<ClusterView photos={[a]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
     ).not.toThrow()
 
     expect(document.querySelector('[aria-roledescription="sortable item"]')).toBeNull()
@@ -136,7 +141,7 @@ describe('ClusterView', () => {
     // 'pending' has no entry at all in the map; 'a' is present but explicitly undefined.
     const metrics = new Map<string, PhotoMetrics | undefined>([['a', undefined]])
 
-    render(<ClusterView photos={[a, stillComputing]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[a, stillComputing]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={noopRemovePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('pending.jpg')).toBeDefined()
@@ -160,7 +165,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     // Fired automatically, with no button/confirmation, exactly once, for the losers only.
     expect(removePhotos).toHaveBeenCalledTimes(1)
@@ -188,7 +193,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y, z]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[w, x, y, z]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     // Purely similar-tier — no automatic removal.
     expect(removePhotos).not.toHaveBeenCalled()
@@ -230,7 +235,7 @@ describe('ClusterView', () => {
     const removePhotos = vi.fn()
 
     render(
-      <ClusterView photos={[p1, p2, p3, p4, p5]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
+      <ClusterView photos={[p1, p2, p3, p4, p5]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />
     )
 
     // The identical pair (p1/p2) auto-resolved on render, keeping p1.
@@ -270,7 +275,7 @@ describe('ClusterView', () => {
     const removePhotos = vi.fn()
 
     render(
-      <ClusterView photos={[p1, p2, p3, p4]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
+      <ClusterView photos={[p1, p2, p3, p4]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />
     )
 
     // All four are one connected component (single heading), but two
@@ -299,7 +304,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[m1, m2]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[m1, m2]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     expect(screen.getByAltText('m2.jpg').parentElement?.className).toContain('ring-zinc-900')
     expect(screen.getByAltText('m1.jpg').parentElement?.className).not.toContain('ring-zinc-900')
@@ -316,7 +321,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     // Deselect the only pre-selected keeper (w) — selection becomes empty.
     fireEvent.click(screen.getByAltText('w.jpg'))
@@ -339,7 +344,7 @@ describe('ClusterView', () => {
     ])
     const removePhotos = vi.fn()
 
-    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    render(<ClusterView photos={[w, x, y]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     // w is already pre-selected; select the remaining two as well.
     fireEvent.click(screen.getByAltText('x.jpg'))
@@ -366,15 +371,15 @@ describe('ClusterView', () => {
     const removePhotos = vi.fn()
 
     const { rerender } = render(
-      <ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />
+      <ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />
     )
     expect(removePhotos).toHaveBeenCalledTimes(1)
 
     // Re-render with the exact same (unremoved, since this stub is a no-op)
     // photos/metrics — the same identical-tier subset recomputes identically
     // and must not be re-issued.
-    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
-    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} />)
+    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
+    rerender(<ClusterView photos={[a, b, c]} metrics={metrics} getObjectUrl={getObjectUrl} removePhotos={removePhotos} batchSetTimestamps={noopBatchSetTimestamps} restorePhoto={noopRestorePhoto} />)
 
     expect(removePhotos).toHaveBeenCalledTimes(1)
   })
@@ -396,6 +401,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={noopRemovePhotos}
         batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -430,6 +436,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={noopRemovePhotos}
         batchSetTimestamps={batchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -469,6 +476,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={noopRemovePhotos}
         batchSetTimestamps={batchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -506,6 +514,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={removePhotos}
         batchSetTimestamps={batchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -540,13 +549,17 @@ describe('ClusterView', () => {
     const g = makeEntry('g', 'g.jpg', '2024-01-04T00:00:00Z', 3)
     const h = makeEntry('h', 'h.jpg', '2024-01-05T00:00:00Z', 4)
     const i = makeEntry('i', 'i.jpg', '2024-01-06T00:00:00Z', 5)
+    // Marker nibbles are 3-wide (12 bits) per pair, at non-overlapping
+    // positions, so every cross-pair distance is >=24 bits — comfortably
+    // above the default similarity threshold (20) even though it's looser
+    // than the original tier boundary (12).
     const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['m1', makeMetrics('ff00000000000000', 500, 500)],
-      ['m2', makeMetrics('fff0000000000000', 500, 500)], // distance to m1: 4 (similar)
-      ['f', makeMetrics('0000ff0000000000', 200, 200)],
-      ['g', makeMetrics('0000fff000000000', 1000, 1000)], // distance to f: 4 (similar); default keeper
-      ['h', makeMetrics('00000000ff000000', 1000, 1000)], // default keeper
-      ['i', makeMetrics('00000000fff00000', 200, 200)], // distance to h: 4 (similar)
+      ['m1', makeMetrics('fff0000000000000', 500, 500)],
+      ['m2', makeMetrics('ffff000000000000', 500, 500)], // distance to m1: 4 (similar)
+      ['f', makeMetrics('00000fff00000000', 200, 200)],
+      ['g', makeMetrics('00000ffff0000000', 1000, 1000)], // distance to f: 4 (similar); default keeper
+      ['h', makeMetrics('0000000000fff000', 1000, 1000)], // default keeper
+      ['i', makeMetrics('0000000000ffff00', 200, 200)], // distance to h: 4 (similar)
     ])
     const removePhotos = vi.fn()
 
@@ -557,6 +570,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={removePhotos}
         batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -578,6 +592,7 @@ describe('ClusterView', () => {
         getObjectUrl={getObjectUrl}
         removePhotos={removePhotos}
         batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
       />
     )
 
@@ -604,5 +619,160 @@ describe('ClusterView', () => {
     // and i, and never anything derived from {f,g}'s stale selection.
     expect(removePhotos).toHaveBeenCalledTimes(1)
     expect(removePhotos.mock.calls[0][0]).toEqual(['i'])
+  })
+
+  // --- Visibility + undo for automatic identical-tier removal --------------
+
+  it('shows a collapsed "duplicates removed" toggle for the survivor, expandable to a removed thumbnail with an Undo button', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics('0000000000000000', 400, 300)], // higher quality — survivor
+      ['b', makeMetrics('0000000000000000', 100, 100)], // lower quality — auto-removed
+    ])
+    const removePhotos = vi.fn()
+    const restorePhoto = vi.fn()
+
+    render(
+      <ClusterView
+        photos={[a, b]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={removePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={restorePhoto}
+      />
+    )
+
+    expect(removePhotos).toHaveBeenCalledTimes(1)
+    expect(removePhotos.mock.calls[0][0]).toEqual(['b'])
+
+    // Collapsed by default: the toggle names the count, but no "Removed"
+    // badge or Undo button is visible yet.
+    const toggle = screen.getByRole('button', { name: /1 duplicate removed/i })
+    expect(screen.queryByText('Removed')).toBeNull()
+    expect(screen.queryByRole('button', { name: /undo/i })).toBeNull()
+
+    fireEvent.click(toggle)
+
+    const removedItem = screen.getByText('Removed').closest('li')!
+    expect(within(removedItem).getByAltText('b.jpg')).toBeDefined()
+    const undoButton = within(removedItem).getByRole('button', { name: /undo/i })
+
+    fireEvent.click(undoButton)
+
+    expect(restorePhoto).toHaveBeenCalledTimes(1)
+    expect(restorePhoto).toHaveBeenCalledWith(b)
+    // The removed record is cleared once undone — the toggle disappears.
+    expect(screen.queryByRole('button', { name: /duplicate.*removed/i })).toBeNull()
+  })
+
+  it('never re-auto-removes an id the user has undone, even when a fresh sub-group re-forms for it', () => {
+    // Three mutually identical photos: p1 (best), p2, p3. Auto-resolution
+    // removes p2 and p3 together in one call. The user undoes p2 only.
+    const p1 = makeEntry('p1', 'p1.jpg', '2024-01-01T00:00:00Z', 0)
+    const p2 = makeEntry('p2', 'p2.jpg', '2024-01-02T00:00:00Z', 1)
+    const p3 = makeEntry('p3', 'p3.jpg', '2024-01-03T00:00:00Z', 2)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['p1', makeMetrics('0000000000000000', 400, 300)],
+      ['p2', makeMetrics('0000000000000000', 100, 100)],
+      ['p3', makeMetrics('0000000000000000', 100, 100)],
+    ])
+    const removePhotos = vi.fn()
+    const restorePhoto = vi.fn()
+
+    render(
+      <ClusterView
+        photos={[p1, p2, p3]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={removePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={restorePhoto}
+      />
+    )
+
+    // The initial auto-resolution legitimately removes both p2 and p3 together.
+    expect(removePhotos).toHaveBeenCalledTimes(1)
+    expect(removePhotos.mock.calls[0][0].slice().sort()).toEqual(['p2', 'p3'])
+    const callsBeforeUndo = removePhotos.mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: /2 duplicates removed/i }))
+    // p2.jpg's filename now appears twice (its own still-rendered card, plus
+    // the removed thumbnail — this test's removePhotos stub doesn't mutate
+    // `photos`); the removed one carries the blurred thumbnail class.
+    const p2RemovedImg = screen.getAllByAltText('p2.jpg').find((img) => img.className.includes('blur'))!
+    const p2Item = p2RemovedImg.closest('li')!
+    fireEvent.click(within(p2Item).getByRole('button', { name: /undo/i }))
+
+    expect(restorePhoto).toHaveBeenCalledWith(p2)
+
+    // The undo triggers a re-render; the effect recomputes with p2 now
+    // protected. No *subsequent* call may mention p2 again — and p3, already
+    // sent once, must not be re-sent either (per-id tracking, not per-group).
+    const callsAfterUndo = removePhotos.mock.calls.slice(callsBeforeUndo)
+    for (const call of callsAfterUndo) {
+      expect(call[0]).not.toContain('p2')
+      expect(call[0]).not.toContain('p3')
+    }
+  })
+
+  // --- Loosened default similarity threshold + live slider -----------------
+
+  it('clusters two photos with a moderate difference (e.g. one has a line drawn on it) as similar under the new default threshold', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T00:00:00Z', 0)
+    // Distance 16: outside the original 12-bit similar threshold, but within
+    // the new looser default (20) — feedback: two copies of the same photo
+    // with a hand-drawn line added weren't clustering as similar before.
+    const b = makeEntry('b', 'b.jpg', '2024-01-02T00:00:00Z', 1)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['a', makeMetrics('0000000000000000', 100, 100)],
+      ['b', makeMetrics('ffff000000000000', 100, 100)], // distance to a: 16
+    ])
+
+    render(
+      <ClusterView
+        photos={[a, b]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
+      />
+    )
+
+    const heading = screen.getByRole('heading', { level: 2 })
+    expect(heading.textContent).toContain('2 related photos')
+    expect(screen.getAllByRole('group', { name: 'Similar' })).toHaveLength(2)
+  })
+
+  it('renders a similarity threshold slider that re-clusters live as it moves', () => {
+    const x = makeEntry('x', 'x.jpg', '2024-01-01T00:00:00Z', 0)
+    // Distance 24: outside the default threshold (20), so x/y start out
+    // unrelated (rendered plainly, no cluster heading).
+    const y = makeEntry('y', 'y.jpg', '2024-01-02T00:00:00Z', 1)
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      ['x', makeMetrics('0000000000000000', 100, 100)],
+      ['y', makeMetrics('ffffff0000000000', 100, 100)], // distance to x: 24
+    ])
+
+    render(
+      <ClusterView
+        photos={[x, y]}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        removePhotos={noopRemovePhotos}
+        batchSetTimestamps={noopBatchSetTimestamps}
+        restorePhoto={noopRestorePhoto}
+      />
+    )
+
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+
+    const slider = screen.getByRole('slider', { name: /similarity grouping threshold/i })
+    fireEvent.change(slider, { target: { value: '25' } })
+
+    const heading = screen.getByRole('heading', { level: 2 })
+    expect(heading.textContent).toContain('2 related photos')
   })
 })

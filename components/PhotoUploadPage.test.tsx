@@ -515,6 +515,7 @@ describe('PhotoUploadPage — batch delete', () => {
       batchUpdateNames: vi.fn(),
       batchSetTimestamps: vi.fn(),
       removePhotos,
+      restorePhoto: vi.fn(),
     }
   }
 
@@ -662,6 +663,7 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
       batchUpdateNames: vi.fn(),
       batchSetTimestamps: vi.fn(),
       removePhotos: vi.fn(),
+      restorePhoto: vi.fn(),
     }
   }
 

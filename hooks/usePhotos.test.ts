@@ -468,6 +468,31 @@ describe('usePhotos — removePhotos', () => {
   })
 })
 
+describe('usePhotos — restorePhoto', () => {
+  it('re-inserts a removed photo with its original id, filename, and capturedAt, sorted back into place', async () => {
+    const files = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      const i = files.indexOf(file)
+      return new Date(2025, 0, i + 1)
+    })
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+
+    const removed = result.current.photos[1] // b.jpg
+    act(() => result.current.removePhotos([removed.id]))
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'c.jpg'])
+
+    act(() => result.current.restorePhoto(removed))
+
+    expect(result.current.photos).toHaveLength(3)
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'b.jpg', 'c.jpg'])
+    const restored = result.current.photos.find((p) => p.id === removed.id)
+    expect(restored?.id).toBe(removed.id)
+    expect(restored?.capturedAt).toEqual(removed.capturedAt)
+  })
+})
+
 // --- useObjectUrls ---
 
 describe('useObjectUrls', () => {

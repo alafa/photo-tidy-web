@@ -144,6 +144,11 @@ export function usePhotos() {
     setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)))
   }, [])
 
+  /** Re-inserts a previously-removed PhotoEntry (e.g. undoing an automatic dedup removal), keeping its original id/file/capturedAt. */
+  const restorePhoto = useCallback((entry: PhotoEntry) => {
+    setPhotos((prev) => appendWithIndex(prev, [entry]))
+  }, [])
+
   const addPhotos = useCallback(async (
     files: File[],
     source: 'google-photos',
@@ -178,5 +183,6 @@ export function usePhotos() {
     batchUpdateNames,
     batchSetTimestamps,
     removePhotos,
+    restorePhoto,
   }
 }
