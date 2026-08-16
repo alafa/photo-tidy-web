@@ -39,6 +39,13 @@ export function usePhotoMetrics(photos: PhotoEntry[]): Map<string, PhotoMetrics 
   // isn't something React (or its compiler) can treat as reactive.
   const [metricsById, setMetricsById] = useState<Map<string, PhotoMetrics | undefined>>(new Map())
 
+  // Tracks the last map actually committed via setMetricsById, so rebuild()
+  // can skip the state update (and the re-render it would trigger in every
+  // consumer, e.g. ClusterView) when nothing observable changed — most
+  // `photos` changes that aren't an add (reorder, rename, single-photo
+  // timestamp edit) don't touch which File backs which id.
+  const lastCommittedRef = useRef<Map<string, PhotoMetrics | undefined>>(metricsById)
+
   // Generation token guarding the computation loop against a batch change
   // mid-computation: bumped every time this effect (re-)runs, i.e. every
   // time the input file list changes. A loop started for an earlier
@@ -57,6 +64,14 @@ export function usePhotoMetrics(photos: PhotoEntry[]): Map<string, PhotoMetrics 
       for (const photo of photos) {
         next.set(photo.id, cacheRef.current.get(photo.file))
       }
+
+      const prev = lastCommittedRef.current
+      const unchanged =
+        next.size === prev.size &&
+        [...next].every(([id, value]) => prev.has(id) && prev.get(id) === value)
+      if (unchanged) return
+
+      lastCommittedRef.current = next
       setMetricsById(next)
     }
 
@@ -65,6 +80,17 @@ export function usePhotoMetrics(photos: PhotoEntry[]): Map<string, PhotoMetrics 
     // drops removed photos from the map even when nothing new needs
     // computing below.
     rebuild()
+
+    // A photo removed from the batch (including via this feature's own
+    // automatic identical-tier dedup) no longer needs its metrics cached —
+    // without this, cacheRef would keep every removed File (and its backing
+    // Blob data) alive for the component's lifetime, unlike the sibling
+    // useObjectUrls hook this cache shape mirrors, which is explicitly
+    // released via releaseObjectUrl on removal.
+    const currentFiles = new Set(photos.map((p) => p.file))
+    for (const file of cacheRef.current.keys()) {
+      if (!currentFiles.has(file)) cacheRef.current.delete(file)
+    }
 
     const pending = photos.map((p) => p.file).filter((file) => !cacheRef.current.has(file))
     if (pending.length === 0) return

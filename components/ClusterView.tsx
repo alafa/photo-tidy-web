@@ -1,9 +1,9 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
-import { clusterPhotos, type Cluster } from '@/lib/photo-clustering'
+import { clusterPhotos, type Cluster, type RelationshipTier } from '@/lib/photo-clustering'
 import PhotoCard from './PhotoCard'
 
 // KTD2's starting Hamming-distance thresholds (out of a 64-bit hash) — kept
@@ -48,7 +48,7 @@ function parseDatetimeLocalAsUTC(value: string): Date | null {
   return new Date(Date.UTC(y, mo - 1, d, h, mi, 0))
 }
 
-type MemberTier = 'identical' | 'similar' | null
+type MemberTier = RelationshipTier | null
 
 /**
  * A cluster's `relationships` are per-pair, not per-member. This derives a
@@ -110,12 +110,38 @@ function bestQualityMember(ids: string[], metrics: Map<string, PhotoMetrics | un
   return [...ids].sort((a, b) => compareByQualityDescending(a, b, metrics))[0]
 }
 
-const TIER_STYLES: Record<'identical' | 'similar', string> = {
+/**
+ * Shared toggle mechanics for a per-cluster `Map<clusterId, Set<memberId>>`
+ * selection: copy-or-default the cluster's current `Set`, add/delete `id`,
+ * write it back into a new `Map`. Used by both `similarSelections` (U4's
+ * dedup-keeper choice) and `timestampSelections` (U5's timestamp-edit
+ * choice) — the two Maps stay separate (they represent independently
+ * toggleable concepts a member can carry at once), only this update
+ * mechanic is shared.
+ */
+function toggleInClusterSelection(
+  setSelections: Dispatch<SetStateAction<Map<string, Set<string>>>>,
+  clusterId: string,
+  id: string,
+  checked: boolean,
+  defaultSelection: () => Set<string>
+) {
+  setSelections((prev) => {
+    const next = new Map(prev)
+    const current = new Set(prev.get(clusterId) ?? defaultSelection())
+    if (checked) current.add(id)
+    else current.delete(id)
+    next.set(clusterId, current)
+    return next
+  })
+}
+
+const TIER_STYLES: Record<RelationshipTier, string> = {
   identical: 'ring-2 ring-emerald-500 dark:ring-emerald-400 rounded-lg',
   similar: 'ring-2 ring-amber-500 dark:ring-amber-400 rounded-lg',
 }
 
-const TIER_LABELS: Record<'identical' | 'similar', string> = {
+const TIER_LABELS: Record<RelationshipTier, string> = {
   identical: 'Identical',
   similar: 'Similar',
 }
@@ -210,28 +236,33 @@ function ClusterTimestampEditor({
 }
 
 export default function ClusterView({ photos, metrics, getObjectUrl, removePhotos, batchSetTimestamps }: ClusterViewProps) {
-  const photosById = new Map(photos.map((p) => [p.id, p]))
+  const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
 
-  const hashInputs = photos.map((photo) => ({
-    id: photo.id,
-    // A photo whose metrics are still in flight (absent map entry, or
-    // present-but-`undefined`) is treated the same as "no hash" — it
-    // renders as a temporary singleton and re-clusters correctly once its
-    // real hash lands and `metrics` updates (KTD12).
-    hash: metrics.get(photo.id)?.hash ?? null,
-  }))
+  // The clustering pipeline (O(n^2) pairwise Hamming distance, KTD5) only
+  // needs to rerun when its actual inputs — `photos`/`metrics` — change, not
+  // on every local selection-state update (a keeper toggle, a timestamp-edit
+  // checkbox) that also re-renders this component.
+  const sortedClusters = useMemo(() => {
+    const hashInputs = photos.map((photo) => ({
+      id: photo.id,
+      // A photo whose metrics are still in flight (absent map entry, or
+      // present-but-`undefined`) is treated the same as "no hash" — it
+      // renders as a temporary singleton and re-clusters correctly once its
+      // real hash lands and `metrics` updates (KTD12).
+      hash: metrics.get(photo.id)?.hash ?? null,
+    }))
+    const clusters = clusterPhotos(hashInputs, CLUSTER_THRESHOLDS)
+    return [...clusters].sort(
+      (a, b) => earliestCapturedAtMs(a, photosById) - earliestCapturedAtMs(b, photosById)
+    )
+  }, [photos, metrics, photosById])
 
-  const clusters = clusterPhotos(hashInputs, CLUSTER_THRESHOLDS)
-  const sortedClusters = [...clusters].sort(
-    (a, b) => earliestCapturedAtMs(a, photosById) - earliestCapturedAtMs(b, photosById)
-  )
-
-  // R6: per-cluster identical-tier auto-resolution. Computed fresh every
-  // render from the current cluster shape; a ref (not state) tracks which
-  // removals have already been *initiated* so the effect below never issues
-  // the same `removePhotos` call twice, and never reacts to the smaller
-  // post-removal cluster shape as if it were a new duplicate set.
-  const identicalResolutions = sortedClusters.flatMap((cluster) => {
+  // R6: per-cluster identical-tier auto-resolution, derived from
+  // `sortedClusters` so it only recomputes alongside it. A ref (not state)
+  // tracks which removals have already been *initiated* so the effect below
+  // never issues the same `removePhotos` call twice, and never reacts to the
+  // smaller post-removal cluster shape as if it were a new duplicate set.
+  const identicalResolutions = useMemo(() => sortedClusters.flatMap((cluster) => {
     const identicalIds = cluster.members.filter((id) => memberTier(cluster, id) === 'identical')
     if (identicalIds.length < 2) return [] // nothing to compare against — defensive guard
     const best = bestQualityMember(identicalIds, metrics)
@@ -242,7 +273,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
     // removal is recognized as already-handled even across recomputes.
     const key = [...toRemove].sort().join(',')
     return [{ key, toRemove }]
-  })
+  }), [sortedClusters, metrics])
 
   const initiatedRemovalsRef = useRef<Set<string>>(new Set())
 
@@ -266,14 +297,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   }
 
   function toggleSimilarSelection(clusterId: string, similarIds: string[], id: string, checked: boolean) {
-    setSimilarSelections((prev) => {
-      const next = new Map(prev)
-      const current = new Set(prev.get(clusterId) ?? defaultSimilarSelection(similarIds))
-      if (checked) current.add(id)
-      else current.delete(id)
-      next.set(clusterId, current)
-      return next
-    })
+    toggleInClusterSelection(setSimilarSelections, clusterId, id, checked, () => defaultSimilarSelection(similarIds))
   }
 
   function handleRemoveNonSelected(clusterId: string, similarIds: string[]) {
@@ -291,14 +315,7 @@ export default function ClusterView({ photos, metrics, getObjectUrl, removePhoto
   const [timestampSelections, setTimestampSelections] = useState<Map<string, Set<string>>>(new Map())
 
   function toggleTimestampSelection(clusterId: string, id: string, checked: boolean) {
-    setTimestampSelections((prev) => {
-      const next = new Map(prev)
-      const current = new Set(prev.get(clusterId) ?? [])
-      if (checked) current.add(id)
-      else current.delete(id)
-      next.set(clusterId, current)
-      return next
-    })
+    toggleInClusterSelection(setTimestampSelections, clusterId, id, checked, () => new Set<string>())
   }
 
   return (
