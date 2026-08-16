@@ -20,6 +20,17 @@ vi.mock('@/hooks/useGooglePhotosPicker', () => ({
 vi.mock('@/hooks/useGooglePhotosUpload', () => ({
   useGooglePhotosUpload: vi.fn(),
 }))
+vi.mock('@/hooks/usePhotoMetrics', () => ({
+  usePhotoMetrics: vi.fn(),
+}))
+
+// ClusterView has its own dedicated test suite (ClusterView.test.tsx). Here
+// it's mocked to a distinctive placeholder so PhotoUploadPage's tests can
+// assert *that* it's rendered (or not) in the right view mode, without
+// depending on its internal clustering/rendering details.
+vi.mock('./ClusterView', () => ({
+  default: () => <div data-testid="cluster-view" />,
+}))
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
@@ -66,11 +77,13 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
+import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 const mockUsePhotos = vi.mocked(usePhotos)
 const mockUseObjectUrls = vi.mocked(useObjectUrls)
 const mockUseGoogleAuth = vi.mocked(useGoogleAuth)
 const mockUseGooglePhotosPicker = vi.mocked(useGooglePhotosPicker)
 const mockUseGooglePhotosUpload = vi.mocked(useGooglePhotosUpload)
+const mockUsePhotoMetrics = vi.mocked(usePhotoMetrics)
 
 function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
@@ -106,6 +119,7 @@ beforeEach(() => {
     retryFailed: vi.fn(),
     reset: vi.fn(),
   })
+  mockUsePhotoMetrics.mockReturnValue(new Map())
 })
 
 describe('PhotoUploadPage', () => {
@@ -622,5 +636,100 @@ describe('PhotoUploadPage — batch delete', () => {
     const uploadedIds = uploadedPhotos.map((p) => p.id)
     expect(uploadedIds).not.toContain(photos[0].id)
     expect(uploadedIds).toEqual([photos[1].id])
+  })
+})
+
+describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[]) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos: vi.fn(),
+    }
+  }
+
+  it('default view mode (timeline) renders the flat grid, not ClusterView, and the toggle is present', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    // Regression check: flat grid renders by default...
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('b.jpg')).toBeDefined()
+    expect(screen.queryByTestId('cluster-view')).toBeNull()
+    // ...and the toggle to switch into grouped view is present.
+    expect(screen.getByRole('button', { name: 'Group similar photos' })).toBeDefined()
+  })
+
+  it('toggling to cluster view renders ClusterView instead of the flat grid; toggling back restores the flat grid', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
+
+    expect(screen.getByTestId('cluster-view')).toBeDefined()
+    expect(screen.queryByAltText('a.jpg')).toBeNull()
+    expect(screen.queryByAltText('b.jpg')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
+
+    expect(screen.queryByTestId('cluster-view')).toBeNull()
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('b.jpg')).toBeDefined()
+  })
+
+  it('hides page-level selection controls and BatchEditPanel while in cluster view, and restores them on toggling back', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    // Select a photo so BatchEditPanel would normally show.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Select all' })).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
+
+    expect(screen.queryByRole('button', { name: 'Select all' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear selection' })).toBeNull()
+    expect(screen.queryByText('1 photo selected')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
+
+    expect(screen.getByRole('button', { name: 'Select all' })).toBeDefined()
+  })
+
+  it('calls usePhotoMetrics unconditionally with the current photos, even while viewMode is timeline', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    // Proves metrics computation is driven from PhotoUploadPage itself, not
+    // lazily from inside ClusterView (which isn't even mounted here, since
+    // viewMode defaults to 'timeline').
+    expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
+    expect(screen.queryByTestId('cluster-view')).toBeNull()
   })
 })

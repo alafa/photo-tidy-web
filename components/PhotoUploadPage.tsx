@@ -15,8 +15,10 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
+import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
+import ClusterView from './ClusterView'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
@@ -43,11 +45,17 @@ export default function PhotoUploadPage() {
     cancelImport,
   } = useGooglePhotosPicker({ accessToken, addPhotos })
   const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
+  // Metrics must start computing as soon as photos are added regardless of
+  // which view mode is active (KTD12) — called here, unconditionally,
+  // rather than inside ClusterView (which only mounts once the user toggles
+  // to cluster view).
+  const metrics = usePhotoMetrics(photos)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
   const [namePromptValue, setNamePromptValue] = useState('')
+  const [viewMode, setViewMode] = useState<'timeline' | 'clusters'>('timeline')
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -232,28 +240,38 @@ export default function PhotoUploadPage() {
 
         {photos.length > 0 && (
           <>
-            {/* Selection controls */}
+            {/* View mode toggle + selection controls */}
             <div className="flex items-center gap-3 mb-4">
               <button
-                onClick={selectAll}
+                onClick={() => setViewMode((prev) => (prev === 'timeline' ? 'clusters' : 'timeline'))}
                 className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
               >
-                Select all
+                {viewMode === 'timeline' ? 'Group similar photos' : 'Back to timeline view'}
               </button>
-              {selectedIds.size > 0 && (
-                <button
-                  onClick={clearSelection}
-                  className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
-                >
-                  Clear selection
-                </button>
+              {viewMode === 'timeline' && (
+                <>
+                  <button
+                    onClick={selectAll}
+                    className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
+                  >
+                    Select all
+                  </button>
+                  {selectedIds.size > 0 && (
+                    <button
+                      onClick={clearSelection}
+                      className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
+                    >
+                      Clear selection
+                    </button>
+                  )}
+                </>
               )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
             </div>
 
-            {/* Upload panel */}
+            {/* Upload panel — unrelated to view mode, stays visible in both */}
             {isSignedIn && (
               <GooglePhotosUploadPanel
                 photos={photos}
@@ -267,8 +285,8 @@ export default function PhotoUploadPage() {
               />
             )}
 
-            {/* Batch panel */}
-            {selectedIds.size > 0 && (
+            {/* Batch panel — hidden in cluster view; cluster-scoped selection (U4/U5) replaces it there */}
+            {viewMode === 'timeline' && selectedIds.size > 0 && (
               <BatchEditPanel
                 selectedCount={selectedIds.size}
                 onBatchRename={handleBatchRename}
@@ -278,30 +296,34 @@ export default function PhotoUploadPage() {
               />
             )}
 
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-            >
-              <PhotoGrid
-                photos={photos}
-                getObjectUrl={getObjectUrl}
-                onReorder={reorderPhotos}
-                onNameChange={updatePhotoName}
-                onTimestampChange={updatePhotoTimestamp}
-                selectedIds={selectedIds}
-                onSelect={toggleSelect}
-              />
-              <DragOverlay>
-                {activeEntry && (
-                  <PhotoCard
-                    entry={activeEntry}
-                    objectUrl={getObjectUrl(activeEntry.file)}
-                  />
-                )}
-              </DragOverlay>
-            </DndContext>
+            {viewMode === 'clusters' ? (
+              <ClusterView photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />
+            ) : (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={handleDragStart}
+                onDragEnd={handleDragEnd}
+              >
+                <PhotoGrid
+                  photos={photos}
+                  getObjectUrl={getObjectUrl}
+                  onReorder={reorderPhotos}
+                  onNameChange={updatePhotoName}
+                  onTimestampChange={updatePhotoTimestamp}
+                  selectedIds={selectedIds}
+                  onSelect={toggleSelect}
+                />
+                <DragOverlay>
+                  {activeEntry && (
+                    <PhotoCard
+                      entry={activeEntry}
+                      objectUrl={getObjectUrl(activeEntry.file)}
+                    />
+                  )}
+                </DragOverlay>
+              </DndContext>
+            )}
 
             <div className="mt-6 flex justify-end">
               <button
