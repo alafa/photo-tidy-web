@@ -57,18 +57,25 @@ vi.mock('@dnd-kit/core', () => ({
   useSensors: vi.fn(() => []),
 }))
 
-vi.mock('@dnd-kit/sortable', () => ({
-  SortableContext: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useSortable: () => ({
-    attributes: {},
-    listeners: {},
-    setNodeRef: vi.fn(),
-    transform: null,
-    transition: null,
-    isDragging: false,
-  }),
-  rectSortingStrategy: vi.fn(),
-}))
+// `arrayMove` is kept real (via importOriginal) -- `handleDragEnd`
+// (components/PhotoUploadPage.tsx) uses it directly, on the real visual
+// order, to resolve a drop's true final neighbors.
+vi.mock('@dnd-kit/sortable', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@dnd-kit/sortable')>()
+  return {
+    ...actual,
+    SortableContext: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+    useSortable: () => ({
+      attributes: {},
+      listeners: {},
+      setNodeRef: vi.fn(),
+      transform: null,
+      transition: null,
+      isDragging: false,
+    }),
+    rectSortingStrategy: vi.fn(),
+  }
+})
 
 import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
@@ -265,13 +272,18 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
     return entry.id
   }
 
-  it('calls reorderPhotos with correct indices on dragEnd', () => {
-    const reorderPhotosMock = vi.fn()
+  it('calls updatePhotoTimestamp with the timestamp computed from true visual neighbors on dragEnd', () => {
+    // No metrics -> no clustering, so visual order equals the flat
+    // chronological array here; this proves handleDragEnd's new
+    // visual-order-based resolution still produces the right result for the
+    // simple (non-clustered) case.
+    const updatePhotoTimestampMock = vi.fn()
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
     mockUsePhotos.mockReturnValue({
       photos,
       processFiles: vi.fn(),
-      reorderPhotos: reorderPhotosMock,
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
     })
 
     render(<PhotoUploadPage />)
@@ -283,16 +295,23 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
       })
     })
 
-    expect(reorderPhotosMock).toHaveBeenCalledWith(2, 0)
+    // c dropped at the very front: no prev neighbor, next neighbor is a --
+    // slotTimestamp's edge-offset rule (ported into handleDragEnd via
+    // computeDroppedTimestamp) gives a's timestamp minus 1 second.
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(
+      photoId(photos[2]),
+      new Date(photos[0].capturedAt.getTime() - 1000)
+    )
   })
 
-  it('does not call reorderPhotos when dropped outside the grid (over is null)', () => {
-    const reorderPhotosMock = vi.fn()
+  it('does not call updatePhotoTimestamp when dropped outside the grid (over is null)', () => {
+    const updatePhotoTimestampMock = vi.fn()
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue({
       photos,
       processFiles: vi.fn(),
-      reorderPhotos: reorderPhotosMock,
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
     })
 
     render(<PhotoUploadPage />)
@@ -304,7 +323,7 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
       })
     })
 
-    expect(reorderPhotosMock).not.toHaveBeenCalled()
+    expect(updatePhotoTimestampMock).not.toHaveBeenCalled()
   })
 
   it('renders a floating PhotoCard in DragOverlay when drag is active', () => {
@@ -343,8 +362,13 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
     const solo2 = makeEntry('solo2.jpg', 3)
     const photos = [solo1, m1, m2, solo2]
 
-    function renderWithCluster(reorderPhotosMock: ReturnType<typeof vi.fn>) {
-      mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: reorderPhotosMock })
+    function renderWithCluster(updatePhotoTimestampMock: ReturnType<typeof vi.fn>) {
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: updatePhotoTimestampMock,
+      })
       mockUsePhotoMetrics.mockReturnValue(
         new Map([
           [m1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
@@ -356,57 +380,60 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
       expect(document.querySelectorAll('section')).toHaveLength(1)
     }
 
-    it('AE2: dragging a standalone photo to a position inside a cluster\'s visual span resolves the same from/to indices a flat reorder would', () => {
-      const reorderPhotosMock = vi.fn()
-      renderWithCluster(reorderPhotosMock)
+    it('AE2: dragging a standalone photo to a position inside a cluster\'s visual span resolves the timestamp from its true visual neighbors', () => {
+      const updatePhotoTimestampMock = vi.fn()
+      renderWithCluster(updatePhotoTimestampMock)
 
-      // solo1 (index 0) dropped onto m2 (index 2, inside the cluster's span).
+      // solo1 (index 0) dropped onto m2 (index 2, inside the cluster's
+      // span). This cluster is array-contiguous, so visual order equals
+      // flat order here -- the true final neighbors after the drop are m2
+      // (prev) and solo2 (next).
       act(() => {
         capturedOnDragEnd?.({ active: { id: photoId(solo1) }, over: { id: photoId(m2) } })
       })
 
-      expect(reorderPhotosMock).toHaveBeenCalledWith(0, 2)
-      // reorderPhotos itself (hooks/usePhotos.ts, out of scope, confirmed
-      // correct) is what actually rewrites only the moved photo's
-      // timestamp using the existing offset convention -- this asserts
-      // handleDragEnd hands it the right, unmodified indices.
+      const expectedTimestamp = new Date(
+        Math.round((m2.capturedAt.getTime() + solo2.capturedAt.getTime()) / 2)
+      )
+      expect(updatePhotoTimestampMock).toHaveBeenCalledWith(photoId(solo1), expectedTimestamp)
     })
 
-    it('dragging a cluster member to a position outside any cluster resolves correctly, leaving the remaining member\'s own index untouched', () => {
-      const reorderPhotosMock = vi.fn()
-      renderWithCluster(reorderPhotosMock)
+    it('dragging a cluster member to a position outside any cluster resolves the timestamp from its true visual neighbors', () => {
+      const updatePhotoTimestampMock = vi.fn()
+      renderWithCluster(updatePhotoTimestampMock)
 
-      // m1 (index 1, inside the cluster) dropped onto solo2 (index 3, outside any cluster).
+      // m1 (index 1, inside the cluster) dropped onto solo2 (index 3,
+      // outside any cluster). True final neighbors: solo2 (prev), no next.
       act(() => {
         capturedOnDragEnd?.({ active: { id: photoId(m1) }, over: { id: photoId(solo2) } })
       })
 
-      expect(reorderPhotosMock).toHaveBeenCalledWith(1, 3)
-      expect(reorderPhotosMock).toHaveBeenCalledOnce()
+      const expectedTimestamp = new Date(solo2.capturedAt.getTime() + 1000)
+      expect(updatePhotoTimestampMock).toHaveBeenCalledWith(photoId(m1), expectedTimestamp)
+      expect(updatePhotoTimestampMock).toHaveBeenCalledOnce()
     })
 
-    it('CRITICAL (KTD3): dragging one cluster member to swap with another member of the same cluster resolves the same from/to a purely chronological array-index computation would', () => {
-      const reorderPhotosMock = vi.fn()
-      renderWithCluster(reorderPhotosMock)
+    it('CRITICAL (KTD3): dragging one cluster member to swap with another member of the same cluster resolves the timestamp the same way a purely chronological computation would', () => {
+      const updatePhotoTimestampMock = vi.fn()
+      renderWithCluster(updatePhotoTimestampMock)
 
       // m2 (index 2) dropped onto m1 (index 1) -- both inside the same
-      // cluster. A purely chronological computation over `photos` (which is
-      // already sorted that way) gives from=2, to=1 directly -- if cluster
-      // members were instead ordered by similarity (the old
-      // hierarchicalOrder, pre-KTD3), the id visually adjacent on screen
-      // could diverge from this, but handleDragEnd's photos.findIndex
-      // always resolves against the real array, which chronological member
-      // ordering (KTD3) keeps in agreement with what's rendered.
+      // cluster. Chronological member ordering (KTD3) keeps visual order in
+      // agreement with `photos`' flat order for this fixture, so the true
+      // final neighbors are solo1 (prev) and m1 (next).
       act(() => {
         capturedOnDragEnd?.({ active: { id: photoId(m2) }, over: { id: photoId(m1) } })
       })
 
-      expect(reorderPhotosMock).toHaveBeenCalledWith(2, 1)
+      const expectedTimestamp = new Date(
+        Math.round((solo1.capturedAt.getTime() + m1.capturedAt.getTime()) / 2)
+      )
+      expect(updatePhotoTimestampMock).toHaveBeenCalledWith(photoId(m2), expectedTimestamp)
     })
 
     it('DragOverlay renders correctly for a card that started inside a cluster section', () => {
-      const reorderPhotosMock = vi.fn()
-      renderWithCluster(reorderPhotosMock)
+      const updatePhotoTimestampMock = vi.fn()
+      renderWithCluster(updatePhotoTimestampMock)
 
       act(() => {
         capturedOnDragStart?.({ active: { id: photoId(m1) } })
@@ -414,6 +441,134 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
 
       const overlay = document.querySelector('[data-testid="drag-overlay"]')
       expect(overlay?.textContent).toContain('m1.jpg')
+    })
+  })
+
+  // P0 fix regression tests: a cluster's members are NOT guaranteed to be
+  // array-contiguous in the flat `photos` array (clustering is by hash
+  // similarity, not time), so `photos.findIndex` on `over.id` could
+  // silently resolve the wrong neighbors and corrupt the written-back
+  // timestamp. These reproduce the two concrete divergence scenarios from
+  // the post-implementation code review and prove handleDragEnd's
+  // visual-order-based resolution (hooks/useClusteredPhotos.ts's
+  // `visualOrder`) fixes both.
+  describe('non-contiguous cluster and null-timestamp visual-order fix (P0)', () => {
+    function makeDatedEntry(name: string, index: number, capturedAt: string) {
+      const file = makeFile(name)
+      return {
+        id: `${name}-${index}`,
+        file,
+        filename: name,
+        capturedAt: new Date(capturedAt),
+        uploadIndex: index,
+      }
+    }
+
+    it('non-contiguous cluster: resolves the dropped timestamp from the true visual neighbors, not the flat-array neighbors', () => {
+      // A and C cluster together (matching hashes); B does not, and B's
+      // capturedAt sits strictly between A's and C's. The flat,
+      // purely-chronological `photos` array is [A, B, C], but the cluster
+      // (anchored to A, its earliest member) renders visually as [A, C, B]
+      // -- the cluster section first, B's singleton run after.
+      const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+      const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+      const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+      const photos = [a, b, c] // pre-sorted chronologically, as usePhotos would produce
+
+      const updatePhotoTimestampMock = vi.fn()
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: updatePhotoTimestampMock,
+      })
+      mockUsePhotoMetrics.mockReturnValue(
+        new Map([
+          [a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+          [c.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }], // identical to a
+          [b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }], // orthogonal -- doesn't cluster
+        ])
+      )
+
+      render(<PhotoUploadPage />)
+
+      // Confirm the visual order really is A, C, B (one cluster section
+      // followed by B's singleton), diverging from flat photos [A, B, C].
+      expect(document.querySelectorAll('section')).toHaveLength(1)
+      const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+      expect(imgs).toEqual(['a.jpg', 'c.jpg', 'b.jpg'])
+
+      // Drag B and drop it onto C -- visually, dropping B "onto" C in
+      // [A, C, B] slots B back between A and C, so B's true final
+      // neighbors are A (prev) and C (next).
+      act(() => {
+        capturedOnDragEnd?.({ active: { id: b.id }, over: { id: c.id } })
+      })
+
+      const expectedTimestamp = new Date(Math.round((a.capturedAt.getTime() + c.capturedAt.getTime()) / 2))
+      expect(updatePhotoTimestampMock).toHaveBeenCalledWith(b.id, expectedTimestamp)
+
+      // Prove the fix: the OLD buggy flat-array computation
+      // (photos.findIndex over [A, B, C]) would instead resolve C as the
+      // sole (prev) neighbor with no next, yielding C's timestamp + 1s.
+      const buggyFlatTimestamp = new Date(c.capturedAt.getTime() + 1000)
+      expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(b.id, buggyFlatTimestamp)
+    })
+
+    it("null-timestamp cluster-mate: resolves the dropped timestamp from the true visual neighbor, not the null-dated member's flat-array tail position", () => {
+      // D1 (dated) and N1 (null capturedAt) cluster together (matching
+      // hashes). D2 is dated earlier than D1; D3 is dated later than D1.
+      // `sortPhotos` (hooks/usePhotos.ts) puts every dated photo before
+      // every null-dated one regardless of cluster membership, so the flat
+      // array is [D2, D1, D3, N1] -- N1 always at the tail. But the cluster
+      // (anchored to D1, its only dated member) renders mid-grid, right
+      // after D2 and before D3 -- so N1's true visual position is
+      // immediately after D1, not at the tail.
+      const d2 = makeDatedEntry('d2.jpg', 0, '2025-01-01T00:00:00Z')
+      const d1 = makeDatedEntry('d1.jpg', 1, '2025-01-02T00:00:00Z')
+      const d3 = makeDatedEntry('d3.jpg', 2, '2025-01-03T00:00:00Z')
+      const n1 = { ...makeDatedEntry('n1.jpg', 3, '2025-01-04T00:00:00Z'), capturedAt: null }
+      const photos = [d2, d1, d3, n1] // pre-sorted per sortPhotos' null-last convention
+
+      const updatePhotoTimestampMock = vi.fn()
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: updatePhotoTimestampMock,
+      })
+      mockUsePhotoMetrics.mockReturnValue(
+        new Map([
+          [d1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+          [n1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }], // identical to d1
+          [d2.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(30, 39)) }],
+          [d3.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
+        ])
+      )
+
+      render(<PhotoUploadPage />)
+
+      // Confirm the cluster (d1, n1) renders mid-grid, between d2 and d3 --
+      // diverging from the flat array's [d2, d1, d3, n1] tail position for n1.
+      expect(document.querySelectorAll('section')).toHaveLength(1)
+      const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+      expect(imgs).toEqual(['d2.jpg', 'd1.jpg', 'n1.jpg', 'd3.jpg'])
+
+      // Drag d3 and drop it onto n1 -- visually, d3's true final prev
+      // neighbor becomes d1 (n1 has no timestamp to average with), so the
+      // edge-offset rule applies: d1's timestamp + 1 second.
+      act(() => {
+        capturedOnDragEnd?.({ active: { id: d3.id }, over: { id: n1.id } })
+      })
+
+      const expectedTimestamp = new Date(d1.capturedAt.getTime() + 1000)
+      expect(updatePhotoTimestampMock).toHaveBeenCalledWith(d3.id, expectedTimestamp)
+
+      // Prove the fix: the OLD buggy flat-array computation would have
+      // resolved n1 itself as the (null-timestamp) prev neighbor with no
+      // next, landing in the "keep as-is" branch -- d3's timestamp
+      // unchanged -- instead of properly slotting it after d1.
+      expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(d3.id, d3.capturedAt)
     })
   })
 })

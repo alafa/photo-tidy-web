@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   DndContext,
   DragOverlay,
@@ -10,6 +10,7 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
+import { arrayMove } from '@dnd-kit/sortable'
 import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
@@ -22,6 +23,39 @@ import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
 import { downloadAll } from '@/lib/download'
+
+/**
+ * Computes the new timestamp for a photo dropped between `prevCapturedAt`
+ * and `nextCapturedAt` — its TRUE final visual neighbors after the drop, not
+ * neighbors resolved from the flat, purely-chronological `photos` array
+ * (which can disagree with visual order whenever a cluster isn't
+ * array-contiguous; see `hooks/useClusteredPhotos.ts`'s `visualOrder` doc).
+ *
+ * Ports the exact same midpoint/edge-offset algorithm
+ * `hooks/usePhotos.ts`'s `slotTimestamp` already uses, rather than
+ * reinventing it, so a drop's resulting timestamp is computed identically
+ * regardless of which neighbor set (flat-array vs. true-visual) it's fed.
+ */
+function computeDroppedTimestamp(
+  prevCapturedAt: Date | null,
+  nextCapturedAt: Date | null,
+  currentCapturedAt: Date | null
+): Date | null {
+  if (prevCapturedAt !== null && nextCapturedAt !== null) {
+    // Midpoint between neighbours
+    return new Date(Math.round((prevCapturedAt.getTime() + nextCapturedAt.getTime()) / 2))
+  }
+  if (prevCapturedAt !== null) {
+    // Moved to the end — one second after the previous photo
+    return new Date(prevCapturedAt.getTime() + 1000)
+  }
+  if (nextCapturedAt !== null) {
+    // Moved to the start — one second before the next photo
+    return new Date(nextCapturedAt.getTime() - 1000)
+  }
+  // Only photo, or all neighbours have null timestamps — keep as-is
+  return currentCapturedAt
+}
 
 export default function PhotoUploadPage() {
   const {
@@ -58,6 +92,22 @@ export default function PhotoUploadPage() {
 
   const activeEntry = activeId ? photos.find((p) => p.id === activeId) : null
 
+  // The true flattened visual order `PhotoGrid` last rendered (see
+  // `hooks/useClusteredPhotos.ts`'s `visualOrder` doc) — a ref, not state,
+  // so receiving an update via `handleVisualOrderChange` below doesn't
+  // itself trigger a render; `handleDragEnd` (a plain function, not a hook)
+  // reads `visualOrderRef.current` fresh on every invocation instead.
+  const visualOrderRef = useRef<string[]>([])
+
+  // Stable identity (empty dep array, only touches the ref) so PhotoGrid's
+  // `useEffect([visualOrder, onVisualOrderChange])` fires only when
+  // `visualOrder` itself changes, not on every PhotoUploadPage render.
+  const handleVisualOrderChange = useCallback((order: string[]) => {
+    visualOrderRef.current = order
+  }, [])
+
+  const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
+
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
       setSelectedIds(new Set())
@@ -85,15 +135,41 @@ export default function PhotoUploadPage() {
     setActiveId(String(event.active.id))
   }
 
+  // Resolves from/to against the TRUE visual order (`visualOrderRef`), not
+  // the flat, purely-chronological `photos` array — dnd-kit's `over.id` is
+  // resolved from actual DOM hit-testing (i.e. visual order), and a
+  // cluster's members aren't guaranteed to be array-contiguous in `photos`
+  // (clustering is by hash similarity, not time), so `photos.findIndex`
+  // could silently resolve to the wrong neighbors and corrupt the written-
+  // back timestamp. See `hooks/useClusteredPhotos.ts`'s `visualOrder` doc.
+  //
+  // Deliberately does NOT call `reorderPhotos` (`hooks/usePhotos.ts`) — that
+  // machinery computes a dropped photo's new timestamp from ITS OWN
+  // flat-array neighbors, which is exactly the wrong thing here. Instead,
+  // the true final visual neighbors are resolved locally and the same
+  // midpoint/edge-offset algorithm (`computeDroppedTimestamp`, ported from
+  // `slotTimestamp`) is applied directly via `updatePhotoTimestamp`.
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     setActiveId(null)
     if (!over || active.id === over.id) return
-    const from = photos.findIndex((p) => p.id === active.id)
-    const to = photos.findIndex((p) => p.id === over.id)
-    if (from !== -1 && to !== -1) {
-      reorderPhotos(from, to)
-    }
+
+    const visualOrder = visualOrderRef.current
+    const from = visualOrder.indexOf(active.id as string)
+    const to = visualOrder.indexOf(over.id as string)
+    if (from === -1 || to === -1) return
+
+    const reordered = arrayMove(visualOrder, from, to)
+    const prevEntry = photosById.get(reordered[to - 1])
+    const nextEntry = photosById.get(reordered[to + 1])
+    const currentEntry = photosById.get(active.id as string)
+
+    const newTimestamp = computeDroppedTimestamp(
+      prevEntry?.capturedAt ?? null,
+      nextEntry?.capturedAt ?? null,
+      currentEntry?.capturedAt ?? null
+    )
+    updatePhotoTimestamp(active.id as string, newTimestamp)
   }
 
   function toggleSelect(id: string, checked: boolean) {
@@ -318,6 +394,7 @@ export default function PhotoUploadPage() {
                 onTimestampChange={updatePhotoTimestamp}
                 selectedIds={selectedIds}
                 onSelect={toggleSelect}
+                onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>
                 {activeEntry && (

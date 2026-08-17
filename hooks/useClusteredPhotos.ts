@@ -143,6 +143,19 @@ export interface UseClusteredPhotosResult {
   hashInputs: PhotoHashInput[]
   /** `photos` indexed by id — built once here and reused by consumers (e.g. `components/PhotoGrid.tsx`) instead of each rebuilding its own copy. */
   photosById: Map<string, PhotoEntry>
+  /**
+   * The exact flattened sequence of photo ids in the order `renderBlocks`
+   * actually renders them — i.e. true DOM/visual order, not the flat,
+   * purely-per-photo-chronological `photos` array order. A cluster's
+   * members are NOT guaranteed to be array-contiguous in `photos` (a
+   * cluster is grouped by hash similarity, not time, so an unrelated,
+   * non-member photo captured in between two cluster members can still
+   * land between them in `photos`), so consumers that need to resolve a
+   * drag-and-drop's true visual neighbors (e.g.
+   * `components/PhotoUploadPage.tsx`'s `handleDragEnd`) must use this,
+   * not `photos.map((p) => p.id)`.
+   */
+  visualOrder: string[]
 }
 
 /**
@@ -246,5 +259,26 @@ export function useClusteredPhotos(
     return blocks
   }, [displayClusters])
 
-  return { renderBlocks, vectorsById, hashInputs, photosById }
+  // The true flattened visual order `renderBlocks` renders in: for a
+  // 'cluster' block, its members (already chronologically sorted within the
+  // cluster, per sortMembersChronologically above); for a 'singles' block,
+  // each single-member cluster's one member, in that block's chronological
+  // clusters order. This is what dnd-kit's SortableContext needs for its
+  // `items` (DOM-order-derived collision detection/animation), and what
+  // handleDragEnd needs to resolve a drop's true visual neighbors instead of
+  // `photos`' flat chronological neighbors, which can disagree whenever a
+  // cluster isn't array-contiguous (see the interface doc above).
+  const visualOrder = useMemo(() => {
+    const order: string[] = []
+    for (const block of renderBlocks) {
+      if (block.type === 'cluster') {
+        order.push(...block.cluster.members)
+      } else {
+        for (const cluster of block.clusters) order.push(cluster.members[0])
+      }
+    }
+    return order
+  }, [renderBlocks])
+
+  return { renderBlocks, vectorsById, hashInputs, photosById, visualOrder }
 }

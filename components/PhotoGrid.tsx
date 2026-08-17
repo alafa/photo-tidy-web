@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SortableContext, rectSortingStrategy } from '@dnd-kit/sortable'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
@@ -26,6 +26,16 @@ type Props = {
   onTimestampChange?: (id: string, newDate: Date | null) => void
   selectedIds?: Set<string>
   onSelect?: (id: string, checked: boolean) => void
+  /**
+   * Reports the true flattened visual order (see `useClusteredPhotos`'s
+   * `visualOrder`) up to the parent whenever it changes — `PhotoGrid` has no
+   * other channel to expose this internally-computed state, and
+   * `components/PhotoUploadPage.tsx`'s `handleDragEnd` needs it to resolve a
+   * drop's true visual neighbors instead of the flat `photos` array's
+   * chronological neighbors, which can diverge from visual order whenever a
+   * cluster isn't array-contiguous.
+   */
+  onVisualOrderChange?: (order: string[]) => void
 }
 
 /**
@@ -81,9 +91,22 @@ export default function PhotoGrid({
   onTimestampChange,
   selectedIds,
   onSelect,
+  onVisualOrderChange,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
-  const { renderBlocks, vectorsById, photosById } = useClusteredPhotos(photos, metrics, similarityPercent)
+  const { renderBlocks, vectorsById, photosById, visualOrder } = useClusteredPhotos(
+    photos,
+    metrics,
+    similarityPercent
+  )
+
+  // Reports the true visual order up to the parent only when it actually
+  // changes (not on every render) — `onVisualOrderChange` is expected to
+  // stash this in a ref rather than state, so this effect firing is cheap
+  // and doesn't itself trigger a re-render loop.
+  useEffect(() => {
+    onVisualOrderChange?.(visualOrder)
+  }, [visualOrder, onVisualOrderChange])
 
   // --- Debug mode: verify hash/threshold behavior directly ----------------
   const [debugMode, setDebugMode] = useState(false)
@@ -264,7 +287,7 @@ export default function PhotoGrid({
       </div>
 
       {onReorder ? (
-        <SortableContext items={photos.map((p) => p.id)} strategy={rectSortingStrategy}>
+        <SortableContext items={visualOrder} strategy={rectSortingStrategy}>
           {blocksContent}
         </SortableContext>
       ) : (
