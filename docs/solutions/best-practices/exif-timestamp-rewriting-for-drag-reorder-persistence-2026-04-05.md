@@ -1,7 +1,7 @@
 ---
 title: "Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with Slot-Based Assignment"
 date: 2026-04-05
-last_updated: 2026-04-05
+last_updated: 2026-08-17
 category: best-practices
 module: photo-reorder
 problem_type: best_practice
@@ -43,14 +43,14 @@ This slotting strategy (called `slotTimestamp`) is O(1) per drag and preserves a
 
 The timestamp update happens in two places:
 
-1. **State (`hooks/usePhotos.ts`)** — `slotTimestamp()` computes the new `capturedAt` for the moved photo and `reorderPhotos(from, to)` applies it immediately so the UI reflects the slotted date.
+1. **State** — the slotting algorithm (midpoint between new neighbors, or a ±1-second edge offset) computes the new `capturedAt` for the moved photo. `hooks/usePhotos.ts`'s `slotTimestamp()`/`reorderPhotos(from, to)` is the original implementation of this algorithm and remains live, tested code — but as of the unified timeline/cluster grid, it is **not** the function the interactive drag handler actually calls. Once photos can be grouped into similarity clusters that render as visual blocks, the flat array position `reorderPhotos` operates on can diverge from what the user actually sees and drops onto (see Related below). The interactive path now runs the *same* slotting algorithm — ported as `computeDroppedTimestamp` in `components/PhotoUploadPage.tsx` — against the true rendered-neighbor pair, then applies it via `updatePhotoTimestamp(id, newDate)` rather than `reorderPhotos`. `reorderPhotos`/`slotTimestamp` is kept because it's still correct for what it does (splicing a flat array) and is still exercised by its own unit tests, but treat it as the algorithm's reference implementation, not the live call path, when tracing an actual user drag.
 
 2. **File (`lib/exif-write.ts`)** — `writeTimestamp(file, newDate)` physically writes `DateTimeOriginal`, `DateTime`, and `DateTimeDigitized` into the JPEG's EXIF segment at download time using `piexif-ts`. PNG/TIFF files pass through unchanged (no writable EXIF format for those types).
 
 Key decisions baked into the implementation:
 - All three date tags are written for maximum gallery-app compatibility.
 - `capturedAt` in state is updated after every reorder so card labels show the slotted timestamp.
-- `sortPhotos` is never called after `reorderPhotos` — the manual order becomes authoritative until the user re-uploads.
+- `reorderPhotos` itself never calls `sortPhotos` after slotting. The live interactive path (`updatePhotoTimestamp`) does call `sortPhotos` after applying the new timestamp — but since the slotted value is deliberately chosen to fall between the photo's real neighbors, the re-sort is a no-op in practice: the photo already belongs exactly where the sort would place it.
 - `piexif-ts` operates on base64 DataURLs. If `load()` throws (JPEG with no pre-existing EXIF), the code catches and seeds an empty EXIF object before writing.
 - Downloads are triggered sequentially with ~60ms delay to avoid browser throttling from rapid programmatic anchor clicks.
 
@@ -68,7 +68,9 @@ Persisting order in EXIF timestamps rather than application state means the corr
 
 ## Examples
 
-**`slotTimestamp` — state-level slot assignment (`hooks/usePhotos.ts`):**
+**Current live path** — `computeDroppedTimestamp` (`components/PhotoUploadPage.tsx`) runs the same slotting algorithm shown below against the dragged photo's true visual neighbors (not necessarily its flat-array neighbors — see Related), then applies the result via `updatePhotoTimestamp(id, newDate)`. See `docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md` for why the neighbor pair has to come from the rendered order once similarity clustering is in the picture, and why `reorderPhotos` below is no longer the function that runs on a real drag.
+
+**`slotTimestamp` — reference implementation of the slotting algorithm (`hooks/usePhotos.ts`, still live and tested, no longer the interactive drag-end path):**
 
 ```ts
 function slotTimestamp(photos: PhotoEntry[], toIndex: number): PhotoEntry[] {
@@ -152,3 +154,4 @@ export async function writeTimestamp(file: File, newDate: Date): Promise<Blob> {
 ## Related
 
 - [`docs/solutions/ui-bugs/drag-and-drop-upload-missing-event-handlers-2026-04-05.md`](../ui-bugs/drag-and-drop-upload-missing-event-handlers-2026-04-05.md) — covers the file-upload drag surface (distinct from the reorder drag surface handled here); both are drag-and-drop in the same app but use separate mechanisms (HTML5 drop zone vs. dnd-kit sortable).
+- [`docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md`](../logic-errors/cluster-drag-timestamp-visual-order-divergence.md) — once photos can be grouped into similarity clusters that render as visual blocks, the flat array position this doc's original `reorderPhotos`/`slotTimestamp` path used to find "new neighbors" can diverge from what the user actually sees and drops onto. That doc covers the resulting bug and the fix (`computeDroppedTimestamp`, resolving neighbors from the true rendered order); this doc's core slotting algorithm is unaffected and still the right approach — only which neighbor pair feeds it had to change.
