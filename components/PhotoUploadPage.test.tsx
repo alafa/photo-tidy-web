@@ -749,6 +749,91 @@ describe('PhotoUploadPage — batch delete', () => {
     expect(uploadedIds).not.toContain(photos[0].id)
     expect(uploadedIds).toEqual([photos[1].id])
   })
+
+  // U6: with handleClusterDelete gone, every delete -- cluster-originated or
+  // not -- flows through handleBatchDelete. These two scenarios prove that
+  // path still does both jobs it always did (object URL release + selectedIds
+  // pruning) for a photo that would render inside a cluster section, exactly
+  // as it does for a plain standalone photo -- there's nothing structurally
+  // special about a "cluster member" now that selection/delete are unified.
+  it('U6: deleting a selection that includes a photo that would render inside a cluster releases its object URL, same as a standalone delete', () => {
+    const photos = [
+      makeEntry('solo1.jpg', 0),
+      makeEntry('m1.jpg', 1),
+      makeEntry('m2.jpg', 2),
+      makeEntry('solo2.jpg', 3),
+    ]
+    const removePhotosMock = makeStatefulPhotosMock(photos)
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+    // m1/m2 share an identical hash so they cluster at the 0% default
+    // threshold -- same fixture technique as the "across a real cluster"
+    // drag tests above.
+    mockUsePhotoMetrics.mockReturnValue(
+      new Map([
+        [photos[1].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+        [photos[2].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+      ])
+    )
+
+    render(<PhotoUploadPage />)
+    // Sanity: m1/m2 really did render as a bordered cluster section.
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+
+    fireEvent.click(screen.getByAltText('m1.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+
+    expect(removePhotosMock).toHaveBeenCalledWith([photos[1].id])
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[1].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledOnce()
+  })
+
+  it('U6: deleting a mixed selection of a cluster member and a standalone photo releases both object URLs and prunes selectedIds in one call', () => {
+    const photos = [
+      makeEntry('solo1.jpg', 0),
+      makeEntry('m1.jpg', 1),
+      makeEntry('m2.jpg', 2),
+      makeEntry('solo2.jpg', 3),
+    ]
+    const removePhotosMock = makeStatefulPhotosMock(photos)
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+    mockUsePhotoMetrics.mockReturnValue(
+      new Map([
+        [photos[1].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+        [photos[2].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+      ])
+    )
+
+    render(<PhotoUploadPage />)
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+
+    // Mixed selection: solo1 (standalone) + m1 (cluster member), one delete.
+    fireEvent.click(screen.getByAltText('solo1.jpg'))
+    fireEvent.click(screen.getByAltText('m1.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+    expect(new Set(removedIds)).toEqual(new Set([photos[0].id, photos[1].id]))
+
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[1].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledTimes(2)
+
+    // Selection pruned for both deleted ids in the same call -- no lingering
+    // BatchEditPanel/count survives for the remaining photos (m2, solo2).
+    expect(screen.queryByText(/photos? selected/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull()
+  })
 })
 
 describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
@@ -855,10 +940,11 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
 // `components/ClusterView.tsx` is no longer part of PhotoUploadPage's render
 // path as of U3 (KTD2) -- the conditional that used to swap the grid out for
 // a standalone ClusterView, and hand it a `handleClusterDelete` wrapper, is
-// gone. `handleClusterDelete` itself is intentionally left in place in
-// PhotoUploadPage.tsx (unused, dead code) for now -- U6 is the unit that
-// formally deletes it once every delete flows through the unified
-// `handleBatchDelete` (KTD6). The dedicated tests that used to drive
-// `handleClusterDelete` via a captured ClusterView prop are removed here
-// rather than left permanently failing against a component that can no
-// longer mount.
+// gone. The dedicated tests that used to drive `handleClusterDelete` via a
+// captured ClusterView prop were removed here (in U3) rather than left
+// permanently failing against a component that can no longer mount.
+// `handleClusterDelete` itself was formally deleted from PhotoUploadPage.tsx
+// in U6, now that every delete -- cluster-originated or not -- flows through
+// the unified `handleBatchDelete` (KTD6); see the "U6:" tests in the
+// "PhotoUploadPage — batch delete" describe block above for coverage of a
+// delete involving a would-be cluster member.
