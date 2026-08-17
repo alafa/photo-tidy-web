@@ -18,7 +18,6 @@ import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
-import ClusterView from './ClusterView'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
@@ -321,41 +320,37 @@ export default function PhotoUploadPage() {
               />
             )}
 
-            {viewMode === 'clusters' ? (
-              <ClusterView
+            {/* U3: the unified grid always renders here, drag-wired end to
+                end (KTD2) — the conditional that used to swap this out for
+                a standalone, non-draggable ClusterView is gone. `viewMode`
+                and its toggle button (above) still exist but no longer
+                affect what renders here; removing them entirely is U7's
+                job once selection/delete are also unified (U4-U6). */}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
+              <PhotoGrid
                 photos={photos}
                 metrics={metrics}
                 getObjectUrl={getObjectUrl}
-                removePhotos={handleClusterDelete}
-                batchSetTimestamps={batchSetTimestamps}
+                onReorder={reorderPhotos}
+                onNameChange={updatePhotoName}
+                onTimestampChange={updatePhotoTimestamp}
+                selectedIds={selectedIds}
+                onSelect={toggleSelect}
               />
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragStart={handleDragStart}
-                onDragEnd={handleDragEnd}
-              >
-                <PhotoGrid
-                  photos={photos}
-                  metrics={metrics}
-                  getObjectUrl={getObjectUrl}
-                  onReorder={reorderPhotos}
-                  onNameChange={updatePhotoName}
-                  onTimestampChange={updatePhotoTimestamp}
-                  selectedIds={selectedIds}
-                  onSelect={toggleSelect}
-                />
-                <DragOverlay>
-                  {activeEntry && (
-                    <PhotoCard
-                      entry={activeEntry}
-                      objectUrl={getObjectUrl(activeEntry.file)}
-                    />
-                  )}
-                </DragOverlay>
-              </DndContext>
-            )}
+              <DragOverlay>
+                {activeEntry && (
+                  <PhotoCard
+                    entry={activeEntry}
+                    objectUrl={getObjectUrl(activeEntry.file)}
+                  />
+                )}
+              </DragOverlay>
+            </DndContext>
 
             <div className="mt-6 flex justify-end">
               <button

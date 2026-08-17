@@ -1,13 +1,23 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 
 afterEach(cleanup)
 
-// Mock dnd-kit so tests don't need a real DndContext
+// Mock dnd-kit so tests don't need a real DndContext. `items` passed to
+// SortableContext is captured so U3's tests can prove it's the full flat
+// chronological id list (KTD2) without simulating a real pointer drag --
+// this repo has no precedent for that, and `useSortable`'s static
+// `data-testid="drag-listener"` attribute (below) is instead used to prove
+// the debug Compare button (KTD9) sits outside the drag-listener wrapper.
+let capturedSortableItems: string[] | null = null
+
 vi.mock('@dnd-kit/sortable', () => ({
-  SortableContext: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  SortableContext: ({ children, items }: { children: React.ReactNode; items: string[] }) => {
+    capturedSortableItems = items
+    return <>{children}</>
+  },
   useSortable: () => ({
     attributes: { 'aria-roledescription': 'sortable item' },
     listeners: { 'data-testid': 'drag-listener' },
@@ -18,6 +28,10 @@ vi.mock('@dnd-kit/sortable', () => ({
   }),
   rectSortingStrategy: vi.fn(),
 }))
+
+beforeEach(() => {
+  capturedSortableItems = null
+})
 
 import PhotoGrid from './PhotoGrid'
 
@@ -223,5 +237,119 @@ describe('PhotoGrid', () => {
 
     // A Compare button renders as a sibling on every card, clustered or not.
     expect(screen.getAllByRole('button', { name: 'Compare' })).toHaveLength(3)
+  })
+})
+
+describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)', () => {
+  // solo1 and solo2 sit chronologically before/after a 2-member cluster.
+  // m1/m2 are deliberately constructed with uploadIndex REVERSED relative
+  // to capturedAt (m1: uploadIndex 5, captured first; m2: uploadIndex 1,
+  // captured second) so any test that accidentally keyed off upload/insertion
+  // order instead of capturedAt order would fail loudly. `photos` is passed
+  // pre-sorted chronologically, exactly as hooks/usePhotos.ts's sortPhotos
+  // would produce it -- PhotoGrid never re-sorts its `photos` prop itself.
+  const solo1 = makeEntry('solo1.jpg', 0, '2024-12-01T00:00:00Z')
+  const m1 = makeEntry('m1.jpg', 5, '2025-01-01T00:00:00Z')
+  const m2 = makeEntry('m2.jpg', 1, '2025-01-02T00:00:00Z')
+  const solo2 = makeEntry('solo2.jpg', 9, '2025-06-01T00:00:00Z')
+  const photos = [solo1, m1, m2, solo2]
+  const metrics = new Map<string, PhotoMetrics | undefined>([
+    [m1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [m2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [solo1.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    [solo2.id, makeMetrics(hashFromPositions(range(90, 99)))],
+  ])
+
+  it("SortableContext's items is the full flat chronological id list, spanning across the cluster and both singleton runs (KTD2)", () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+    )
+
+    // Sanity: m1/m2 really did cluster together into one bordered section.
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+
+    expect(capturedSortableItems).toEqual([solo1.id, m1.id, m2.id, solo2.id])
+  })
+
+  it('renders cluster members in chronological (array) order, not upload-index order -- the critical KTD3 guarantee behind within-cluster drag resolution', () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+    )
+
+    // m1 (uploadIndex 5, captured first) renders before m2 (uploadIndex 1,
+    // captured second) -- the opposite of upload-index order, proving
+    // capturedAt (not hierarchicalOrder or upload order) drives the visual
+    // sequence that dnd-kit's `items` list and PhotoUploadPage's
+    // handleDragEnd (`photos.findIndex`) both key off.
+    const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+    expect(imgs).toEqual(['solo1.jpg', 'm1.jpg', 'm2.jpg', 'solo2.jpg'])
+
+    // Since `photos` is already in this exact order, dragging m2 onto m1 (a
+    // within-cluster swap) resolves to (from=2, to=1) via
+    // `photos.findIndex` -- identical to what a purely chronological
+    // array-index computation over `photos` would produce. See
+    // PhotoUploadPage.test.tsx's "within-cluster swap" test for the
+    // corresponding handleDragEnd/reorderPhotos assertion using this same
+    // fixture shape.
+    expect(photos.findIndex((p) => p.id === m2.id)).toBe(2)
+    expect(photos.findIndex((p) => p.id === m1.id)).toBe(1)
+  })
+
+  it('cluster member cards render as SortablePhotoCard (real drag sources), not plain PhotoCard, when onReorder is provided', () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+    )
+
+    const section = document.querySelector('section') as HTMLElement
+    const memberImgs = within(section).getAllByRole('img')
+    expect(memberImgs).toHaveLength(2)
+    // useSortable's mocked attributes (aria-roledescription) land on the
+    // wrapper for every card -- cluster members included, not just singles.
+    for (const img of memberImgs) {
+      expect(img.closest('[aria-roledescription="sortable item"]')).not.toBeNull()
+    }
+  })
+
+  it("debug mode's Compare button on a cluster member renders as a DOM sibling outside the card's drag-listener wrapper (KTD9), so clicking it cannot trigger a drag", () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+    )
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+
+    const img = screen.getByAltText('m1.jpg')
+    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
+    expect(dragWrapper).not.toBeNull()
+
+    const cardWrapper = dragWrapper.parentElement as HTMLElement
+    const compareButton = within(cardWrapper).getByRole('button', { name: 'Compare' })
+
+    // A true sibling of the drag wrapper, not nested inside it -- dnd-kit's
+    // pointer listeners (spread onto dragWrapper) never cover this button,
+    // so no stopPropagation is needed for it to avoid starting a drag.
+    expect(dragWrapper.contains(compareButton)).toBe(false)
+    expect(cardWrapper.contains(compareButton)).toBe(true)
+
+    fireEvent.click(compareButton)
+    expect(screen.getByText(/A: m1\.jpg/)).toBeDefined()
+  })
+
+  it('starting a drag from a card (interacting with the drag-listener wrapper itself) does not toggle its debug-mode compare state', () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+    )
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+    expect(screen.getByText(/on any two photos to see their hashes and distance/)).toBeDefined()
+
+    const img = screen.getByAltText('m1.jpg')
+    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
+    fireEvent.pointerDown(dragWrapper)
+    fireEvent.click(dragWrapper)
+
+    // comparePair is untouched by interacting with the drag-listener region
+    // itself -- only the dedicated Compare button (outside that region)
+    // sets it.
+    expect(screen.getByText(/on any two photos to see their hashes and distance/)).toBeDefined()
   })
 })

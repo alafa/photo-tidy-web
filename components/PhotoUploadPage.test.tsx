@@ -24,23 +24,6 @@ vi.mock('@/hooks/usePhotoMetrics', () => ({
   usePhotoMetrics: vi.fn(),
 }))
 
-// ClusterView has its own dedicated test suite (ClusterView.test.tsx). Here
-// it's mocked to a distinctive placeholder so PhotoUploadPage's tests can
-// assert *that* it's rendered (or not) in the right view mode, without
-// depending on its internal clustering/rendering details. The removePhotos
-// prop it's given is captured so a test can invoke it directly, the same
-// way capturedOnDragEnd captures dnd-kit's callback below -- this is what
-// lets a test prove PhotoUploadPage wraps the raw removePhotos with its own
-// object-URL release + selection cleanup before handing it to ClusterView.
-let capturedClusterViewRemovePhotos: ((ids: string[]) => void) | null = null
-
-vi.mock('./ClusterView', () => ({
-  default: ({ removePhotos }: { removePhotos: (ids: string[]) => void }) => {
-    capturedClusterViewRemovePhotos = removePhotos
-    return <div data-testid="cluster-view" />
-  },
-}))
-
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
@@ -98,11 +81,32 @@ function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
 }
 
+// Hash-fixture helpers for U3's within-cluster/cross-block drag tests below
+// -- same technique as components/PhotoGrid.test.tsx and
+// hooks/useClusteredPhotos.test.ts: hashes built from explicit "on" bit
+// positions so cosine distances between fixtures are exactly predictable.
+const HASH_TOTAL_BITS = 128
+
+function range(start: number, end: number): number[] {
+  const out: number[] = []
+  for (let i = start; i <= end; i++) out.push(i)
+  return out
+}
+
+function hashFromPositions(positions: number[]): string {
+  const bits = new Array(HASH_TOTAL_BITS).fill(0)
+  for (const position of positions) bits[position] = 1
+  let hex = ''
+  for (let i = 0; i < bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16)
+  }
+  return hex
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
-  capturedClusterViewRemovePhotos = null
   mockUseObjectUrls.mockReturnValue({
     getObjectUrl: (file: File) => `blob:${file.name}`,
     releaseObjectUrl: vi.fn(),
@@ -327,6 +331,98 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
 
     const overlay = document.querySelector('[data-testid="drag-overlay"]')
     expect(overlay?.textContent).toContain('a.jpg')
+  })
+
+  // U3: PhotoGrid now spans the whole chronological sequence -- cluster
+  // sections and singleton runs -- in one DndContext/SortableContext
+  // (KTD2). `handleDragEnd` itself needs no changes (it only ever resolves
+  // from/to via `photos.findIndex`), but these scenarios prove that holds
+  // once real clustering is in the picture, using the real (unmocked)
+  // useClusteredPhotos pipeline via PhotoGrid -- only dnd-kit itself is
+  // mocked here, same as the rest of this describe block.
+  describe('across a real cluster (KTD2/KTD3)', () => {
+    // solo1, then a 2-member cluster (m1, m2), then solo2 -- passed
+    // pre-sorted chronologically, exactly as hooks/usePhotos.ts would
+    // produce. m1/m2 share an identical hash so they cluster at the 0%
+    // default threshold.
+    const solo1 = makeEntry('solo1.jpg', 0)
+    const m1 = makeEntry('m1.jpg', 1)
+    const m2 = makeEntry('m2.jpg', 2)
+    const solo2 = makeEntry('solo2.jpg', 3)
+    const photos = [solo1, m1, m2, solo2]
+
+    function renderWithCluster(reorderPhotosMock: ReturnType<typeof vi.fn>) {
+      mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: reorderPhotosMock })
+      mockUsePhotoMetrics.mockReturnValue(
+        new Map([
+          [m1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+          [m2.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+        ])
+      )
+      render(<PhotoUploadPage />)
+      // Sanity: m1/m2 really did render as a bordered cluster section.
+      expect(document.querySelectorAll('section')).toHaveLength(1)
+    }
+
+    it('AE2: dragging a standalone photo to a position inside a cluster\'s visual span resolves the same from/to indices a flat reorder would', () => {
+      const reorderPhotosMock = vi.fn()
+      renderWithCluster(reorderPhotosMock)
+
+      // solo1 (index 0) dropped onto m2 (index 2, inside the cluster's span).
+      act(() => {
+        capturedOnDragEnd?.({ active: { id: photoId(solo1) }, over: { id: photoId(m2) } })
+      })
+
+      expect(reorderPhotosMock).toHaveBeenCalledWith(0, 2)
+      // reorderPhotos itself (hooks/usePhotos.ts, out of scope, confirmed
+      // correct) is what actually rewrites only the moved photo's
+      // timestamp using the existing offset convention -- this asserts
+      // handleDragEnd hands it the right, unmodified indices.
+    })
+
+    it('dragging a cluster member to a position outside any cluster resolves correctly, leaving the remaining member\'s own index untouched', () => {
+      const reorderPhotosMock = vi.fn()
+      renderWithCluster(reorderPhotosMock)
+
+      // m1 (index 1, inside the cluster) dropped onto solo2 (index 3, outside any cluster).
+      act(() => {
+        capturedOnDragEnd?.({ active: { id: photoId(m1) }, over: { id: photoId(solo2) } })
+      })
+
+      expect(reorderPhotosMock).toHaveBeenCalledWith(1, 3)
+      expect(reorderPhotosMock).toHaveBeenCalledOnce()
+    })
+
+    it('CRITICAL (KTD3): dragging one cluster member to swap with another member of the same cluster resolves the same from/to a purely chronological array-index computation would', () => {
+      const reorderPhotosMock = vi.fn()
+      renderWithCluster(reorderPhotosMock)
+
+      // m2 (index 2) dropped onto m1 (index 1) -- both inside the same
+      // cluster. A purely chronological computation over `photos` (which is
+      // already sorted that way) gives from=2, to=1 directly -- if cluster
+      // members were instead ordered by similarity (the old
+      // hierarchicalOrder, pre-KTD3), the id visually adjacent on screen
+      // could diverge from this, but handleDragEnd's photos.findIndex
+      // always resolves against the real array, which chronological member
+      // ordering (KTD3) keeps in agreement with what's rendered.
+      act(() => {
+        capturedOnDragEnd?.({ active: { id: photoId(m2) }, over: { id: photoId(m1) } })
+      })
+
+      expect(reorderPhotosMock).toHaveBeenCalledWith(2, 1)
+    })
+
+    it('DragOverlay renders correctly for a card that started inside a cluster section', () => {
+      const reorderPhotosMock = vi.fn()
+      renderWithCluster(reorderPhotosMock)
+
+      act(() => {
+        capturedOnDragStart?.({ active: { id: photoId(m1) } })
+      })
+
+      const overlay = document.querySelector('[data-testid="drag-overlay"]')
+      expect(overlay?.textContent).toContain('m1.jpg')
+    })
   })
 })
 
@@ -695,21 +791,29 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
     expect(screen.getByRole('button', { name: 'Group similar photos' })).toBeDefined()
   })
 
-  it('toggling to cluster view renders ClusterView instead of the flat grid; toggling back restores the flat grid', () => {
+  // U3: the DndContext-wrapped PhotoGrid now always renders (KTD2) -- the
+  // conditional that used to swap it out for a standalone ClusterView is
+  // gone. `viewMode` and this toggle button still exist (their full removal
+  // is U7's job, once selection/delete are unified in U4-U6), but clicking
+  // it no longer changes what grid renders here -- it's functionally inert
+  // with respect to the grid itself now.
+  it('the (now-inert) view-mode toggle never swaps out the grid: it stays visible and rendered before and after clicking', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
     render(<PhotoUploadPage />)
 
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('b.jpg')).toBeDefined()
+
     fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
 
-    expect(screen.getByTestId('cluster-view')).toBeDefined()
-    expect(screen.queryByAltText('a.jpg')).toBeNull()
-    expect(screen.queryByAltText('b.jpg')).toBeNull()
+    // Still there -- no separate cluster-only view took its place.
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('b.jpg')).toBeDefined()
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
 
-    expect(screen.queryByTestId('cluster-view')).toBeNull()
     expect(screen.getByAltText('a.jpg')).toBeDefined()
     expect(screen.getByAltText('b.jpg')).toBeDefined()
   })
@@ -742,97 +846,19 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
 
     render(<PhotoUploadPage />)
 
-    // Proves metrics computation is driven from PhotoUploadPage itself, not
-    // lazily from inside ClusterView (which isn't even mounted here, since
-    // viewMode defaults to 'timeline').
+    // Proves metrics computation is driven from PhotoUploadPage itself,
+    // unconditionally regardless of the (now functionally inert) viewMode.
     expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
-    expect(screen.queryByTestId('cluster-view')).toBeNull()
   })
 })
 
-describe('PhotoUploadPage — cluster-view delete cleanup', () => {
-  function makeEntry(name: string, index: number) {
-    const file = makeFile(name)
-    return {
-      id: `${name}-${index}`,
-      file,
-      filename: name,
-      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
-      uploadIndex: index,
-    }
-  }
-
-  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[], removePhotos = vi.fn()) {
-    return {
-      photos,
-      processFiles: vi.fn(),
-      addPhotos: vi.fn(),
-      reorderPhotos: vi.fn(),
-      updatePhotoName: vi.fn(),
-      updatePhotoTimestamp: vi.fn(),
-      batchUpdateNames: vi.fn(),
-      batchSetTimestamps: vi.fn(),
-      removePhotos,
-    }
-  }
-
-  // The removePhotos ClusterView is actually handed must release each
-  // deleted photo's object URL and prune it out of the page-level
-  // selectedIds -- neither of which the raw usePhotos removePhotos does on
-  // its own. This test drives that wrapper directly via the captured prop,
-  // the same way the drag-and-drop tests above drive dnd-kit's captured
-  // callbacks, since the ClusterView mock renders no interactive UI itself.
-  it("cluster view's delete wrapper releases object URLs and prunes them from page-level selectedIds", () => {
-    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
-    const removePhotosMock = vi.fn()
-    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
-    const releaseObjectUrlMock = vi.fn()
-    mockUseObjectUrls.mockReturnValue({
-      getObjectUrl: (file: File) => `blob:${file.name}`,
-      releaseObjectUrl: releaseObjectUrlMock,
-    })
-
-    render(<PhotoUploadPage />)
-
-    // Select a.jpg and b.jpg in timeline view first, mirroring a user who
-    // had an in-progress timeline selection before switching to cluster view.
-    fireEvent.click(screen.getByAltText('a.jpg'))
-    fireEvent.click(screen.getByAltText('b.jpg'))
-    expect(screen.getByText('2 photos selected')).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
-    expect(capturedClusterViewRemovePhotos).not.toBeNull()
-
-    // Cluster view deletes only b.jpg -- a subset of the pre-existing
-    // timeline selection.
-    act(() => {
-      capturedClusterViewRemovePhotos?.([photos[1].id])
-    })
-
-    expect(releaseObjectUrlMock).toHaveBeenCalledExactlyOnceWith(photos[1].file)
-    expect(removePhotosMock).toHaveBeenCalledExactlyOnceWith([photos[1].id])
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
-
-    // a.jpg's selection survived; b.jpg's was pruned rather than lingering
-    // as a stale id for a now-deleted photo.
-    expect(screen.getByText('1 photo selected')).toBeDefined()
-  })
-
-  it("cluster view's delete wrapper is a no-op on selectedIds when nothing was selected in timeline view", () => {
-    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
-    const removePhotosMock = vi.fn()
-    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
-
-    render(<PhotoUploadPage />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
-    act(() => {
-      capturedClusterViewRemovePhotos?.([photos[0].id])
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
-
-    expect(screen.queryByText(/photo(s)? selected/)).toBeNull()
-  })
-})
+// `components/ClusterView.tsx` is no longer part of PhotoUploadPage's render
+// path as of U3 (KTD2) -- the conditional that used to swap the grid out for
+// a standalone ClusterView, and hand it a `handleClusterDelete` wrapper, is
+// gone. `handleClusterDelete` itself is intentionally left in place in
+// PhotoUploadPage.tsx (unused, dead code) for now -- U6 is the unit that
+// formally deletes it once every delete flows through the unified
+// `handleBatchDelete` (KTD6). The dedicated tests that used to drive
+// `handleClusterDelete` via a captured ClusterView prop are removed here
+// rather than left permanently failing against a component that can no
+// longer mount.
