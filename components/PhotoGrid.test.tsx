@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
+import BatchEditPanel from './BatchEditPanel'
 
 afterEach(cleanup)
 
@@ -77,6 +79,51 @@ function makeMetrics(hash: string | null, width = 100, height = 100, size = 1000
 
 const getObjectUrl = (file: File) => `blob:${file.name}`
 const emptyMetrics = new Map<string, PhotoMetrics | undefined>()
+
+// Mirrors PhotoUploadPage's own selectedIds + toggleSelect (U4): a single
+// page-level Set, passed to PhotoGrid and reflected in BatchEditPanel's
+// count, exactly as the real app wires them. Used to prove selection is
+// unified end to end rather than merely forwarded prop-for-prop within
+// PhotoGrid in isolation.
+function SelectionHarness({
+  photos,
+  metrics,
+}: {
+  photos: PhotoEntry[]
+  metrics: Map<string, PhotoMetrics | undefined>
+}) {
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+
+  function toggleSelect(id: string, checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  return (
+    <>
+      <PhotoGrid
+        photos={photos}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        selectedIds={selectedIds}
+        onSelect={toggleSelect}
+      />
+      {selectedIds.size > 0 && (
+        <BatchEditPanel
+          selectedCount={selectedIds.size}
+          onBatchRename={vi.fn()}
+          onBatchSetTimestamp={vi.fn()}
+          onBatchDelete={vi.fn()}
+          onClearSelection={() => setSelectedIds(new Set())}
+        />
+      )}
+    </>
+  )
+}
 
 describe('PhotoGrid', () => {
   it('renders all photo filenames', () => {
@@ -351,5 +398,101 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
     // itself -- only the dedicated Compare button (outside that region)
     // sets it.
     expect(screen.getByText(/on any two photos to see their hashes and distance/)).toBeDefined()
+  })
+})
+
+describe('PhotoGrid — U4: unified selection and inline editing across cluster and standalone cards', () => {
+  // solo sits chronologically before a 2-member cluster (p1/p2, hash-identical
+  // so they group at the 0% default threshold).
+  const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+  const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+  const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+  const photos = [solo, p1, p2]
+  const metrics = new Map<string, PhotoMetrics | undefined>([
+    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+  ])
+
+  it('selecting a cluster member updates the same selectedIds a standalone selection would, visible in BatchEditPanel\'s count', () => {
+    render(<SelectionHarness photos={photos} metrics={metrics} />)
+
+    // No BatchEditPanel until something is selected.
+    expect(screen.queryByText(/selected/)).toBeNull()
+
+    // Select a cluster member (p1 sits inside the bordered section).
+    const section = document.querySelector('section') as HTMLElement
+    expect(within(section).getByAltText('p1.jpg')).toBeDefined()
+    fireEvent.click(within(section).getByAltText('p1.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    // Select a standalone photo too -- same panel, same counting mechanism.
+    fireEvent.click(screen.getByAltText('solo.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+  })
+
+  it('selecting photos both inside and outside a cluster in the same session produces one combined selection, not two separate ones', () => {
+    render(<SelectionHarness photos={photos} metrics={metrics} />)
+
+    fireEvent.click(screen.getByAltText('p1.jpg')) // cluster member
+    fireEvent.click(screen.getByAltText('solo.jpg')) // standalone
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    // Deselecting the cluster member leaves exactly the standalone photo
+    // selected -- if these were two independent selection mechanisms,
+    // toggling one would not affect a shared count like this.
+    fireEvent.click(screen.getByAltText('p1.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    const soloImg = screen.getByAltText('solo.jpg')
+    expect(soloImg.closest('div')?.className).toContain('ring-2')
+  })
+
+  it("editing a cluster member's name or timestamp inline updates it the same way a standalone photo's inline edit does", () => {
+    const onNameChange = vi.fn()
+    const onTimestampChange = vi.fn()
+
+    render(
+      <PhotoGrid
+        photos={photos}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        onNameChange={onNameChange}
+        onTimestampChange={onTimestampChange}
+      />
+    )
+
+    const section = document.querySelector('section') as HTMLElement
+    expect(within(section).getByText('p1.jpg')).toBeDefined()
+
+    // Rename the cluster member p1 inline.
+    fireEvent.click(within(section).getByText('p1.jpg'))
+    const clusterNameInput = within(section).getByDisplayValue('p1.jpg')
+    fireEvent.change(clusterNameInput, { target: { value: 'renamed-p1.jpg' } })
+    fireEvent.blur(clusterNameInput)
+    expect(onNameChange).toHaveBeenCalledWith(p1.id, 'renamed-p1.jpg')
+
+    // Rename the standalone solo photo the same way -- identical mechanism.
+    fireEvent.click(screen.getByText('solo.jpg'))
+    const soloNameInput = screen.getByDisplayValue('solo.jpg')
+    fireEvent.change(soloNameInput, { target: { value: 'renamed-solo.jpg' } })
+    fireEvent.blur(soloNameInput)
+    expect(onNameChange).toHaveBeenCalledWith(solo.id, 'renamed-solo.jpg')
+
+    // Edit the cluster member's timestamp inline too.
+    const clusterDateText = within(section).getByText(/Jan 1, 2025/)
+    fireEvent.click(clusterDateText)
+    const clusterTsInput = within(section).getByDisplayValue('2025-01-01T00:00')
+    fireEvent.change(clusterTsInput, { target: { value: '2025-01-01T12:30' } })
+    fireEvent.blur(clusterTsInput)
+    expect(onTimestampChange).toHaveBeenCalledWith(p1.id, new Date('2025-01-01T12:30:00Z'))
+
+    // ...and the standalone photo's timestamp, the same way.
+    const soloDateText = screen.getByText(/Dec 1, 2024/)
+    fireEvent.click(soloDateText)
+    const soloTsInput = screen.getByDisplayValue('2024-12-01T00:00')
+    fireEvent.change(soloTsInput, { target: { value: '2024-12-01T08:15' } })
+    fireEvent.blur(soloTsInput)
+    expect(onTimestampChange).toHaveBeenCalledWith(solo.id, new Date('2024-12-01T08:15:00Z'))
   })
 })
