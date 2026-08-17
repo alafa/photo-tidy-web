@@ -338,6 +338,7 @@ export default function PhotoUploadPage() {
               >
                 <PhotoGrid
                   photos={photos}
+                  metrics={metrics}
                   getObjectUrl={getObjectUrl}
                   onReorder={reorderPhotos}
                   onNameChange={updatePhotoName}

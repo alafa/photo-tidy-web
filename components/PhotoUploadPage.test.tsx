@@ -155,22 +155,28 @@ describe('PhotoUploadPage', () => {
       .mockReturnValue({
         photos: [
           {
+            id: 'a.jpg-0',
             file: makeFile('a.jpg'),
             filename: 'a.jpg',
             capturedAt: new Date('2024-01-01T10:00:00Z'),
             uploadIndex: 0,
+            source: 'local',
           },
           {
+            id: 'b.jpg-1',
             file: makeFile('b.jpg'),
             filename: 'b.jpg',
             capturedAt: new Date('2025-06-15T08:30:00Z'),
             uploadIndex: 1,
+            source: 'local',
           },
           {
+            id: 'c.jpg-2',
             file: makeFile('c.jpg'),
             filename: 'c.jpg',
             capturedAt: new Date('2023-03-20T16:45:00Z'),
             uploadIndex: 2,
+            source: 'local',
           },
         ],
         processFiles: processFilesMock,
