@@ -41,7 +41,7 @@ export function usePhotoMetrics(photos: PhotoEntry[]): Map<string, PhotoMetrics 
 
   // Tracks the last map actually committed via setMetricsById, so rebuild()
   // can skip the state update (and the re-render it would trigger in every
-  // consumer, e.g. ClusterView) when nothing observable changed — most
+  // consumer, e.g. PhotoGrid) when nothing observable changed — most
   // `photos` changes that aren't an add (reorder, rename, single-photo
   // timestamp edit) don't touch which File backs which id.
   const lastCommittedRef = useRef<Map<string, PhotoMetrics | undefined>>(metricsById)

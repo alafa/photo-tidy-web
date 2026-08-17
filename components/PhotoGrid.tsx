@@ -125,6 +125,31 @@ export default function PhotoGrid({
     })
   }, [])
 
+  // If either id currently held in `comparePair` has vanished from
+  // `photosById` (i.e. that photo was deleted, e.g. via
+  // `components/PhotoUploadPage.tsx`'s `handleBatchDelete`), reset the
+  // compare panel rather than let it keep rendering a stale reference --
+  // `photosById.get(id)?.filename` for a deleted id resolves to `undefined`,
+  // which would otherwise render literally as the string "undefined".
+  //
+  // Adjusted directly during render (React's documented pattern for
+  // "adjusting state when a prop changes") rather than in a useEffect --
+  // `photosById` is stable/memoized on `photos` (see
+  // `hooks/useClusteredPhotos.ts`), so a reference-equality check here
+  // reruns only when the underlying photo list actually changes, and this
+  // avoids the extra effect-triggered render a useEffect-based reset would
+  // cost.
+  const [prevPhotosById, setPrevPhotosById] = useState(photosById)
+  if (photosById !== prevPhotosById) {
+    setPrevPhotosById(photosById)
+    if (comparePair) {
+      const [a, b] = comparePair
+      if (!photosById.has(a) || (b !== null && !photosById.has(b))) {
+        setComparePair(null)
+      }
+    }
+  }
+
   // `metrics.get(id)?.hash` is exactly the value `useClusteredPhotos`' own
   // `hashInputs` stores per photo (`hash: metrics.get(photo.id)?.hash ?? null`),
   // so reading it straight from `metrics` here is an O(1) map lookup with the

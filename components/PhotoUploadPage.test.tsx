@@ -1055,3 +1055,80 @@ describe('PhotoUploadPage — unified grid (no view toggle)', () => {
     expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
   })
 })
+
+// Finding #2: distinctSelectedTimestamps (PhotoUploadPage.tsx) dedupes the
+// current selection's existing capturedAt values by exact millisecond and
+// feeds BatchEditPanel's quick-pick buttons. This exercises the real
+// derivation -- not a mock or a hand-duplicated copy of its logic -- through
+// the real (unmocked) useClusteredPhotos pipeline underneath PhotoGrid, with
+// a selection spanning two distinct real clusters.
+describe('PhotoUploadPage — cross-cluster batch quick-pick timestamps (finding #2)', () => {
+  function makeEntry(name: string, index: number, capturedAt: string) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(capturedAt),
+      uploadIndex: index,
+    }
+  }
+
+  // Mirrors BatchEditPanel's own quickPickFormatter (components/BatchEditPanel.tsx)
+  // exactly, purely to compute the expected button label text for assertions --
+  // production code is not touched here.
+  const quickPickFormatter = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'UTC',
+  })
+
+  it('quick-pick buttons show the union of distinct timestamps from both clusters, not either cluster alone', () => {
+    // Two distinct real clusters: m1a/m1b share one hash (cluster A), m2a/m2b
+    // share a different, non-matching hash (cluster B). Each member carries
+    // its own distinct capturedAt, so a selection spanning one member from
+    // each cluster spans two distinct timestamps.
+    const m1a = makeEntry('m1a.jpg', 0, '2025-01-01T10:00:00Z')
+    const m1b = makeEntry('m1b.jpg', 1, '2025-01-02T10:00:00Z')
+    const m2a = makeEntry('m2a.jpg', 2, '2025-02-01T10:00:00Z')
+    const m2b = makeEntry('m2b.jpg', 3, '2025-02-02T10:00:00Z')
+    const photos = [m1a, m1b, m2a, m2b]
+
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+    mockUsePhotoMetrics.mockReturnValue(
+      new Map([
+        [m1a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+        [m1b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
+        [m2a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
+        [m2b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
+      ])
+    )
+
+    render(<PhotoUploadPage />)
+
+    // Sanity: two distinct bordered cluster sections really did render.
+    expect(document.querySelectorAll('section')).toHaveLength(2)
+
+    // Select one member from cluster A and one member from cluster B --
+    // a selection spanning two distinct real clusters.
+    fireEvent.click(screen.getByAltText('m1a.jpg'))
+    fireEvent.click(screen.getByAltText('m2a.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    const expectedLabelA = `Use ${quickPickFormatter.format(m1a.capturedAt)}`
+    const expectedLabelB = `Use ${quickPickFormatter.format(m2a.capturedAt)}`
+
+    // Both clusters' distinct timestamps appear -- the union, not either
+    // cluster's alone.
+    expect(screen.getByRole('button', { name: expectedLabelA })).toBeDefined()
+    expect(screen.getByRole('button', { name: expectedLabelB })).toBeDefined()
+  })
+})

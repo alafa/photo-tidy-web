@@ -284,6 +284,109 @@ describe('PhotoGrid', () => {
     // A Compare button renders as a sibling on every card, clustered or not.
     expect(screen.getAllByRole('button', { name: 'Compare' })).toHaveLength(3)
   })
+
+  // Finding #3: handleCompareClick's 3-branch state machine (no prior
+  // selection -> pick first; one already picked -> pick second and
+  // complete the pair; a complete pair already exists -> reset to a fresh
+  // single pick) only had branch 1 covered previously. These two tests
+  // cover branches 2 and 3.
+  it('branch 2: clicking Compare on a second, different photo completes the pair and renders the computed Cosine distance', () => {
+    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+    const photos = [solo, p1, p2]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+
+    // Blocks render chronologically: solo (earliest) first, then the
+    // p1/p2 cluster section -- so Compare buttons in document order are
+    // [solo, p1, p2].
+    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
+    fireEvent.click(compareButtons[1]) // p1: first pick (branch 1)
+    fireEvent.click(compareButtons[2]) // p2: completes the pair (branch 2)
+
+    expect(screen.getByText(/A: p1\.jpg/)).toBeDefined()
+    expect(screen.getByText(/B: p2\.jpg/)).toBeDefined()
+    // p1/p2 share an identical hash, so cosine distance is exactly 0.
+    expect(screen.getByText(/Cosine distance: 0\.000/)).toBeDefined()
+  })
+
+  it('branch 3: clicking Compare on a third photo after a complete pair resets to a fresh single pick of that third photo', () => {
+    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+    const photos = [solo, p1, p2]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+
+    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
+    fireEvent.click(compareButtons[1]) // p1
+    fireEvent.click(compareButtons[2]) // p2 -- completes the pair
+    expect(screen.getByText(/Cosine distance:/)).toBeDefined()
+
+    fireEvent.click(compareButtons[0]) // solo -- a complete pair already exists (branch 3)
+
+    // Resets to a fresh single pick of solo -- not appended as a third
+    // element, and not still showing the old p1/p2 pair.
+    expect(screen.getByText(/A: solo\.jpg/)).toBeDefined()
+    expect(screen.queryByText(/B: /)).toBeNull()
+    expect(screen.getByText(/Click a second photo to compare\./)).toBeDefined()
+    expect(screen.queryByText(/Cosine distance:/)).toBeNull()
+  })
+
+  // Finding #4: comparePair must reset (rather than keep a stale id) when
+  // a compared photo is deleted -- otherwise `photosById.get(id)?.filename`
+  // resolves to `undefined` and the panel literally renders "undefined".
+  it('resets comparePair when one of the compared photos is removed from photos/metrics (e.g. deleted)', () => {
+    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+    const photos = [solo, p1, p2]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    ])
+
+    const { rerender } = render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />
+    )
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+
+    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
+    fireEvent.click(compareButtons[1]) // p1
+    fireEvent.click(compareButtons[2]) // p2 -- completes the pair
+    expect(screen.getByText(/Cosine distance:/)).toBeDefined()
+
+    // Simulate p2 being deleted: re-render with a shorter photos/metrics
+    // list that excludes it, mirroring how PhotoUploadPage's
+    // handleBatchDelete removes a photo from the `photos` prop.
+    const remainingPhotos = [solo, p1]
+    const remainingMetrics = new Map<string, PhotoMetrics | undefined>([
+      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    ])
+    rerender(
+      <PhotoGrid photos={remainingPhotos} metrics={remainingMetrics} getObjectUrl={getObjectUrl} />
+    )
+
+    expect(screen.queryByText(/undefined/)).toBeNull()
+    expect(
+      screen.getByText(/Click "Compare" on any two photos to see their hashes and distance\./)
+    ).toBeDefined()
+  })
 })
 
 describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)', () => {
