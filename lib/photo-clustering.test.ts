@@ -8,6 +8,7 @@ import {
   l2Normalize,
   type PhotoHashInput,
 } from './photo-clustering'
+import { range, makeHashFromPositions } from './test-helpers/hash-fixtures'
 
 // --- test helpers -------------------------------------------------------
 //
@@ -21,22 +22,7 @@ const HASH_BITS = 256
 const ZERO_HASH = '0'.repeat(64)
 const THRESHOLD = 0.2
 
-function hashFromPositions(positions: number[]): string {
-  const bits = new Array(HASH_BITS).fill(0)
-  for (const position of positions) bits[position] = 1
-  let hex = ''
-  for (let i = 0; i < bits.length; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16)
-  }
-  return hex
-}
-
-/** Inclusive range of integers, e.g. range(10, 12) -> [10, 11, 12]. */
-function range(start: number, end: number): number[] {
-  const out: number[] = []
-  for (let i = start; i <= end; i++) out.push(i)
-  return out
-}
+const hashFromPositions = makeHashFromPositions(HASH_BITS)
 
 function clusterOf(clusters: { id: string; members: string[] }[], id: string) {
   const found = clusters.find((c) => c.members.includes(id))

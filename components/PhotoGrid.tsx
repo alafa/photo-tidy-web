@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { SortableContext, rectSortingStrategy } from '@dnd-kit/sortable'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
@@ -31,8 +31,7 @@ type Props = {
 /**
  * Debug view: the cosine distance between every pair of members in a
  * cluster, so the user can verify whether the hashing/threshold is behaving
- * as expected rather than guessing from grouping outcomes alone. Ported
- * unchanged from the old `components/ClusterView.tsx`.
+ * as expected rather than guessing from grouping outcomes alone.
  */
 function PairwiseDistances({
   cluster,
@@ -83,10 +82,8 @@ export default function PhotoGrid({
   selectedIds,
   onSelect,
 }: Props) {
-  const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
-
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
-  const { renderBlocks, vectorsById, hashInputs } = useClusteredPhotos(photos, metrics, similarityPercent)
+  const { renderBlocks, vectorsById, photosById } = useClusteredPhotos(photos, metrics, similarityPercent)
 
   // --- Debug mode: verify hash/threshold behavior directly ----------------
   const [debugMode, setDebugMode] = useState(false)
@@ -94,91 +91,119 @@ export default function PhotoGrid({
   // order. Clicking a third photo resets to a fresh single selection.
   const [comparePair, setComparePair] = useState<[string, string | null] | null>(null)
 
-  function handleCompareClick(id: string) {
+  // Stable across renders (uses only the functional `setComparePair` form) so
+  // `renderCard` below — and in turn the memoized `blocks` derivation — don't
+  // treat "debug mode was just toggled" as the only thing invalidating them.
+  const handleCompareClick = useCallback((id: string) => {
     setComparePair((prev) => {
       if (!prev || prev[1] !== null) return [id, null]
       if (prev[0] === id) return prev
       return [prev[0], id]
     })
-  }
+  }, [])
 
-  const compareHashA = comparePair ? hashInputs.find((h) => h.id === comparePair[0])?.hash ?? null : null
-  const compareHashB = comparePair?.[1]
-    ? hashInputs.find((h) => h.id === comparePair[1])?.hash ?? null
-    : null
+  // `metrics.get(id)?.hash` is exactly the value `useClusteredPhotos`' own
+  // `hashInputs` stores per photo (`hash: metrics.get(photo.id)?.hash ?? null`),
+  // so reading it straight from `metrics` here is an O(1) map lookup with the
+  // identical in-flight/undecodable ("not yet resolved") semantics, instead of
+  // an O(n) scan over `hashInputs` for the same value.
+  const compareHashA = comparePair ? metrics.get(comparePair[0])?.hash ?? null : null
+  const compareHashB = comparePair?.[1] ? metrics.get(comparePair[1])?.hash ?? null : null
   const compareVectorA = comparePair ? vectorsById.get(comparePair[0]) ?? null : null
   const compareVectorB = comparePair?.[1] ? vectorsById.get(comparePair[1]) ?? null : null
   const compareDistance =
     compareVectorA && compareVectorB ? cosineDistance(compareVectorA, compareVectorB) : null
 
-  function renderCard(id: string) {
-    const entry = photosById.get(id)
-    if (!entry) return null
+  const renderCard = useCallback(
+    (id: string) => {
+      const entry = photosById.get(id)
+      if (!entry) return null
 
-    const card = onReorder ? (
-      <SortablePhotoCard
-        id={id}
-        entry={entry}
-        objectUrl={getObjectUrl(entry.file)}
-        onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
-        onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
-        onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
-        checked={selectedIds?.has(id)}
-      />
-    ) : (
-      <PhotoCard
-        entry={entry}
-        objectUrl={getObjectUrl(entry.file)}
-        onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
-        onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
-        onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
-        checked={selectedIds?.has(id)}
-      />
-    )
+      const card = onReorder ? (
+        <SortablePhotoCard
+          id={id}
+          entry={entry}
+          objectUrl={getObjectUrl(entry.file)}
+          onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
+          onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
+          onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
+          checked={selectedIds?.has(id)}
+        />
+      ) : (
+        <PhotoCard
+          entry={entry}
+          objectUrl={getObjectUrl(entry.file)}
+          onNameChange={onNameChange ? (name) => onNameChange(id, name) : undefined}
+          onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
+          onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
+          checked={selectedIds?.has(id)}
+        />
+      )
 
-    return (
-      <div key={id} className="flex flex-col gap-1">
-        {card}
-        {debugMode && (
-          <button
-            type="button"
-            onClick={() => handleCompareClick(id)}
-            className="text-[11px] text-zinc-500 dark:text-zinc-400 underline text-left"
-          >
-            Compare
-          </button>
-        )}
-      </div>
-    )
-  }
-
-  const blocks = renderBlocks.map((block) => {
-    if (block.type === 'singles') {
-      const blockKey = block.clusters.map((c) => c.members[0]).sort().join(',')
       return (
-        <div key={blockKey} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-          {block.clusters.map((cluster) => renderCard(cluster.members[0]))}
+        <div key={id} className="flex flex-col gap-1">
+          {card}
+          {debugMode && (
+            <button
+              type="button"
+              onClick={() => handleCompareClick(id)}
+              className="text-[11px] text-zinc-500 dark:text-zinc-400 underline text-left"
+            >
+              Compare
+            </button>
+          )}
         </div>
       )
-    }
+    },
+    [
+      photosById,
+      onReorder,
+      getObjectUrl,
+      onNameChange,
+      onTimestampChange,
+      onSelect,
+      selectedIds,
+      debugMode,
+      handleCompareClick,
+    ]
+  )
 
-    const cluster = block.cluster
-    const key = clusterKey(cluster)
-    return (
-      <section
-        key={key}
-        className="flex flex-col gap-3 rounded-xl border border-zinc-300 dark:border-zinc-600 bg-zinc-100/70 dark:bg-zinc-800/40 p-4"
-      >
-        <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-          {cluster.members.length} related photos
-        </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-          {cluster.members.map((id) => renderCard(id))}
-        </div>
-        {debugMode && <PairwiseDistances cluster={cluster} photosById={photosById} vectorsById={vectorsById} />}
-      </section>
-    )
-  })
+  // Memoized separately from `blocksContent` below: `renderBlocks` (from
+  // `useClusteredPhotos`) is itself already memoized and typically unchanged
+  // across renders triggered by unrelated state (e.g. `selectedIds`,
+  // `comparePair`) — without this, the block/key derivation below re-ran on
+  // every such render regardless.
+  const blocks = useMemo(
+    () =>
+      renderBlocks.map((block) => {
+        if (block.type === 'singles') {
+          const blockKey = block.clusters.map(clusterKey).sort().join(',')
+          return (
+            <div key={blockKey} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {block.clusters.map((cluster) => renderCard(cluster.members[0]))}
+            </div>
+          )
+        }
+
+        const cluster = block.cluster
+        const key = clusterKey(cluster)
+        return (
+          <section
+            key={key}
+            className="flex flex-col gap-3 rounded-xl border border-zinc-300 dark:border-zinc-600 bg-zinc-100/70 dark:bg-zinc-800/40 p-4"
+          >
+            <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+              {cluster.members.length} related photos
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {cluster.members.map((id) => renderCard(id))}
+            </div>
+            {debugMode && <PairwiseDistances cluster={cluster} photosById={photosById} vectorsById={vectorsById} />}
+          </section>
+        )
+      }),
+    [renderBlocks, renderCard, debugMode, photosById, vectorsById]
+  )
 
   const blocksContent = <div className="flex flex-col gap-8">{blocks}</div>
 

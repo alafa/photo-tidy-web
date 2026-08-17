@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { renderHook, cleanup, act } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
+import { range, makeHashFromPositions } from '@/lib/test-helpers/hash-fixtures'
 
 // Spies on the real buildDendrogram (all other exports pass through
 // unmocked) so the debounce test below can count how many times the
@@ -31,21 +32,7 @@ afterEach(cleanup)
 
 const HASH_TOTAL_BITS = 128
 
-function range(start: number, end: number): number[] {
-  const out: number[] = []
-  for (let i = start; i <= end; i++) out.push(i)
-  return out
-}
-
-function hashFromPositions(positions: number[]): string {
-  const bits = new Array(HASH_TOTAL_BITS).fill(0)
-  for (const position of positions) bits[position] = 1
-  let hex = ''
-  for (let i = 0; i < bits.length; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16)
-  }
-  return hex
-}
+const hashFromPositions = makeHashFromPositions(HASH_TOTAL_BITS)
 
 function makeEntry(id: string, name: string, capturedAt: string | null, uploadIndex: number): PhotoEntry {
   return {

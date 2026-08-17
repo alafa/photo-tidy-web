@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PhotoEntry } from '@/hooks/usePhotos'
+import { compareByCapturedAt, type PhotoEntry } from '@/hooks/usePhotos'
 import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import {
   buildDendrogram,
@@ -99,10 +99,18 @@ function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEnt
 }
 
 /**
- * Sorts a cluster's members chronologically by `capturedAt`, mirroring
- * `hooks/usePhotos.ts`'s `sortPhotos` null-last convention (a null
- * `capturedAt` sorts after every dated photo; ties, including all-null
- * ties, break by `uploadIndex`).
+ * Sorts a cluster's members chronologically by `capturedAt`, reusing
+ * `hooks/usePhotos.ts`'s `compareByCapturedAt` (a null `capturedAt` sorts
+ * after every dated photo; ties, including all-null ties, break by
+ * `uploadIndex`) so this hook can't silently drift from `sortPhotos`'s
+ * ordering rule.
+ *
+ * Every member id is guaranteed to resolve via `photosById`: `rawClusters`
+ * is built from `hashInputs`, which is itself `photos.map(...)`, so a
+ * cluster member can never reference an id absent from `photos`
+ * (`cutDendrogram` never invents ids — see `lib/photo-clustering.test.ts`'s
+ * "ignores a merge referencing an id no longer in the current photo set"
+ * guard).
  *
  * Deliberately NOT `hierarchicalOrder` (`lib/photo-clustering.ts`'s
  * similarity-based ordering, which the old `ClusterView.tsx` used) — once
@@ -114,19 +122,7 @@ function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEnt
  * array order identical everywhere, inside a cluster included.
  */
 function sortMembersChronologically(members: string[], photosById: Map<string, PhotoEntry>): string[] {
-  return [...members].sort((idA, idB) => {
-    const a = photosById.get(idA)
-    const b = photosById.get(idB)
-    const capturedAtA = a?.capturedAt ?? null
-    const capturedAtB = b?.capturedAt ?? null
-    if (capturedAtA === null && capturedAtB === null) {
-      return (a?.uploadIndex ?? 0) - (b?.uploadIndex ?? 0)
-    }
-    if (capturedAtA === null) return 1
-    if (capturedAtB === null) return -1
-    const diff = capturedAtA.getTime() - capturedAtB.getTime()
-    return diff !== 0 ? diff : (a?.uploadIndex ?? 0) - (b?.uploadIndex ?? 0)
-  })
+  return [...members].sort((idA, idB) => compareByCapturedAt(photosById.get(idA)!, photosById.get(idB)!))
 }
 
 /**
@@ -145,6 +141,8 @@ export interface UseClusteredPhotosResult {
   vectorsById: Map<string, number[]>
   /** Per-photo hash (or `null` for in-flight/undecodable) fed into the clustering pipeline — reused by debug mode's hash display. */
   hashInputs: PhotoHashInput[]
+  /** `photos` indexed by id — built once here and reused by consumers (e.g. `components/PhotoGrid.tsx`) instead of each rebuilding its own copy. */
+  photosById: Map<string, PhotoEntry>
 }
 
 /**
@@ -248,5 +246,5 @@ export function useClusteredPhotos(
     return blocks
   }, [displayClusters])
 
-  return { renderBlocks, vectorsById, hashInputs }
+  return { renderBlocks, vectorsById, hashInputs, photosById }
 }

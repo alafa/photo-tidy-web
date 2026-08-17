@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
+import { range, makeHashFromPositions } from '@/lib/test-helpers/hash-fixtures'
 import PhotoUploadPage from './PhotoUploadPage'
 
 afterEach(cleanup)
 
-// Mock hooks so we can control EXIF output
-vi.mock('@/hooks/usePhotos', () => ({
-  usePhotos: vi.fn(),
-}))
+// Mock hooks so we can control EXIF output. Only `usePhotos` itself is
+// mocked -- `compareByCapturedAt` is kept real (via importOriginal) since
+// `hooks/useClusteredPhotos.ts` imports it from this module for chronological
+// member ordering, exercised here through the real (unmocked)
+// useClusteredPhotos pipeline underneath PhotoGrid.
+vi.mock('@/hooks/usePhotos', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/usePhotos')>()
+  return { ...actual, usePhotos: vi.fn() }
+})
 vi.mock('@/hooks/useObjectUrls', () => ({
   useObjectUrls: vi.fn(),
 }))
@@ -87,21 +93,7 @@ function makeFile(name: string): File {
 // positions so cosine distances between fixtures are exactly predictable.
 const HASH_TOTAL_BITS = 128
 
-function range(start: number, end: number): number[] {
-  const out: number[] = []
-  for (let i = start; i <= end; i++) out.push(i)
-  return out
-}
-
-function hashFromPositions(positions: number[]): string {
-  const bits = new Array(HASH_TOTAL_BITS).fill(0)
-  for (const position of positions) bits[position] = 1
-  let hex = ''
-  for (let i = 0; i < bits.length; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4).join(''), 2).toString(16)
-  }
-  return hex
-}
+const hashFromPositions = makeHashFromPositions(HASH_TOTAL_BITS)
 
 beforeEach(() => {
   vi.clearAllMocks()

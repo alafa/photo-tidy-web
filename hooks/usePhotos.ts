@@ -13,16 +13,25 @@ export type PhotoEntry = {
   source: 'local' | 'google-photos'
 }
 
+/**
+ * Chronological comparator: null `capturedAt` sorts last (ties among nulls,
+ * and any tie among equal timestamps, break by `uploadIndex`). Exported so
+ * other consumers that need this exact same ordering rule applied to
+ * `PhotoEntry` values (e.g. `hooks/useClusteredPhotos.ts`'s within-cluster
+ * member ordering) can reuse it instead of re-implementing it.
+ */
+export function compareByCapturedAt(a: PhotoEntry, b: PhotoEntry): number {
+  if (a.capturedAt === null && b.capturedAt === null) {
+    return a.uploadIndex - b.uploadIndex
+  }
+  if (a.capturedAt === null) return 1
+  if (b.capturedAt === null) return -1
+  const diff = a.capturedAt.getTime() - b.capturedAt.getTime()
+  return diff !== 0 ? diff : a.uploadIndex - b.uploadIndex
+}
+
 function sortPhotos(photos: PhotoEntry[]): PhotoEntry[] {
-  return [...photos].sort((a, b) => {
-    if (a.capturedAt === null && b.capturedAt === null) {
-      return a.uploadIndex - b.uploadIndex
-    }
-    if (a.capturedAt === null) return 1
-    if (b.capturedAt === null) return -1
-    const diff = a.capturedAt.getTime() - b.capturedAt.getTime()
-    return diff !== 0 ? diff : a.uploadIndex - b.uploadIndex
-  })
+  return [...photos].sort(compareByCapturedAt)
 }
 
 /**
