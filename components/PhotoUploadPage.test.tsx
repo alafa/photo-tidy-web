@@ -836,7 +836,14 @@ describe('PhotoUploadPage — batch delete', () => {
   })
 })
 
-describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
+// U7: the timeline/cluster-view toggle is gone entirely -- one grid renders
+// whenever photos are loaded, with no "Group similar photos" / "Back to
+// timeline view" control anywhere, and the page-level selection controls
+// ("Select all" / "Clear selection") render unconditionally rather than
+// being gated on a now-removed `viewMode`. `components/ClusterView.tsx`
+// itself was deleted in this unit -- everything it did was already ported
+// into `PhotoGrid`/`useClusteredPhotos` (U1-U6).
+describe('PhotoUploadPage — unified grid (no view toggle)', () => {
   function makeEntry(name: string, index: number) {
     const file = makeFile(name)
     return {
@@ -862,89 +869,42 @@ describe('PhotoUploadPage — view mode toggle (cluster view)', () => {
     }
   }
 
-  it('default view mode (timeline) renders the flat grid, not ClusterView, and the toggle is present', () => {
+  it('renders the grid directly with no view-mode toggle button anywhere', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
     render(<PhotoUploadPage />)
 
-    // Regression check: flat grid renders by default...
     expect(screen.getByAltText('a.jpg')).toBeDefined()
     expect(screen.getByAltText('b.jpg')).toBeDefined()
-    expect(screen.queryByTestId('cluster-view')).toBeNull()
-    // ...and the toggle to switch into grouped view is present.
-    expect(screen.getByRole('button', { name: 'Group similar photos' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Group similar photos' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Back to timeline view' })).toBeNull()
   })
 
-  // U3: the DndContext-wrapped PhotoGrid now always renders (KTD2) -- the
-  // conditional that used to swap it out for a standalone ClusterView is
-  // gone. `viewMode` and this toggle button still exist (their full removal
-  // is U7's job, once selection/delete are unified in U4-U6), but clicking
-  // it no longer changes what grid renders here -- it's functionally inert
-  // with respect to the grid itself now.
-  it('the (now-inert) view-mode toggle never swaps out the grid: it stays visible and rendered before and after clicking', () => {
+  it('"Select all" and "Clear selection" render unconditionally, regardless of any cluster grouping', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
     render(<PhotoUploadPage />)
 
-    expect(screen.getByAltText('a.jpg')).toBeDefined()
-    expect(screen.getByAltText('b.jpg')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Select all' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Clear selection' })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
-
-    // Still there -- no separate cluster-only view took its place.
-    expect(screen.getByAltText('a.jpg')).toBeDefined()
-    expect(screen.getByAltText('b.jpg')).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
-
-    expect(screen.getByAltText('a.jpg')).toBeDefined()
-    expect(screen.getByAltText('b.jpg')).toBeDefined()
-  })
-
-  it('hides page-level selection controls and BatchEditPanel while in cluster view, and restores them on toggling back', () => {
-    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
-    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
-
-    render(<PhotoUploadPage />)
-
-    // Select a photo so BatchEditPanel would normally show.
     fireEvent.click(screen.getByAltText('a.jpg'))
     expect(screen.getByText('1 photo selected')).toBeDefined()
     expect(screen.getByRole('button', { name: 'Select all' })).toBeDefined()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Group similar photos' }))
-
-    expect(screen.queryByRole('button', { name: 'Select all' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Clear selection' })).toBeNull()
-    expect(screen.queryByText('1 photo selected')).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to timeline view' }))
-
-    expect(screen.getByRole('button', { name: 'Select all' })).toBeDefined()
+    // Once selected, both the page-level "Clear selection" link and
+    // BatchEditPanel's own "Clear selection" button render (unrelated to
+    // this unit) -- assert at least one exists rather than exactly one.
+    expect(screen.getAllByRole('button', { name: 'Clear selection' }).length).toBeGreaterThan(0)
   })
 
-  it('calls usePhotoMetrics unconditionally with the current photos, even while viewMode is timeline', () => {
+  it('calls usePhotoMetrics unconditionally with the current photos', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
     render(<PhotoUploadPage />)
 
-    // Proves metrics computation is driven from PhotoUploadPage itself,
-    // unconditionally regardless of the (now functionally inert) viewMode.
     expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
   })
 })
-
-// `components/ClusterView.tsx` is no longer part of PhotoUploadPage's render
-// path as of U3 (KTD2) -- the conditional that used to swap the grid out for
-// a standalone ClusterView, and hand it a `handleClusterDelete` wrapper, is
-// gone. The dedicated tests that used to drive `handleClusterDelete` via a
-// captured ClusterView prop were removed here (in U3) rather than left
-// permanently failing against a component that can no longer mount.
-// `handleClusterDelete` itself was formally deleted from PhotoUploadPage.tsx
-// in U6, now that every delete -- cluster-originated or not -- flows through
-// the unified `handleBatchDelete` (KTD6); see the "U6:" tests in the
-// "PhotoUploadPage — batch delete" describe block above for coverage of a
-// delete involving a would-be cluster member.

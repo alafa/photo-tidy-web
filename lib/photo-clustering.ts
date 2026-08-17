@@ -246,7 +246,7 @@ export function cutDendrogram(photos: PhotoHashInput[], merges: DendrogramMerge[
   for (const merge of merges) {
     // Guards against a caller memoizing `merges` separately from `photos`
     // (e.g. debouncing the expensive dendrogram build while cutting stays
-    // live on every tick, per components/ClusterView.tsx): a merge built
+    // live on every tick, per hooks/useClusteredPhotos.ts): a merge built
     // from an earlier, larger photo set can reference an id that's since
     // been deleted from the batch. Unioning against an id `uf` never added
     // would corrupt the union-find (its "root" resolves to `undefined`,
@@ -286,91 +286,4 @@ export function cutDendrogram(photos: PhotoHashInput[], merges: DendrogramMerge[
  */
 export function clusterPhotos(photos: PhotoHashInput[], threshold: number): Cluster[] {
   return cutDendrogram(photos, buildDendrogram(photos), threshold)
-}
-
-/**
- * Orders a set of items by visual similarity via complete-linkage
- * hierarchical clustering's `leaves_list` convention: build the full
- * dendrogram (no threshold — merge all the way to one cluster), then
- * recursively read leaves left-to-right off the resulting binary merge
- * tree. Similar items end up adjacent as far as the tree topology allows.
- * Used to order photos within a cluster by their own hash similarity, so
- * the most similar members sit adjacent.
- */
-export function hierarchicalOrder(items: Array<{ id: string; vector: number[] }>): string[] {
-  if (items.length <= 1) return items.map((item) => item.id)
-
-  // Re-run without the early MAX_DISTANCE_THRESHOLD stop: ordering needs a
-  // definite position for every item regardless of how far apart the most
-  // dissimilar pair is, unlike clustering (which only cares about merges a
-  // real threshold could select).
-  const n = items.length
-  const distance = new Map<string, number>()
-  function key(i: number, j: number): string {
-    return i < j ? `${i}-${j}` : `${j}-${i}`
-  }
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      distance.set(key(i, j), cosineDistance(items[i].vector, items[j].vector))
-    }
-  }
-
-  // children[index] holds the two sub-node indices a merge combined, so the
-  // final tree can be walked to produce a leaf order. Leaves (indices
-  // 0..n-1) have no children.
-  const children = new Map<number, [number, number]>()
-  const active = new Set<number>(items.map((_, i) => i))
-  let nextIndex = n
-
-  while (active.size > 1) {
-    let bestI = -1
-    let bestJ = -1
-    let bestDistance = Infinity
-    for (const i of active) {
-      for (const j of active) {
-        if (j <= i) continue
-        const d = distance.get(key(i, j))!
-        if (d < bestDistance) {
-          bestDistance = d
-          bestI = i
-          bestJ = j
-        }
-      }
-    }
-
-    const newIndex = nextIndex++
-    children.set(newIndex, [bestI, bestJ])
-    active.delete(bestI)
-    active.delete(bestJ)
-    for (const x of active) {
-      const merged = Math.max(distance.get(key(bestI, x))!, distance.get(key(bestJ, x))!)
-      distance.set(key(newIndex, x), merged)
-    }
-    active.add(newIndex)
-  }
-
-  const root = nextIndex - 1
-  const order: number[] = []
-  function visit(index: number): void {
-    const pair = children.get(index)
-    if (!pair) {
-      order.push(index)
-      return
-    }
-    // Deterministic left/right choice (smaller leaf-index subtree first) —
-    // any consistent rule keeps a given input reproducibly ordered; what
-    // matters for the product is that each subtree's leaves stay
-    // contiguous, which holds regardless of which side is "first".
-    const [left, right] = pair
-    if (left < right) {
-      visit(left)
-      visit(right)
-    } else {
-      visit(right)
-      visit(left)
-    }
-  }
-  visit(root)
-
-  return order.map((index) => items[index].id)
 }

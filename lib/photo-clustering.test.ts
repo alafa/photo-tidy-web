@@ -5,7 +5,6 @@ import {
   cosineDistance,
   cutDendrogram,
   hashToVector,
-  hierarchicalOrder,
   l2Normalize,
   type PhotoHashInput,
 } from './photo-clustering'
@@ -86,29 +85,6 @@ describe('cosineDistance', () => {
 
   it('treats a zero vector vs. a non-zero vector as maximally distant (distance 1), never NaN', () => {
     expect(cosineDistance([0, 0, 0], [1, 0, 0])).toBe(1)
-  })
-})
-
-describe('hierarchicalOrder', () => {
-  it('returns an empty array for empty input', () => {
-    expect(hierarchicalOrder([])).toEqual([])
-  })
-
-  it('returns the single id unchanged for one item', () => {
-    expect(hierarchicalOrder([{ id: 'only', vector: [1, 0] }])).toEqual(['only'])
-  })
-
-  it('places two near-identical items adjacent to a distant outlier', () => {
-    const order = hierarchicalOrder([
-      { id: 'a', vector: [1, 1, 1, 1, 0, 0, 0, 0] },
-      { id: 'outlier', vector: [0, 0, 0, 0, 1, 1, 1, 1] }, // orthogonal to a and b
-      { id: 'b', vector: [1, 1, 1, 0, 0, 0, 0, 0] }, // near-identical to a
-    ])
-    expect(order).toHaveLength(3)
-    const aIndex = order.indexOf('a')
-    const bIndex = order.indexOf('b')
-    expect(Math.abs(aIndex - bIndex)).toBe(1) // a and b are adjacent
-    expect(order.indexOf('outlier')).not.toBe((aIndex + bIndex) / 2) // outlier isn't wedged between them
   })
 })
 
@@ -257,7 +233,7 @@ describe('buildDendrogram + cutDendrogram', () => {
   })
 
   it('ignores a merge referencing an id no longer in the current photo set, rather than corrupting the union-find', () => {
-    // Simulates a caller (ClusterView) memoizing `merges` from an earlier,
+    // Simulates a caller (useClusteredPhotos) memoizing `merges` from an earlier,
     // larger batch than the `photos` it cuts against now -- e.g. debouncing
     // the expensive build step separately from the cheap live cut, where a
     // photo present when `merges` was built has since been deleted. Before

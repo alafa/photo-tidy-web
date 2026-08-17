@@ -103,6 +103,17 @@ function SelectionHarness({
     })
   }
 
+  // Same dedup-by-ms-value, sort-ascending rule PhotoUploadPage itself uses
+  // (R8/KTD7) to derive BatchEditPanel's distinctTimestamps prop.
+  const seenTimestamps = new Map<number, Date>()
+  for (const photo of photos) {
+    if (!selectedIds.has(photo.id)) continue
+    const capturedAt = photo.capturedAt
+    if (capturedAt === null) continue
+    if (!seenTimestamps.has(capturedAt.getTime())) seenTimestamps.set(capturedAt.getTime(), capturedAt)
+  }
+  const distinctTimestamps = [...seenTimestamps.values()].sort((a, b) => a.getTime() - b.getTime())
+
   return (
     <>
       <PhotoGrid
@@ -115,6 +126,7 @@ function SelectionHarness({
       {selectedIds.size > 0 && (
         <BatchEditPanel
           selectedCount={selectedIds.size}
+          distinctTimestamps={distinctTimestamps}
           onBatchRename={vi.fn()}
           onBatchSetTimestamp={vi.fn()}
           onBatchDelete={vi.fn()}

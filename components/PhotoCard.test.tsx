@@ -1,9 +1,8 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 
 afterEach(cleanup)
 import PhotoCard from './PhotoCard'
-import PhotoGrid from './PhotoGrid'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 
 function makeEntry(overrides: Partial<PhotoEntry> = {}): PhotoEntry {
@@ -81,27 +80,13 @@ describe('PhotoCard', () => {
   })
 })
 
-describe('PhotoGrid', () => {
-  it('renders the correct number of PhotoCard elements', () => {
-    const photos = [
-      makeEntry({ filename: 'a.jpg', uploadIndex: 0 }),
-      makeEntry({ filename: 'b.jpg', uploadIndex: 1 }),
-      makeEntry({ filename: 'c.jpg', uploadIndex: 2 }),
-    ]
-    const getObjectUrl = vi.fn((file: File) => `blob:${file.name}`)
-
-    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
-
-    expect(screen.getByText('a.jpg')).toBeDefined()
-    expect(screen.getByText('b.jpg')).toBeDefined()
-    expect(screen.getByText('c.jpg')).toBeDefined()
-  })
-
-  it('renders empty grid without errors when photos array is empty', () => {
-    const { container } = render(
-      <PhotoGrid photos={[]} getObjectUrl={vi.fn()} />
-    )
-    const grid = container.firstChild as HTMLElement
-    expect(grid.children.length).toBe(0)
-  })
-})
+// A `describe('PhotoGrid', ...)` block used to live here, exercising
+// PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
+// only, no `metrics`). PhotoGrid's contract changed when clustering/debug
+// mode/the similarity slider were absorbed into it (see
+// hooks/useClusteredPhotos.ts, components/PhotoGrid.tsx) — `metrics` is now
+// required, and the component always renders slider chrome even for an empty
+// photos array, so that block's "empty grid has zero children" assertion no
+// longer held. Removed as dead/superseded rather than patched: PhotoGrid's
+// own rendering behavior (card count, empty state via its slider-only
+// output, etc.) is now covered directly in components/PhotoGrid.test.tsx.

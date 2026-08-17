@@ -44,17 +44,14 @@ export default function PhotoUploadPage() {
     cancelImport,
   } = useGooglePhotosPicker({ accessToken, addPhotos })
   const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
-  // Metrics must start computing as soon as photos are added regardless of
-  // which view mode is active (KTD12) — called here, unconditionally,
-  // rather than inside ClusterView (which only mounts once the user toggles
-  // to cluster view).
+  // Metrics must start computing as soon as photos are added (KTD12) —
+  // called here, unconditionally, and passed down to PhotoGrid.
   const metrics = usePhotoMetrics(photos)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
   const [namePromptValue, setNamePromptValue] = useState('')
-  const [viewMode, setViewMode] = useState<'timeline' | 'clusters'>('timeline')
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -125,14 +122,12 @@ export default function PhotoUploadPage() {
   }
 
   // R8/KTD7: the current selection's distinct existing capturedAt values,
-  // deduped by exact millisecond value and sorted ascending — the same rule
-  // ClusterTimestampEditor (components/ClusterView.tsx) used, generalized
-  // here to the whole selection rather than one cluster's members, so it
-  // covers a selection spanning multiple clusters or plain timeline photos
-  // alike (AE3). Recomputed from `photos`/`selectedIds` on every render
-  // rather than memoized — this app's photo counts don't warrant it, and
-  // every other selection-derived value here (activeEntry, etc.) does the
-  // same.
+  // deduped by exact millisecond value and sorted ascending — generalized
+  // to the whole selection rather than one cluster's members, so it covers
+  // a selection spanning multiple clusters or plain timeline photos alike
+  // (AE3). Recomputed from `photos`/`selectedIds` on every render rather
+  // than memoized — this app's photo counts don't warrant it, and every
+  // other selection-derived value here (activeEntry, etc.) does the same.
   const seenTimestamps = new Map<number, Date>()
   for (const photo of photos) {
     if (!selectedIds.has(photo.id)) continue
@@ -259,38 +254,28 @@ export default function PhotoUploadPage() {
 
         {photos.length > 0 && (
           <>
-            {/* View mode toggle + selection controls */}
+            {/* Selection controls */}
             <div className="flex items-center gap-3 mb-4">
               <button
-                onClick={() => setViewMode((prev) => (prev === 'timeline' ? 'clusters' : 'timeline'))}
+                onClick={selectAll}
                 className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
               >
-                {viewMode === 'timeline' ? 'Group similar photos' : 'Back to timeline view'}
+                Select all
               </button>
-              {viewMode === 'timeline' && (
-                <>
-                  <button
-                    onClick={selectAll}
-                    className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
-                  >
-                    Select all
-                  </button>
-                  {selectedIds.size > 0 && (
-                    <button
-                      onClick={clearSelection}
-                      className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
-                    >
-                      Clear selection
-                    </button>
-                  )}
-                </>
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={clearSelection}
+                  className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
+                >
+                  Clear selection
+                </button>
               )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
             </div>
 
-            {/* Upload panel — unrelated to view mode, stays visible in both */}
+            {/* Upload panel */}
             {isSignedIn && (
               <GooglePhotosUploadPanel
                 photos={photos}
@@ -304,8 +289,8 @@ export default function PhotoUploadPage() {
               />
             )}
 
-            {/* Batch panel — hidden in cluster view; cluster-scoped selection (U4/U5) replaces it there */}
-            {viewMode === 'timeline' && selectedIds.size > 0 && (
+            {/* Batch panel */}
+            {selectedIds.size > 0 && (
               <BatchEditPanel
                 selectedCount={selectedIds.size}
                 distinctTimestamps={distinctSelectedTimestamps}
@@ -316,12 +301,8 @@ export default function PhotoUploadPage() {
               />
             )}
 
-            {/* U3: the unified grid always renders here, drag-wired end to
-                end (KTD2) — the conditional that used to swap this out for
-                a standalone, non-draggable ClusterView is gone. `viewMode`
-                and its toggle button (above) still exist but no longer
-                affect what renders here; removing them entirely is U7's
-                job once selection/delete are also unified (U4-U6). */}
+            {/* The unified grid always renders here, drag-wired end to end
+                (KTD2) — one grid, no separate cluster view or toggle. */}
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
