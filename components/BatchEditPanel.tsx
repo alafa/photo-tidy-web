@@ -3,8 +3,33 @@
 import { useState } from 'react'
 import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 
+// R8/KTD7: bounded quick-pick button count so a large cross-grid selection
+// can't flood the panel — matches this app's other small fixed UI limits.
+const MAX_QUICK_PICK_TIMESTAMPS = 8
+
+/** "8/12/2025, 3:04 PM"-style label for a quick-pick timestamp button. Uses
+ * `timeZone: 'UTC'` because `capturedAt` clock times are stored as UTC values
+ * (see `PhotoCard.tsx`'s `dateFormatter`), so this displays them as-is. */
+const quickPickFormatter = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+  timeZone: 'UTC',
+})
+
 type Props = {
   selectedCount: number
+  /**
+   * The current selection's distinct existing `capturedAt` values (deduped
+   * by exact millisecond value, sorted ascending) — the union across every
+   * selected photo regardless of whether the selection is one cluster,
+   * spans multiple clusters, or is plain timeline photos (KTD7, AE3). Empty
+   * when no selected photo carries a timestamp yet.
+   */
+  distinctTimestamps: Date[]
   onBatchRename: (baseName: string) => void
   onBatchSetTimestamp: (anchor: Date) => void
   onBatchDelete: () => void
@@ -13,6 +38,7 @@ type Props = {
 
 export default function BatchEditPanel({
   selectedCount,
+  distinctTimestamps,
   onBatchRename,
   onBatchSetTimestamp,
   onBatchDelete,
@@ -22,6 +48,21 @@ export default function BatchEditPanel({
   const [tsValue, setTsValue] = useState('')
   const [renameApplied, setRenameApplied] = useState(false)
   const [tsApplied, setTsApplied] = useState(false)
+
+  // Cap the quick-pick row at MAX_QUICK_PICK_TIMESTAMPS, keeping the most
+  // recent ones (distinctTimestamps arrives sorted ascending, so that's the
+  // tail) and reporting how many older ones were omitted.
+  const visibleTimestamps =
+    distinctTimestamps.length > MAX_QUICK_PICK_TIMESTAMPS
+      ? distinctTimestamps.slice(-MAX_QUICK_PICK_TIMESTAMPS)
+      : distinctTimestamps
+  const omittedTimestampCount = distinctTimestamps.length - visibleTimestamps.length
+
+  function handleQuickPick(date: Date) {
+    onBatchSetTimestamp(date)
+    setTsApplied(true)
+    setTimeout(() => setTsApplied(false), 1500)
+  }
 
   function handleRename() {
     if (!baseName.trim()) return
@@ -90,6 +131,25 @@ export default function BatchEditPanel({
           <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase tracking-wide">
             Set start timestamp
           </label>
+          {visibleTimestamps.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              {visibleTimestamps.map((date) => (
+                <button
+                  key={date.getTime()}
+                  type="button"
+                  onClick={() => handleQuickPick(date)}
+                  className="px-2.5 py-1 text-xs font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                >
+                  Use {quickPickFormatter.format(date)}
+                </button>
+              ))}
+              {omittedTimestampCount > 0 && (
+                <span className="text-xs text-zinc-400 dark:text-zinc-500">
+                  +{omittedTimestampCount} more
+                </span>
+              )}
+            </div>
+          )}
           <div className="flex gap-2">
             <input
               type="datetime-local"

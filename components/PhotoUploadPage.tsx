@@ -124,6 +124,26 @@ export default function PhotoUploadPage() {
     batchSetTimestamps(Array.from(selectedIds), anchor)
   }
 
+  // R8/KTD7: the current selection's distinct existing capturedAt values,
+  // deduped by exact millisecond value and sorted ascending — the same rule
+  // ClusterTimestampEditor (components/ClusterView.tsx) used, generalized
+  // here to the whole selection rather than one cluster's members, so it
+  // covers a selection spanning multiple clusters or plain timeline photos
+  // alike (AE3). Recomputed from `photos`/`selectedIds` on every render
+  // rather than memoized — this app's photo counts don't warrant it, and
+  // every other selection-derived value here (activeEntry, etc.) does the
+  // same.
+  const seenTimestamps = new Map<number, Date>()
+  for (const photo of photos) {
+    if (!selectedIds.has(photo.id)) continue
+    const capturedAt = photo.capturedAt
+    if (capturedAt === null) continue
+    if (!seenTimestamps.has(capturedAt.getTime())) seenTimestamps.set(capturedAt.getTime(), capturedAt)
+  }
+  const distinctSelectedTimestamps = [...seenTimestamps.values()].sort(
+    (a, b) => a.getTime() - b.getTime()
+  )
+
   function handleBatchDelete() {
     for (const photo of photos) {
       if (selectedIds.has(photo.id)) releaseObjectUrl(photo.file)
@@ -313,6 +333,7 @@ export default function PhotoUploadPage() {
             {viewMode === 'timeline' && selectedIds.size > 0 && (
               <BatchEditPanel
                 selectedCount={selectedIds.size}
+                distinctTimestamps={distinctSelectedTimestamps}
                 onBatchRename={handleBatchRename}
                 onBatchSetTimestamp={handleBatchSetTimestamp}
                 onBatchDelete={handleBatchDelete}
