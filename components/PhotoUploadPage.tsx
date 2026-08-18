@@ -252,7 +252,6 @@ export default function PhotoUploadPage() {
   )
 
   const handleDeletePhoto = useCallback((id: string) => handleBatchDelete([id]), [handleBatchDelete])
-  const handleZoomPhoto = useCallback((id: string) => setZoomedPhotoId(id), [])
   const handleCloseLightbox = useCallback(() => setZoomedPhotoId(null), [])
 
   function handleImportClick() {
@@ -273,7 +272,16 @@ export default function PhotoUploadPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <div className="max-w-6xl mx-auto px-4 py-10">
+      {/* Marked inert while the lightbox is open so its always-visible,
+          zero-confirmation delete controls (per-card delete icon,
+          BatchEditPanel's "Delete selected") are unreachable by a screen
+          reader's browse-mode cursor -- which walks the accessibility tree
+          independent of DOM Tab order and isn't constrained by the
+          lightbox's Tab-only focus trap. Per the WAI-ARIA APG dialog
+          pattern, `aria-modal` on the dialog only signals the boundary;
+          `inert` (or `aria-hidden`) on everything else is what actually
+          enforces it. */}
+      <div className="max-w-6xl mx-auto px-4 py-10" inert={!!zoomedPhoto}>
         <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50 mb-6">
           photo-tidy
         </h1>
@@ -435,7 +443,7 @@ export default function PhotoUploadPage() {
                 selectedIds={selectedIds}
                 onSelect={toggleSelect}
                 onDelete={handleDeletePhoto}
-                onZoom={handleZoomPhoto}
+                onZoom={setZoomedPhotoId}
                 onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>

@@ -670,6 +670,67 @@ describe('PhotoGrid — U2: delete icon overlay', () => {
   })
 })
 
+describe('PhotoGrid — U4: zoom icon overlay', () => {
+  const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+  const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+  const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+  const photos = [solo, p1, p2]
+  const metrics = new Map<string, PhotoMetrics | undefined>([
+    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+  ])
+
+  it('clicking a card\'s zoom icon calls onZoom with that card\'s id, exactly once', () => {
+    const onZoom = vi.fn()
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onZoom={onZoom} />
+    )
+
+    // p1 is a cluster member -- prove the id-bound wiring works there too.
+    const section = document.querySelector('section') as HTMLElement
+    const clusterCard = within(section).getByAltText('p1.jpg').closest('.flex.flex-col.gap-1') as HTMLElement
+    fireEvent.click(within(clusterCard).getByRole('button', { name: 'Zoom photo' }))
+
+    expect(onZoom).toHaveBeenCalledTimes(1)
+    expect(onZoom).toHaveBeenCalledWith(p1.id)
+  })
+
+  it('clicking the zoom icon on a SortablePhotoCard cluster member calls stopPropagation on pointerdown and click, so dnd-kit\'s drag listeners on the outer wrapper never see the gesture and no drag starts', () => {
+    render(
+      <PhotoGrid
+        photos={photos}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        onReorder={vi.fn()}
+        onZoom={vi.fn()}
+      />
+    )
+
+    const img = screen.getByAltText('p1.jpg')
+    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
+    expect(dragWrapper).not.toBeNull()
+
+    const zoomButton = within(dragWrapper).getByRole('button', { name: 'Zoom photo' })
+
+    // dnd-kit's real `useSortable().listeners` (mocked here as a static
+    // data-testid attribute) spreads a real onPointerDown React prop onto
+    // this same wrapper in production -- what actually stops
+    // PointerSensor from starting a drag on this gesture is the zoom
+    // icon's own handler calling stopPropagation() on the native event
+    // before it can bubble up to that ancestor handler.
+    const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+    const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+    fireEvent(zoomButton, pointerDownEvent)
+    expect(pointerDownSpy).toHaveBeenCalled()
+
+    const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+    const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+    fireEvent(zoomButton, clickEvent)
+    expect(clickSpy).toHaveBeenCalled()
+  })
+})
+
 describe('PhotoGrid — U5: day-boundary headers', () => {
   // Day headers are queried as headings whose accessible name is the
   // full-month formatted date (KTD9) -- distinct from the "N related
@@ -841,5 +902,62 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     expect(document.querySelectorAll('section')).toHaveLength(1)
     const after = dayHeadings().map((h) => h.textContent)
     expect(after).toEqual(before)
+  })
+
+  it('a day bucket mixing two standalone singles and a 2-member cluster renders exactly one day header, with both singles runs and the cluster section under it, in chronological order', () => {
+    // Two standalone singles, then a 2-member cluster, then a third
+    // standalone single -- all on the same UTC calendar day, so
+    // `flushSinglesRun` pushes more than one block (a singles grid, the
+    // cluster section, then another singles grid) into a single day
+    // bucket. clusterA/clusterB share a hash (distance 0) so they merge at
+    // the 0% default threshold; every single has a distinct hash so none
+    // of them accidentally cluster together or with clusterA/clusterB.
+    const single1 = makeEntry('single1.jpg', 0, '2026-08-20T01:00:00Z')
+    const single2 = makeEntry('single2.jpg', 1, '2026-08-20T02:00:00Z')
+    const clusterA = makeEntry('clusterA.jpg', 2, '2026-08-20T03:00:00Z')
+    const clusterB = makeEntry('clusterB.jpg', 3, '2026-08-20T04:00:00Z')
+    const single3 = makeEntry('single3.jpg', 4, '2026-08-20T05:00:00Z')
+    const photos = [single1, single2, clusterA, clusterB, single3]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [single1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [single2.id, makeMetrics(hashFromPositions(range(30, 39)))],
+      [clusterA.id, makeMetrics(hashFromPositions(range(60, 69)))],
+      [clusterB.id, makeMetrics(hashFromPositions(range(60, 69)))],
+      [single3.id, makeMetrics(hashFromPositions(range(90, 99)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+
+    // Sanity: exactly one 2-member cluster section formed.
+    const sections = document.querySelectorAll('section')
+    expect(sections).toHaveLength(1)
+    expect(sections[0].textContent).toContain('2 related photos')
+
+    // Exactly one day header for the shared day -- not one per singles run.
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026'])
+
+    // Every photo renders exactly once -- no duplicate-key-driven double
+    // render, none dropped.
+    expect(screen.getAllByAltText('single1.jpg')).toHaveLength(1)
+    expect(screen.getAllByAltText('single2.jpg')).toHaveLength(1)
+    expect(screen.getAllByAltText('clusterA.jpg')).toHaveLength(1)
+    expect(screen.getAllByAltText('clusterB.jpg')).toHaveLength(1)
+    expect(screen.getAllByAltText('single3.jpg')).toHaveLength(1)
+
+    // Chronological order under the one header: first singles run, then
+    // the cluster section, then the second singles run.
+    const heading = headings[0]
+    const img1 = screen.getByAltText('single1.jpg')
+    const img2 = screen.getByAltText('single2.jpg')
+    const imgA = screen.getByAltText('clusterA.jpg')
+    const imgB = screen.getByAltText('clusterB.jpg')
+    const img3 = screen.getByAltText('single3.jpg')
+
+    expect(heading.compareDocumentPosition(img1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(img1.compareDocumentPosition(img2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(img2.compareDocumentPosition(imgA) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(imgA.compareDocumentPosition(imgB) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(imgB.compareDocumentPosition(img3) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
