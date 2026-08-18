@@ -598,3 +598,74 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
     expect(onTimestampChange).toHaveBeenCalledWith(solo.id, new Date('2024-12-01T08:15:00Z'))
   })
 })
+
+describe('PhotoGrid — U2: delete icon overlay', () => {
+  const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
+  const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+  const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+  const photos = [solo, p1, p2]
+  const metrics = new Map<string, PhotoMetrics | undefined>([
+    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
+  ])
+
+  it('clicking a card\'s delete icon calls onDelete with that card\'s id, exactly once', () => {
+    const onDelete = vi.fn()
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onDelete={onDelete} />
+    )
+
+    // p1 is a cluster member -- prove the id-bound wiring works there too.
+    const section = document.querySelector('section') as HTMLElement
+    const clusterCard = within(section).getByAltText('p1.jpg').closest('.flex.flex-col.gap-1') as HTMLElement
+    fireEvent.click(within(clusterCard).getByRole('button', { name: 'Delete photo' }))
+
+    expect(onDelete).toHaveBeenCalledTimes(1)
+    expect(onDelete).toHaveBeenCalledWith(p1.id)
+  })
+
+  it('renders a delete icon on every card, with or without debug mode, clustered or not -- no card is missing it', () => {
+    render(
+      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onDelete={vi.fn()} />
+    )
+    expect(screen.getAllByRole('button', { name: 'Delete photo' })).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+    expect(screen.getAllByRole('button', { name: 'Delete photo' })).toHaveLength(3)
+  })
+
+  it('clicking the delete icon on a SortablePhotoCard cluster member calls stopPropagation on pointerdown and click, so dnd-kit\'s drag listeners on the outer wrapper never see the gesture and no drag starts', () => {
+    render(
+      <PhotoGrid
+        photos={photos}
+        metrics={metrics}
+        getObjectUrl={getObjectUrl}
+        onReorder={vi.fn()}
+        onDelete={vi.fn()}
+      />
+    )
+
+    const img = screen.getByAltText('p1.jpg')
+    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
+    expect(dragWrapper).not.toBeNull()
+
+    const deleteButton = within(dragWrapper).getByRole('button', { name: 'Delete photo' })
+
+    // dnd-kit's real `useSortable().listeners` (mocked here as a static
+    // data-testid attribute) spreads a real onPointerDown React prop onto
+    // this same wrapper in production -- what actually stops
+    // PointerSensor from starting a drag on this gesture is the delete
+    // icon's own handler calling stopPropagation() on the native event
+    // before it can bubble up to that ancestor handler.
+    const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+    const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+    fireEvent(deleteButton, pointerDownEvent)
+    expect(pointerDownSpy).toHaveBeenCalled()
+
+    const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+    const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+    fireEvent(deleteButton, clickEvent)
+    expect(clickSpy).toHaveBeenCalled()
+  })
+})

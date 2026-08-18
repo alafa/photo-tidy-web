@@ -35,6 +35,13 @@ type Props = {
   onTimestampChange?: (newDate: Date | null) => void
   onSelect?: (checked: boolean) => void
   checked?: boolean
+  /**
+   * Pre-bound by the caller (see `PhotoGrid.renderCard`), mirroring how
+   * `onSelect`/`onNameChange` are already pre-bound with this card's id --
+   * `PhotoCard` itself doesn't know its own id, so this is a zero-arg
+   * trigger rather than an `(id: string) => void` callback.
+   */
+  onDelete?: () => void
 }
 
 export default function PhotoCard({
@@ -44,6 +51,7 @@ export default function PhotoCard({
   onTimestampChange,
   onSelect,
   checked,
+  onDelete,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -145,6 +153,25 @@ export default function PhotoCard({
             </svg>
           </div>
         )}
+        {/* Delete icon overlay — always visible, bottom-right. Distinct
+            warning tone (rose) so it reads apart from the neutral zoom icon
+            a later unit adds to the opposite corner. Padding (not the glyph)
+            expands the tappable region to a ~44x44px minimum, per KTD4, to
+            keep mis-taps unlikely on a no-confirmation destructive action. */}
+        <button
+          type="button"
+          aria-label="Delete photo"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete?.()
+          }}
+          className="absolute bottom-0 right-0 p-3 flex items-center justify-center text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
+          </svg>
+        </button>
       </div>
 
       {/* Filename */}

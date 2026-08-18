@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 
 afterEach(cleanup)
 import PhotoCard from './PhotoCard'
@@ -77,6 +77,82 @@ describe('PhotoCard', () => {
 
     const badge = container.querySelector('.bg-blue-600')
     expect(badge).toBeNull()
+  })
+
+  describe('delete icon overlay (U2)', () => {
+    it('renders the delete icon on every card, even without onSelect/debugMode/an onDelete handler', () => {
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+      expect(screen.getByRole('button', { name: 'Delete photo' })).toBeDefined()
+    })
+
+    it('clicking the delete icon calls onDelete exactly once', () => {
+      const onDelete = vi.fn()
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onDelete={onDelete} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete photo' }))
+
+      expect(onDelete).toHaveBeenCalledTimes(1)
+      expect(onDelete).toHaveBeenCalledWith()
+    })
+
+    it('clicking the delete icon does not toggle the card\'s checked/selection state', () => {
+      const onDelete = vi.fn()
+      const onSelect = vi.fn()
+      const entry = makeEntry()
+      render(
+        <PhotoCard
+          entry={entry}
+          objectUrl="blob:test"
+          onDelete={onDelete}
+          onSelect={onSelect}
+          checked={false}
+        />
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete photo' }))
+
+      expect(onDelete).toHaveBeenCalledTimes(1)
+      expect(onSelect).not.toHaveBeenCalled()
+    })
+
+    it('calls stopPropagation on both pointerdown and click (KTD3) so the icon never starts a drag or bubbles into the image wrapper\'s own click handler', () => {
+      const onDelete = vi.fn()
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onDelete={onDelete} />)
+      const button = screen.getByRole('button', { name: 'Delete photo' })
+
+      // Dispatch real native events and spy directly on their
+      // stopPropagation methods -- React's synthetic stopPropagation() also
+      // stops the underlying native event, which is what actually prevents
+      // dnd-kit's PointerSensor (a real onPointerDown listener on an
+      // ancestor) from ever seeing the gesture.
+      const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+      const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+      fireEvent(button, pointerDownEvent)
+      expect(pointerDownSpy).toHaveBeenCalled()
+
+      const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+      const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+      fireEvent(button, clickEvent)
+      expect(clickSpy).toHaveBeenCalled()
+    })
+
+    it('renders a ~44x44px minimum tappable region via padding around a visually compact glyph', () => {
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onDelete={vi.fn()} />)
+
+      const button = screen.getByRole('button', { name: 'Delete photo' })
+      // p-3 (12px) padding on each side around a w-5 h-5 (20px) glyph is
+      // exactly 44px total (12 + 20 + 12) -- the glyph itself stays visually
+      // compact while the clickable box meets the ~44px minimum.
+      expect(button.className).toContain('p-3')
+      const svg = button.querySelector('svg')
+      expect(svg?.getAttribute('class')).toContain('w-5')
+      expect(svg?.getAttribute('class')).toContain('h-5')
+    })
   })
 })
 

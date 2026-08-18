@@ -11,6 +11,7 @@ type Props = {
   onTimestampChange?: (newDate: Date | null) => void
   onSelect?: (checked: boolean) => void
   checked?: boolean
+  onDelete?: () => void
 }
 
 export default function SortablePhotoCard({
@@ -21,6 +22,7 @@ export default function SortablePhotoCard({
   onTimestampChange,
   onSelect,
   checked,
+  onDelete,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -41,6 +43,7 @@ export default function SortablePhotoCard({
         onTimestampChange={onTimestampChange}
         onSelect={onSelect}
         checked={checked}
+        onDelete={onDelete}
       />
     </div>
   )

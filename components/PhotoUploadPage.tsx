@@ -421,6 +421,7 @@ export default function PhotoUploadPage() {
                 onTimestampChange={updatePhotoTimestamp}
                 selectedIds={selectedIds}
                 onSelect={toggleSelect}
+                onDelete={(id) => handleBatchDelete([id])}
                 onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>

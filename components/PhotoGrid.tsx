@@ -26,6 +26,7 @@ type Props = {
   onTimestampChange?: (id: string, newDate: Date | null) => void
   selectedIds?: Set<string>
   onSelect?: (id: string, checked: boolean) => void
+  onDelete?: (id: string) => void
   /**
    * Reports the true flattened visual order (see `useClusteredPhotos`'s
    * `visualOrder`) up to the parent whenever it changes — `PhotoGrid` has no
@@ -91,6 +92,7 @@ export default function PhotoGrid({
   onTimestampChange,
   selectedIds,
   onSelect,
+  onDelete,
   onVisualOrderChange,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
@@ -176,6 +178,7 @@ export default function PhotoGrid({
           onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
           onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
           checked={selectedIds?.has(id)}
+          onDelete={onDelete ? () => onDelete(id) : undefined}
         />
       ) : (
         <PhotoCard
@@ -185,6 +188,7 @@ export default function PhotoGrid({
           onTimestampChange={onTimestampChange ? (date) => onTimestampChange(id, date) : undefined}
           onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
           checked={selectedIds?.has(id)}
+          onDelete={onDelete ? () => onDelete(id) : undefined}
         />
       )
 
@@ -211,6 +215,7 @@ export default function PhotoGrid({
       onTimestampChange,
       onSelect,
       selectedIds,
+      onDelete,
       debugMode,
       handleCompareClick,
     ]
