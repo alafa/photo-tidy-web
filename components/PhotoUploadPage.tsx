@@ -79,17 +79,17 @@ export default function PhotoUploadPage() {
     cancelImport,
   } = useGooglePhotosPicker({ accessToken, addPhotos })
   const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
-  // Metrics must start computing as soon as photos are added (KTD12) —
-  // called here, unconditionally, and passed down to PhotoGrid.
+  // Metrics must start computing as soon as photos are added — called
+  // here, unconditionally, and passed down to PhotoGrid.
   const metrics = usePhotoMetrics(photos)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
   const [namePromptValue, setNamePromptValue] = useState('')
-  // U4: which photo (if any) the lightbox is currently showing, set by a
-  // card's zoom icon and cleared by PhotoLightbox's onClose. PhotoLightbox
-  // (U3) captures document.activeElement on its own mount to handle focus
+  // Which photo (if any) the lightbox is currently showing, set by a card's
+  // zoom icon and cleared by PhotoLightbox's onClose. PhotoLightbox
+  // captures document.activeElement on its own mount to handle focus
   // return, so no extra ref is needed here -- the triggering zoom icon
   // still has focus at the moment this state update causes the lightbox to
   // mount.
@@ -116,8 +116,8 @@ export default function PhotoUploadPage() {
 
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
 
-  // U4: resolves the currently-zoomed photo (if any) the same way the rest
-  // of this component looks up a photo's object URL -- via getObjectUrl
+  // Resolves the currently-zoomed photo (if any) the same way the rest of
+  // this component looks up a photo's object URL -- via getObjectUrl
   // (hooks/useObjectUrls.ts), keyed off photosById.
   const zoomedPhoto = zoomedPhotoId ? photosById.get(zoomedPhotoId) ?? null : null
 
@@ -210,13 +210,13 @@ export default function PhotoUploadPage() {
     batchSetTimestamps(Array.from(selectedIds), anchor)
   }
 
-  // R8/KTD7: the current selection's distinct existing capturedAt values,
-  // deduped by exact millisecond value and sorted ascending — generalized
-  // to the whole selection rather than one cluster's members, so it covers
-  // a selection spanning multiple clusters or plain timeline photos alike
-  // (AE3). Recomputed from `photos`/`selectedIds` on every render rather
-  // than memoized — this app's photo counts don't warrant it, and every
-  // other selection-derived value here (activeEntry, etc.) does the same.
+  // The current selection's distinct existing capturedAt values, deduped
+  // by exact millisecond value and sorted ascending — generalized to the
+  // whole selection rather than one cluster's members, so it covers a
+  // selection spanning multiple clusters or plain timeline photos alike.
+  // Recomputed from `photos`/`selectedIds` on every render rather than
+  // memoized — this app's photo counts don't warrant it, and every other
+  // selection-derived value here (activeEntry, etc.) does the same.
   const seenTimestamps = new Map<number, Date>()
   for (const photo of photos) {
     if (!selectedIds.has(photo.id)) continue
@@ -229,24 +229,31 @@ export default function PhotoUploadPage() {
   )
 
   // Accepts an explicit `ids` list (defaulting to the current selection) so
-  // a future per-card delete (not part of this unit) can delete a single
-  // photo that isn't necessarily selected. Prunes only those specific ids
-  // out of `selectedIds` -- mirroring `toggleSelect`'s build-a-new-Set
-  // pattern above -- rather than unconditionally clearing the whole
-  // selection, so deleting an unselected photo can't silently wipe out an
-  // unrelated multi-photo selection the user already made.
-  function handleBatchDelete(ids: string[] = Array.from(selectedIds)) {
-    const idSet = new Set(ids)
-    for (const photo of photos) {
-      if (idSet.has(photo.id)) releaseObjectUrl(photo.file)
-    }
-    removePhotos(ids)
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      for (const id of ids) next.delete(id)
-      return next
-    })
-  }
+  // the per-card delete icon can delete a single photo that isn't
+  // necessarily selected, independent of batch delete. Prunes only those
+  // specific ids out of `selectedIds` -- mirroring `toggleSelect`'s
+  // build-a-new-Set pattern above -- rather than unconditionally clearing
+  // the whole selection, so deleting an unselected photo can't silently
+  // wipe out an unrelated multi-photo selection the user already made.
+  const handleBatchDelete = useCallback(
+    (ids: string[] = Array.from(selectedIds)) => {
+      for (const id of ids) {
+        const photo = photosById.get(id)
+        if (photo) releaseObjectUrl(photo.file)
+      }
+      removePhotos(ids)
+      setSelectedIds((prev) => {
+        const next = new Set(prev)
+        for (const id of ids) next.delete(id)
+        return next
+      })
+    },
+    [selectedIds, photosById, releaseObjectUrl, removePhotos]
+  )
+
+  const handleDeletePhoto = useCallback((id: string) => handleBatchDelete([id]), [handleBatchDelete])
+  const handleZoomPhoto = useCallback((id: string) => setZoomedPhotoId(id), [])
+  const handleCloseLightbox = useCallback(() => setZoomedPhotoId(null), [])
 
   function handleImportClick() {
     setNamePromptValue(albumName)
@@ -397,28 +404,21 @@ export default function PhotoUploadPage() {
                 distinctTimestamps={distinctSelectedTimestamps}
                 onBatchRename={handleBatchRename}
                 onBatchSetTimestamp={handleBatchSetTimestamp}
-                // Adapter, not a bare `handleBatchDelete` reference:
-                // BatchEditPanel wires its delete button as
-                // `onClick={onBatchDelete}`, so a plain click hands this prop
-                // the click's SyntheticEvent as its first argument. Forwarded
-                // straight through, that would land in `handleBatchDelete`'s
-                // new `ids` parameter and defeat its
-                // `= Array.from(selectedIds)` default (which only applies to
-                // a genuinely `undefined` argument), crashing on
-                // `new Set(event)`. Only a real `string[]` is forwarded —
-                // matching the explicit-ids shape a future per-card delete
-                // (not part of this unit) will call this same prop with —
-                // anything else (like a click event) falls through to the
-                // default, preserving today's whole-selection behavior.
-                onBatchDelete={(ids?: string[]) =>
-                  handleBatchDelete(Array.isArray(ids) ? ids : undefined)
-                }
+                // Wrapped, not passed as a bare `handleBatchDelete`
+                // reference: BatchEditPanel invokes this prop as
+                // `onClick={onBatchDelete}`, so a bare reference would
+                // receive the click's SyntheticEvent as its first argument
+                // and defeat `handleBatchDelete`'s
+                // `ids = Array.from(selectedIds)` default. The zero-arg
+                // wrapper always triggers that default, deleting the
+                // current selection.
+                onBatchDelete={() => handleBatchDelete()}
                 onClearSelection={clearSelection}
               />
             )}
 
             {/* The unified grid always renders here, drag-wired end to end
-                (KTD2) — one grid, no separate cluster view or toggle. */}
+                — one grid, no separate cluster view or toggle. */}
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
@@ -434,8 +434,8 @@ export default function PhotoUploadPage() {
                 onTimestampChange={updatePhotoTimestamp}
                 selectedIds={selectedIds}
                 onSelect={toggleSelect}
-                onDelete={(id) => handleBatchDelete([id])}
-                onZoom={(id) => setZoomedPhotoId(id)}
+                onDelete={handleDeletePhoto}
+                onZoom={handleZoomPhoto}
                 onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>
@@ -464,7 +464,7 @@ export default function PhotoUploadPage() {
         <PhotoLightbox
           filename={zoomedPhoto.filename}
           objectUrl={getObjectUrl(zoomedPhoto.file)}
-          onClose={() => setZoomedPhotoId(null)}
+          onClose={handleCloseLightbox}
         />
       )}
     </div>

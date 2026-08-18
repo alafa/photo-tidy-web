@@ -28,6 +28,44 @@ function toDatetimeLocal(date: Date): string {
   return `${y}-${mo}-${d}T${h}:${mi}`
 }
 
+/**
+ * Shared chrome for the delete/zoom overlay buttons: absolutely positioned
+ * in a bottom corner, sized via padding (not the glyph) so the tappable
+ * region is a ~44x44px minimum around a visually compact icon.
+ * stopPropagation on both pointerdown and click keeps the button isolated
+ * from the image wrapper's own handlers -- pointerdown so dnd-kit's
+ * PointerSensor never starts a drag from the icon, click so it never
+ * toggles the card's selection state.
+ */
+function CardOverlayButton({
+  position,
+  ariaLabel,
+  colorClassName,
+  onActivate,
+  children,
+}: {
+  position: 'left' | 'right'
+  ariaLabel: string
+  colorClassName: string
+  onActivate?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation()
+        onActivate?.()
+      }}
+      className={`absolute bottom-0 ${position === 'right' ? 'right-0' : 'left-0'} p-3 flex items-center justify-center ${colorClassName}`}
+    >
+      {children}
+    </button>
+  )
+}
+
 type Props = {
   entry: PhotoEntry
   objectUrl: string
@@ -162,44 +200,33 @@ export default function PhotoCard({
         )}
         {/* Delete icon overlay — always visible, bottom-right. Distinct
             warning tone (rose) so it reads apart from the neutral zoom icon
-            a later unit adds to the opposite corner. Padding (not the glyph)
-            expands the tappable region to a ~44x44px minimum, per KTD4, to
-            keep mis-taps unlikely on a no-confirmation destructive action. */}
-        <button
-          type="button"
-          aria-label="Delete photo"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation()
-            onDelete?.()
-          }}
-          className="absolute bottom-0 right-0 p-3 flex items-center justify-center text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
+            on the opposite corner. */}
+        <CardOverlayButton
+          position="right"
+          ariaLabel="Delete photo"
+          colorClassName="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
+          onActivate={onDelete}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
           </svg>
-        </button>
+        </CardOverlayButton>
         {/* Zoom icon overlay — always visible, bottom-left, symmetric with
-            the delete icon's bottom-right placement (KTD4). Neutral color
-            (zinc) rather than the delete icon's warning tone, so the two
-            read as visually distinct at a glance despite matching size and
-            always-visible treatment. Same stopPropagation pairing (KTD3) as
-            the delete icon so it never toggles selection or starts a drag. */}
-        <button
-          type="button"
-          aria-label="Zoom photo"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation()
-            onZoom?.()
-          }}
-          className="absolute bottom-0 left-0 p-3 flex items-center justify-center text-zinc-100 hover:text-white"
+            the delete icon's bottom-right placement. Neutral color (zinc)
+            rather than the delete icon's warning tone, so the two read as
+            visually distinct at a glance despite matching size and
+            always-visible treatment. */}
+        <CardOverlayButton
+          position="left"
+          ariaLabel="Zoom photo"
+          colorClassName="text-zinc-100 hover:text-white"
+          onActivate={onZoom}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
             <circle cx="5" cy="5" r="3.5" />
             <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
           </svg>
-        </button>
+        </CardOverlayButton>
       </div>
 
       {/* Filename */}

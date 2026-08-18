@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
 /**
  * Returns a stable getter that creates object URLs lazily (one per unique
@@ -21,20 +21,20 @@ export function useObjectUrls(): {
     }
   }, [])
 
-  const getObjectUrl = (file: File): string => {
+  const getObjectUrl = useCallback((file: File): string => {
     if (!mapRef.current.has(file)) {
       mapRef.current.set(file, URL.createObjectURL(file))
     }
     return mapRef.current.get(file)!
-  }
+  }, [])
 
-  const releaseObjectUrl = (file: File): void => {
+  const releaseObjectUrl = useCallback((file: File): void => {
     const url = mapRef.current.get(file)
     if (url !== undefined) {
       URL.revokeObjectURL(url)
       mapRef.current.delete(file)
     }
-  }
+  }, [])
 
   return { getObjectUrl, releaseObjectUrl }
 }

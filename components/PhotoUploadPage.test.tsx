@@ -34,21 +34,19 @@ vi.mock('@/hooks/usePhotoMetrics', () => ({
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
 
-// U1: capture the exact `onBatchDelete` prop PhotoUploadPage hands to
-// BatchEditPanel, so tests can invoke handleBatchDelete directly with an
-// explicit `ids` argument -- there's no per-card delete UI yet (that's a
-// separate, later unit) to drive such a call through fireEvent. The real
-// BatchEditPanel is still rendered underneath (via importOriginal), so every
-// other test in this file that exercises "Delete selected" through the
-// actual UI is completely unaffected.
-let capturedOnBatchDelete: ((ids?: string[]) => void) | null = null
+// Capture the exact `onBatchDelete` prop PhotoUploadPage hands to
+// BatchEditPanel, so tests can invoke it directly without going through a
+// real click. The real BatchEditPanel is still rendered underneath (via
+// importOriginal), so every other test in this file that exercises "Delete
+// selected" through the actual UI is completely unaffected.
+let capturedOnBatchDelete: (() => void) | null = null
 
 vi.mock('./BatchEditPanel', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./BatchEditPanel')>()
   const Actual = actual.default
   return {
     ...actual,
-    default: (props: React.ComponentProps<typeof Actual> & { onBatchDelete: (ids?: string[]) => void }) => {
+    default: (props: React.ComponentProps<typeof Actual> & { onBatchDelete: () => void }) => {
       capturedOnBatchDelete = props.onBatchDelete
       return <Actual {...props} />
     },
@@ -1004,15 +1002,16 @@ describe('PhotoUploadPage — batch delete', () => {
     expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull()
   })
 
-  // U1: generalizing handleBatchDelete to accept an explicit `ids` param
-  // (for a future per-card delete, U2, not part of this task) -- these prove
-  // the selection-pruning behavior is now scoped to exactly the passed ids
-  // rather than unconditionally clearing the whole selection. There's no
-  // per-card delete UI yet to drive an explicit-id call through fireEvent,
-  // so `capturedOnBatchDelete` (module-level, captured from the real
-  // BatchEditPanel's `onBatchDelete` prop via the mock at the top of this
-  // file) is invoked directly with explicit id arguments.
-  describe('U1: explicit ids parameter', () => {
+  // handleBatchDelete accepts an explicit `ids` param so the per-card
+  // delete icon can delete a single photo that isn't necessarily selected
+  // -- these prove the selection-pruning behavior is scoped to exactly the
+  // deleted id(s) rather than unconditionally clearing the whole selection.
+  // The "no arguments" case is driven through `capturedOnBatchDelete`
+  // (module-level, captured from the real BatchEditPanel's `onBatchDelete`
+  // prop via the mock at the top of this file); the explicit-id cases are
+  // driven through the real per-card delete icon, since that's its only
+  // production entry point.
+  describe('explicit-id delete', () => {
     it('calling with no arguments still deletes every selected photo and clears the whole selection (unchanged default behavior)', () => {
       const photos = [
         makeEntry('a.jpg', 0),
@@ -1071,9 +1070,9 @@ describe('PhotoUploadPage — batch delete', () => {
       fireEvent.click(screen.getByAltText('c.jpg'))
       expect(screen.getByText('3 photos selected')).toBeDefined()
 
-      act(() => {
-        capturedOnBatchDelete?.([photos[0].id])
-      })
+      // Delete a via its own per-card delete icon, not the batch button.
+      const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+      fireEvent.click(deleteButtons[0])
 
       expect(removePhotosMock).toHaveBeenCalledWith([photos[0].id])
       expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
@@ -1108,10 +1107,10 @@ describe('PhotoUploadPage — batch delete', () => {
       fireEvent.click(screen.getByAltText('b.jpg'))
       expect(screen.getByText('1 photo selected')).toBeDefined()
 
-      // Delete c, which was never in the selection.
-      act(() => {
-        capturedOnBatchDelete?.([photos[2].id])
-      })
+      // Delete c, which was never in the selection, via its own per-card
+      // delete icon.
+      const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+      fireEvent.click(deleteButtons[2])
 
       expect(removePhotosMock).toHaveBeenCalledWith([photos[2].id])
       expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[2].file)

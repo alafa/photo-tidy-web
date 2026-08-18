@@ -9,20 +9,19 @@ import { useClusteredPhotos, clusterKey, earliestCapturedAtMs } from '@/hooks/us
 import PhotoCard from './PhotoCard'
 import SortablePhotoCard from './SortablePhotoCard'
 
-// R2's unified default: only exact duplicates (distance 0) are grouped out
-// of the box, so the grid's contents match today's flat timeline unless the
+// Unified default: only exact duplicates (distance 0) are grouped out of
+// the box, so the grid's contents match today's flat timeline unless the
 // batch actually contains exact duplicates. Raising the slider groups
-// progressively more photos live (R3).
+// progressively more photos live.
 const DEFAULT_SIMILARITY_PERCENT = 0
 const MIN_SIMILARITY_PERCENT = 0
 const MAX_SIMILARITY_PERCENT = 100
 
-// Dedicated full-month UTC formatter for day-separator headers (KTD9) — a
+// Dedicated full-month UTC formatter for day-separator headers — a
 // page-level landmark, not a per-card label, so this is deliberately NOT
 // PhotoCard.tsx's `dateFormatter` (which uses `month: 'short'` and includes
 // a time-of-day, appropriate for a compact per-card timestamp but not a day
-// header; the plan's own worked example, "September 23, 2023", is the
-// full-month form).
+// header).
 const dayHeaderFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'long',
   day: 'numeric',
@@ -30,11 +29,11 @@ const dayHeaderFormatter = new Intl.DateTimeFormat('en-US', {
   // Mirrors PhotoCard.tsx's dateFormatter: exifr builds Date objects via
   // Date.UTC, so EXIF clock times are stored as UTC values. Bucketing by
   // local time would silently misfile a photo relative to the date already
-  // shown on its own card (KTD8).
+  // shown on its own card.
   timeZone: 'UTC',
 })
 
-// Sentinel day-bucket key for every all-null-anchor cluster/single (KTD10).
+// Sentinel day-bucket key for every all-null-anchor cluster/single.
 // `earliestCapturedAtMs`'s `Infinity` fallback always sorts after every
 // finite anchor, so — same reasoning as `dayBuckets` below — every
 // all-null-anchor unit is guaranteed contiguous at the tail of the
@@ -42,9 +41,9 @@ const dayHeaderFormatter = new Intl.DateTimeFormat('en-US', {
 const UNDATED_DAY_KEY = 'undated'
 
 /**
- * UTC-calendar-day key for a day-anchor ms value (KTD8) — `Infinity` (the
- * anchor helper's all-null fallback) always maps to `UNDATED_DAY_KEY`
- * rather than a real calendar day.
+ * UTC-calendar-day key for a day-anchor ms value — `Infinity` (the anchor
+ * helper's all-null fallback) always maps to `UNDATED_DAY_KEY` rather than
+ * a real calendar day.
  */
 function dayKeyFor(anchorMs: number): string {
   if (!Number.isFinite(anchorMs)) return UNDATED_DAY_KEY
@@ -55,13 +54,13 @@ function dayKeyFor(anchorMs: number): string {
 /**
  * One `renderBlocks` entry reduced to "what day does it belong under, and
  * as what kind of visual unit": a whole `'cluster'` render block is always
- * one unit (R8 — a cluster's day placement is its earliest member's day,
- * never split even when its members span multiple days), while a
- * `'singles'` block is exploded into one unit per individual 1-member
- * cluster (KTD7) — a `'singles'` block bundles any run of chronologically-
- * adjacent 1-member clusters with no day-boundary awareness in how it was
- * built, so a single block can legitimately span multiple UTC days when no
- * 2+-member cluster interrupts the run.
+ * one unit — a cluster's day placement is its earliest member's day, never
+ * split even when its members span multiple days — while a `'singles'`
+ * block is exploded into one unit per individual 1-member cluster, since it
+ * bundles any run of chronologically-adjacent 1-member clusters with no
+ * day-boundary awareness in how it was built, so a single block can
+ * legitimately span multiple UTC days when no 2+-member cluster interrupts
+ * the run.
  */
 type DayUnit = { kind: 'cluster'; cluster: Cluster; anchorMs: number } | { kind: 'single'; cluster: Cluster; anchorMs: number }
 
@@ -284,9 +283,9 @@ export default function PhotoGrid({
   // this flattened sequence, never interleaved with a different day's
   // units. The all-null `Infinity` anchor sorts last for the same reason,
   // so `UNDATED_DAY_KEY` units always end up contiguous at the very end --
-  // exactly one trailing "Undated" bucket (KTD10), never a scattered one.
+  // exactly one trailing "Undated" bucket, never a scattered one.
   //
-  // Deliberately NOT computed inside `hooks/useClusteredPhotos.ts` (KTD6):
+  // Deliberately NOT computed inside `hooks/useClusteredPhotos.ts`:
   // `renderBlocks`'s shape and `visualOrder` stay completely untouched by
   // day-grouping, so drag-and-drop can never be affected by it.
   const dayBuckets = useMemo(() => {
@@ -370,10 +369,10 @@ export default function PhotoGrid({
 
         return (
           <div key={bucket.key} className="flex flex-col gap-4">
-            {/* Day-boundary header (R7) -- plain, non-sticky heading in
-                normal document flow (KTD11), visually more prominent than
-                the per-cluster "N related photos" <h2> above (bigger,
-                bolder, not uppercase/tracked-out). */}
+            {/* Day-boundary header -- plain, non-sticky heading in normal
+                document flow, visually more prominent than the per-cluster
+                "N related photos" <h2> above (bigger, bolder, not
+                uppercase/tracked-out). */}
             <h2 className="text-xl font-bold text-zinc-900 dark:text-zinc-50">{headerLabel}</h2>
             <div className="flex flex-col gap-8">{content}</div>
           </div>
