@@ -27,6 +27,7 @@ type Props = {
   selectedIds?: Set<string>
   onSelect?: (id: string, checked: boolean) => void
   onDelete?: (id: string) => void
+  onZoom?: (id: string) => void
   /**
    * Reports the true flattened visual order (see `useClusteredPhotos`'s
    * `visualOrder`) up to the parent whenever it changes — `PhotoGrid` has no
@@ -93,6 +94,7 @@ export default function PhotoGrid({
   selectedIds,
   onSelect,
   onDelete,
+  onZoom,
   onVisualOrderChange,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
@@ -179,6 +181,7 @@ export default function PhotoGrid({
           onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
           checked={selectedIds?.has(id)}
           onDelete={onDelete ? () => onDelete(id) : undefined}
+          onZoom={onZoom ? () => onZoom(id) : undefined}
         />
       ) : (
         <PhotoCard
@@ -189,6 +192,7 @@ export default function PhotoGrid({
           onSelect={onSelect ? (checked) => onSelect(id, checked) : undefined}
           checked={selectedIds?.has(id)}
           onDelete={onDelete ? () => onDelete(id) : undefined}
+          onZoom={onZoom ? () => onZoom(id) : undefined}
         />
       )
 
@@ -216,6 +220,7 @@ export default function PhotoGrid({
       onSelect,
       selectedIds,
       onDelete,
+      onZoom,
       debugMode,
       handleCompareClick,
     ]

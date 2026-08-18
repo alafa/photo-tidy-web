@@ -12,6 +12,7 @@ type Props = {
   onSelect?: (checked: boolean) => void
   checked?: boolean
   onDelete?: () => void
+  onZoom?: () => void
 }
 
 export default function SortablePhotoCard({
@@ -23,6 +24,7 @@ export default function SortablePhotoCard({
   onSelect,
   checked,
   onDelete,
+  onZoom,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -44,6 +46,7 @@ export default function SortablePhotoCard({
         onSelect={onSelect}
         checked={checked}
         onDelete={onDelete}
+        onZoom={onZoom}
       />
     </div>
   )

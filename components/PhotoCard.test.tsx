@@ -154,6 +154,96 @@ describe('PhotoCard', () => {
       expect(svg?.getAttribute('class')).toContain('h-5')
     })
   })
+
+  describe('zoom icon overlay (U4)', () => {
+    it('renders the zoom icon on every card, even without onSelect/debugMode/an onZoom handler', () => {
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+      expect(screen.getByRole('button', { name: 'Zoom photo' })).toBeDefined()
+    })
+
+    it('clicking the zoom icon calls onZoom exactly once', () => {
+      const onZoom = vi.fn()
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onZoom={onZoom} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom photo' }))
+
+      expect(onZoom).toHaveBeenCalledTimes(1)
+      expect(onZoom).toHaveBeenCalledWith()
+    })
+
+    it('clicking the zoom icon does not toggle the card\'s checked/selection state', () => {
+      const onZoom = vi.fn()
+      const onSelect = vi.fn()
+      const entry = makeEntry()
+      render(
+        <PhotoCard
+          entry={entry}
+          objectUrl="blob:test"
+          onZoom={onZoom}
+          onSelect={onSelect}
+          checked={false}
+        />
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom photo' }))
+
+      expect(onZoom).toHaveBeenCalledTimes(1)
+      expect(onSelect).not.toHaveBeenCalled()
+    })
+
+    it('calls stopPropagation on both pointerdown and click (KTD3) so the icon never starts a drag or bubbles into the image wrapper\'s own click handler', () => {
+      const onZoom = vi.fn()
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onZoom={onZoom} />)
+      const button = screen.getByRole('button', { name: 'Zoom photo' })
+
+      const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+      const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+      fireEvent(button, pointerDownEvent)
+      expect(pointerDownSpy).toHaveBeenCalled()
+
+      const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+      const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+      fireEvent(button, clickEvent)
+      expect(clickSpy).toHaveBeenCalled()
+    })
+
+    it('renders a ~44x44px minimum tappable region via padding around a visually compact glyph', () => {
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onZoom={vi.fn()} />)
+
+      const button = screen.getByRole('button', { name: 'Zoom photo' })
+      expect(button.className).toContain('p-3')
+      const svg = button.querySelector('svg')
+      expect(svg?.getAttribute('class')).toContain('w-5')
+      expect(svg?.getAttribute('class')).toContain('h-5')
+    })
+  })
+
+  describe('delete and zoom icons coexist independently (U4)', () => {
+    it('both icons render simultaneously on the same card, and clicking one never triggers the other', () => {
+      const onDelete = vi.fn()
+      const onZoom = vi.fn()
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onDelete={onDelete} onZoom={onZoom} />)
+
+      const deleteButton = screen.getByRole('button', { name: 'Delete photo' })
+      const zoomButton = screen.getByRole('button', { name: 'Zoom photo' })
+      expect(deleteButton).toBeDefined()
+      expect(zoomButton).toBeDefined()
+
+      fireEvent.click(zoomButton)
+      expect(onZoom).toHaveBeenCalledTimes(1)
+      expect(onDelete).not.toHaveBeenCalled()
+
+      fireEvent.click(deleteButton)
+      expect(onDelete).toHaveBeenCalledTimes(1)
+      expect(onZoom).toHaveBeenCalledTimes(1)
+    })
+  })
 })
 
 // A `describe('PhotoGrid', ...)` block used to live here, exercising

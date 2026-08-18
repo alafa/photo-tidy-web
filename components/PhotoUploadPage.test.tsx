@@ -1276,3 +1276,107 @@ describe('PhotoUploadPage — cross-cluster batch quick-pick timestamps (finding
     expect(screen.getByRole('button', { name: expectedLabelB })).toBeDefined()
   })
 })
+
+// U4: the zoom icon (components/PhotoCard.tsx) opens PhotoLightbox
+// (components/PhotoLightbox.tsx, U3) for that specific card's photo.
+// PhotoUploadPage owns the single zoomedPhotoId state and resolves it to an
+// object URL/filename via photosById + getObjectUrl, exactly like every
+// other photo lookup in this component.
+describe('PhotoUploadPage — zoom lightbox (U4)', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[]) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos: vi.fn(),
+    }
+  }
+
+  it('clicking a card\'s zoom icon opens the lightbox showing that exact photo (correct object URL and filename)', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    // Photos render in ascending capturedAt order -- a.jpg then b.jpg -- so
+    // the second "Zoom photo" button in DOM order belongs to b.jpg.
+    const zoomButtons = screen.getAllByRole('button', { name: 'Zoom photo' })
+    expect(zoomButtons).toHaveLength(2)
+    fireEvent.click(zoomButtons[1])
+
+    const closeButton = screen.getByRole('button', { name: 'Close' })
+    const overlay = closeButton.parentElement as HTMLElement
+    const lightboxImg = overlay.querySelector('img')
+    expect(lightboxImg?.getAttribute('alt')).toBe('b.jpg')
+    expect(lightboxImg?.getAttribute('src')).toBe('blob:b.jpg')
+  })
+
+  it('closing the lightbox via its close button returns to the grid with no photo zoomed and restores focus to the zoom icon that opened it', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    const zoomButtons = screen.getAllByRole('button', { name: 'Zoom photo' })
+    const bZoomButton = zoomButtons[1]
+    // jsdom, unlike a real browser, doesn't move focus to a button merely
+    // because it was clicked -- explicitly focusing it here reproduces the
+    // real-browser precondition PhotoLightbox's own mount effect depends on
+    // (it captures document.activeElement at mount time), exactly as U3's
+    // own isolated focus-restore test does.
+    bZoomButton.focus()
+    expect(document.activeElement).toBe(bZoomButton)
+
+    fireEvent.click(bZoomButton)
+
+    const closeButton = screen.getByRole('button', { name: 'Close' })
+    expect(document.activeElement).toBe(closeButton)
+
+    fireEvent.click(closeButton)
+
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull()
+    // Grid is back, unaffected by the zoom/close round-trip.
+    expect(screen.getByAltText('a.jpg')).toBeDefined()
+    expect(screen.getByAltText('b.jpg')).toBeDefined()
+    // Focus returned to the exact zoom icon that opened the lightbox -- the
+    // integration proof that U3's focus-restore works end-to-end with a
+    // real trigger element from the grid, not just PhotoLightbox's own
+    // isolated fixture.
+    expect(document.activeElement).toBe(bZoomButton)
+  })
+
+  it('the delete and zoom icons on the same card work independently -- deleting one photo does not open or affect the lightbox for another', () => {
+    const removePhotosMock = vi.fn()
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue({ ...basePhotosReturn(photos), removePhotos: removePhotosMock })
+
+    render(<PhotoUploadPage />)
+
+    const zoomButtons = screen.getAllByRole('button', { name: 'Zoom photo' })
+    fireEvent.click(zoomButtons[1]) // zoom b.jpg
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDefined()
+
+    const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+    fireEvent.click(deleteButtons[0]) // delete a.jpg while b.jpg is zoomed
+
+    expect(removePhotosMock).toHaveBeenCalledWith([photos[0].id])
+    // Lightbox is untouched by the unrelated delete click.
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDefined()
+  })
+})

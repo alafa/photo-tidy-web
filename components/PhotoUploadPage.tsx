@@ -19,6 +19,7 @@ import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
+import PhotoLightbox from './PhotoLightbox'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
@@ -86,6 +87,13 @@ export default function PhotoUploadPage() {
   const [albumName, setAlbumName] = useState('')
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
   const [namePromptValue, setNamePromptValue] = useState('')
+  // U4: which photo (if any) the lightbox is currently showing, set by a
+  // card's zoom icon and cleared by PhotoLightbox's onClose. PhotoLightbox
+  // (U3) captures document.activeElement on its own mount to handle focus
+  // return, so no extra ref is needed here -- the triggering zoom icon
+  // still has focus at the moment this state update causes the lightbox to
+  // mount.
+  const [zoomedPhotoId, setZoomedPhotoId] = useState<string | null>(null)
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -107,6 +115,11 @@ export default function PhotoUploadPage() {
   }, [])
 
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
+
+  // U4: resolves the currently-zoomed photo (if any) the same way the rest
+  // of this component looks up a photo's object URL -- via getObjectUrl
+  // (hooks/useObjectUrls.ts), keyed off photosById.
+  const zoomedPhoto = zoomedPhotoId ? photosById.get(zoomedPhotoId) ?? null : null
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
@@ -422,6 +435,7 @@ export default function PhotoUploadPage() {
                 selectedIds={selectedIds}
                 onSelect={toggleSelect}
                 onDelete={(id) => handleBatchDelete([id])}
+                onZoom={(id) => setZoomedPhotoId(id)}
                 onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>
@@ -445,6 +459,14 @@ export default function PhotoUploadPage() {
           </>
         )}
       </div>
+
+      {zoomedPhoto && (
+        <PhotoLightbox
+          filename={zoomedPhoto.filename}
+          objectUrl={getObjectUrl(zoomedPhoto.file)}
+          onClose={() => setZoomedPhotoId(null)}
+        />
+      )}
     </div>
   )
 }

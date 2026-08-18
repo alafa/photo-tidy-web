@@ -42,6 +42,12 @@ type Props = {
    * trigger rather than an `(id: string) => void` callback.
    */
   onDelete?: () => void
+  /**
+   * Pre-bound by the caller (see `PhotoGrid.renderCard`), mirroring
+   * `onDelete` above -- `PhotoCard` itself doesn't know its own id, so this
+   * is a zero-arg trigger rather than an `(id: string) => void` callback.
+   */
+  onZoom?: () => void
 }
 
 export default function PhotoCard({
@@ -52,6 +58,7 @@ export default function PhotoCard({
   onSelect,
   checked,
   onDelete,
+  onZoom,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -170,6 +177,27 @@ export default function PhotoCard({
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
+          </svg>
+        </button>
+        {/* Zoom icon overlay — always visible, bottom-left, symmetric with
+            the delete icon's bottom-right placement (KTD4). Neutral color
+            (zinc) rather than the delete icon's warning tone, so the two
+            read as visually distinct at a glance despite matching size and
+            always-visible treatment. Same stopPropagation pairing (KTD3) as
+            the delete icon so it never toggles selection or starts a drag. */}
+        <button
+          type="button"
+          aria-label="Zoom photo"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            onZoom?.()
+          }}
+          className="absolute bottom-0 left-0 p-3 flex items-center justify-center text-zinc-100 hover:text-white"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+            <circle cx="5" cy="5" r="3.5" />
+            <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
           </svg>
         </button>
       </div>
