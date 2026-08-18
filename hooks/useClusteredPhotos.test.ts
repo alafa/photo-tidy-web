@@ -15,7 +15,7 @@ vi.mock('@/lib/photo-clustering', async (importOriginal) => {
 import { buildDendrogram } from '@/lib/photo-clustering'
 const mockBuildDendrogram = vi.mocked(buildDendrogram)
 
-import { useClusteredPhotos } from './useClusteredPhotos'
+import { useClusteredPhotos, earliestCapturedAtMs } from './useClusteredPhotos'
 
 afterEach(cleanup)
 
@@ -239,5 +239,61 @@ describe('useClusteredPhotos', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// U5: `earliestCapturedAtMs` is now exported (additively, alongside
+// `clusterKey`) so components/PhotoGrid.tsx's day-bucketing pass can reuse
+// this hook's existing anchor-value convention instead of recomputing an
+// equivalent value from scratch. Every test above this point is completely
+// unmodified -- this describe block only adds new coverage.
+describe('earliestCapturedAtMs (exported for PhotoGrid.tsx day-bucketing)', () => {
+  it('returns the minimum capturedAt (in ms) among a cluster\'s members, ignoring member order', () => {
+    const early = makeEntry('early', 'early.jpg', '2024-01-01T00:00:00Z', 0)
+    const late = makeEntry('late', 'late.jpg', '2024-06-01T00:00:00Z', 1)
+    const middle = makeEntry('middle', 'middle.jpg', '2024-03-01T00:00:00Z', 2)
+    const photosById = new Map([
+      ['early', early],
+      ['late', late],
+      ['middle', middle],
+    ])
+
+    // Deliberately NOT in chronological order -- the result must be driven
+    // by capturedAt values, not array position.
+    const cluster = { id: 'c1', members: ['late', 'early', 'middle'] }
+
+    expect(earliestCapturedAtMs(cluster, photosById)).toBe(early.capturedAt!.getTime())
+  })
+
+  it('excludes null-capturedAt members from the min when the cluster has a mix of dated and undated members', () => {
+    const dated = makeEntry('dated', 'dated.jpg', '2024-05-01T00:00:00Z', 0)
+    const undated = makeEntry('undated', 'undated.jpg', null, 1)
+    const photosById = new Map([
+      ['dated', dated],
+      ['undated', undated],
+    ])
+    const cluster = { id: 'c1', members: ['undated', 'dated'] }
+
+    expect(earliestCapturedAtMs(cluster, photosById)).toBe(dated.capturedAt!.getTime())
+  })
+
+  it('falls back to Infinity when every member has a null capturedAt', () => {
+    const null1 = makeEntry('null1', 'null1.jpg', null, 0)
+    const null2 = makeEntry('null2', 'null2.jpg', null, 1)
+    const photosById = new Map([
+      ['null1', null1],
+      ['null2', null2],
+    ])
+    const cluster = { id: 'c1', members: ['null1', 'null2'] }
+
+    expect(earliestCapturedAtMs(cluster, photosById)).toBe(Infinity)
+  })
+
+  it('for a single-member "cluster", returns exactly that photo\'s own capturedAt', () => {
+    const solo = makeEntry('solo', 'solo.jpg', '2024-07-04T12:00:00Z', 0)
+    const photosById = new Map([['solo', solo]])
+    const cluster = { id: 'c1', members: ['solo'] }
+
+    expect(earliestCapturedAtMs(cluster, photosById)).toBe(solo.capturedAt!.getTime())
   })
 })

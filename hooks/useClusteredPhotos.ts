@@ -87,8 +87,18 @@ export function clusterKey(cluster: Cluster): string {
  * own `capturedAt`, so it sorts at exactly the position it already holds in
  * the `photos` prop; changing the similarity threshold never moves a photo
  * whose own cluster membership didn't change.
+ *
+ * Exported (alongside `clusterKey`) for `components/PhotoGrid.tsx`'s
+ * day-boundary-header pass: it's the same "what day does this cluster's
+ * earliest member fall on" anchor value this hook already computes for
+ * ordering, so the day-bucketing pass reuses it instead of recomputing an
+ * equivalent value from scratch. This is the ONLY change day-grouping makes
+ * to this hook — see the day-grouping unit's plan notes: `renderBlocks`'s
+ * shape, the `ClusterRenderBlock` union, and `visualOrder` are all
+ * deliberately untouched, so day headers can never affect what
+ * drag-and-drop resolves against.
  */
-function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
+export function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
   let earliest = Infinity
   for (const id of cluster.members) {
     const capturedAt = photosById.get(id)?.capturedAt ?? null

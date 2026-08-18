@@ -669,3 +669,177 @@ describe('PhotoGrid — U2: delete icon overlay', () => {
     expect(clickSpy).toHaveBeenCalled()
   })
 })
+
+describe('PhotoGrid — U5: day-boundary headers', () => {
+  // Day headers are queried as headings whose accessible name is the
+  // full-month formatted date (KTD9) -- distinct from the "N related
+  // photos" per-cluster <h2> and any filename/date text on the cards
+  // themselves, so `getByRole('heading', { name: ... })` unambiguously
+  // targets the day header, not card content.
+  function dayHeadings() {
+    return screen.getAllByRole('heading').filter((h) => h.textContent !== null && /related photos/.test(h.textContent) === false)
+  }
+
+  it('a batch spanning 3 distinct UTC calendar days produces exactly 3 day headers, each with the correct full-month date, each immediately before that day\'s content', () => {
+    const day1 = makeEntry('day1.jpg', 0, '2026-08-20T10:00:00Z')
+    const day2 = makeEntry('day2.jpg', 1, '2026-08-21T10:00:00Z')
+    const day3 = makeEntry('day3.jpg', 2, '2026-08-22T10:00:00Z')
+    const photos = [day1, day2, day3]
+
+    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026', 'August 21, 2026', 'August 22, 2026'])
+
+    // Each header sits immediately before that day's photo in DOM order.
+    const img1 = screen.getByAltText('day1.jpg')
+    const img2 = screen.getByAltText('day2.jpg')
+    const img3 = screen.getByAltText('day3.jpg')
+    expect(headings[0].compareDocumentPosition(img1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(img1.compareDocumentPosition(headings[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(headings[1].compareDocumentPosition(img2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(img2.compareDocumentPosition(headings[2]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(headings[2].compareDocumentPosition(img3) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('AE2: a cluster whose earliest member is on day 1 and latest member on day 3 renders once, under day 1\'s header only -- not split, not duplicated', () => {
+    // p1 (day1) is hash-identical to p2 (day3) so they cluster at the 0%
+    // default threshold, spanning 3 calendar days end to end.
+    const p1 = makeEntry('p1.jpg', 0, '2026-08-20T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 1, '2026-08-22T00:00:00Z')
+    const photos = [p1, p2]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+
+    // Sanity: they really did cluster into one 2-member section.
+    const sections = document.querySelectorAll('section')
+    expect(sections).toHaveLength(1)
+    expect(sections[0].textContent).toContain('2 related photos')
+
+    // Exactly one day header, for day 1 -- not day 3, not two headers.
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026'])
+
+    // Both members render exactly once each, inside that one section.
+    expect(screen.getAllByAltText('p1.jpg')).toHaveLength(1)
+    expect(screen.getAllByAltText('p2.jpg')).toHaveLength(1)
+  })
+
+  it('AE5: a run of chronologically-adjacent singleton photos spanning two UTC days with no intervening cluster splits into two day groups, not one', () => {
+    // None of these three photos share a hash with any other, so all three
+    // stay singletons (one 'singles' render block) -- but two different
+    // capturedAt calendar days, with no cluster in between to force a
+    // block boundary.
+    const s1 = makeEntry('s1.jpg', 0, '2026-08-20T23:00:00Z')
+    const s2 = makeEntry('s2.jpg', 1, '2026-08-21T01:00:00Z')
+    const s3 = makeEntry('s3.jpg', 2, '2026-08-21T02:00:00Z')
+    const photos = [s1, s2, s3]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [s1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [s2.id, makeMetrics(hashFromPositions(range(30, 39)))],
+      [s3.id, makeMetrics(hashFromPositions(range(60, 69)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+
+    // Sanity: still a flat run of singles, no cluster section.
+    expect(document.querySelectorAll('section')).toHaveLength(0)
+
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026', 'August 21, 2026'])
+
+    const img1 = screen.getByAltText('s1.jpg')
+    const img2 = screen.getByAltText('s2.jpg')
+    const img3 = screen.getByAltText('s3.jpg')
+    // s1 under day-1 header, s2/s3 under day-2 header.
+    expect(headings[0].compareDocumentPosition(img1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(headings[1].compareDocumentPosition(img2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(headings[1].compareDocumentPosition(img3) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // img1 comes before headings[1] (day-1 content ends before day-2 starts).
+    expect(img1.compareDocumentPosition(headings[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('AE3: a batch mixing dated and undated photos produces every dated header first (chronological), then exactly one trailing "Undated" header holding every null-timestamp entry', () => {
+    const dated1 = makeEntry('dated1.jpg', 0, '2026-08-20T00:00:00Z')
+    const dated2 = makeEntry('dated2.jpg', 1, '2026-08-21T00:00:00Z')
+    const undated1 = makeEntry('undated1.jpg', 2, null)
+    const undated2 = makeEntry('undated2.jpg', 3, null)
+    // Passed with undated photos interleaved in the input array -- ordering
+    // must come from the hook's null-last sort, not input order.
+    const photos = [undated1, dated1, undated2, dated2]
+
+    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026', 'August 21, 2026', 'Undated'])
+
+    // Both undated photos render after the last dated header, under the
+    // single trailing "Undated" header.
+    const undatedHeading = headings[2]
+    const img1 = screen.getByAltText('undated1.jpg')
+    const img2 = screen.getByAltText('undated2.jpg')
+    expect(undatedHeading.compareDocumentPosition(img1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(undatedHeading.compareDocumentPosition(img2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('a batch with zero dated photos (all null capturedAt) renders exactly one "Undated" header and no dated headers', () => {
+    const photos = [makeEntry('u1.jpg', 0, null), makeEntry('u2.jpg', 1, null)]
+
+    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+
+    expect(dayHeadings().map((h) => h.textContent)).toEqual(['Undated'])
+  })
+
+  it('a single-day, fully-dated batch renders exactly one day header, above all photos', () => {
+    const a = makeEntry('a.jpg', 0, '2026-08-20T01:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2026-08-20T22:00:00Z')
+    const photos = [a, b]
+
+    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+
+    const headings = dayHeadings()
+    expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026'])
+
+    const imgA = screen.getByAltText('a.jpg')
+    const imgB = screen.getByAltText('b.jpg')
+    expect(headings[0].compareDocumentPosition(imgA) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(headings[0].compareDocumentPosition(imgB) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('moving the similarity slider (changing cluster membership) re-renders day headers without duplicating or dropping any -- same count/order regardless of clustering state', () => {
+    // p1/p2 are hash-close enough to merge only once the slider is raised
+    // (distance 0.3, same shape as the hook's own "raises similarityPercent"
+    // test); both are on the same calendar day, s1/s2 fall on two other
+    // distinct days that never change membership.
+    const s1 = makeEntry('s1.jpg', 0, '2026-08-19T00:00:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2026-08-20T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2026-08-20T01:00:00Z')
+    const s2 = makeEntry('s2.jpg', 3, '2026-08-21T00:00:00Z')
+    const photos = [s1, p1, p2, s2]
+    const metrics = new Map<string, PhotoMetrics | undefined>([
+      [s1.id, makeMetrics(hashFromPositions(range(0, 9)))],
+      [p1.id, makeMetrics(hashFromPositions(range(30, 39)))],
+      [p2.id, makeMetrics(hashFromPositions(range(33, 42)))],
+      [s2.id, makeMetrics(hashFromPositions(range(90, 99)))],
+    ])
+
+    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+
+    // Before: p1/p2 too strict to cluster at the 0% default -- no section.
+    expect(document.querySelectorAll('section')).toHaveLength(0)
+    const before = dayHeadings().map((h) => h.textContent)
+    expect(before).toEqual(['August 19, 2026', 'August 20, 2026', 'August 21, 2026'])
+
+    fireEvent.change(screen.getByLabelText(/Similarity/), { target: { value: '70' } })
+
+    // After: p1/p2 now cluster into one section, but the day-header
+    // count/order is identical -- clustering state never perturbs it.
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+    const after = dayHeadings().map((h) => h.textContent)
+    expect(after).toEqual(before)
+  })
+})
