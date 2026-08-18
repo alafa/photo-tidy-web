@@ -34,6 +34,27 @@ vi.mock('@/hooks/usePhotoMetrics', () => ({
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
 
+// U1: capture the exact `onBatchDelete` prop PhotoUploadPage hands to
+// BatchEditPanel, so tests can invoke handleBatchDelete directly with an
+// explicit `ids` argument -- there's no per-card delete UI yet (that's a
+// separate, later unit) to drive such a call through fireEvent. The real
+// BatchEditPanel is still rendered underneath (via importOriginal), so every
+// other test in this file that exercises "Delete selected" through the
+// actual UI is completely unaffected.
+let capturedOnBatchDelete: ((ids?: string[]) => void) | null = null
+
+vi.mock('./BatchEditPanel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./BatchEditPanel')>()
+  const Actual = actual.default
+  return {
+    ...actual,
+    default: (props: React.ComponentProps<typeof Actual> & { onBatchDelete: (ids?: string[]) => void }) => {
+      capturedOnBatchDelete = props.onBatchDelete
+      return <Actual {...props} />
+    },
+  }
+})
+
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({
     children,
@@ -106,6 +127,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
+  capturedOnBatchDelete = null
   mockUseObjectUrls.mockReturnValue({
     getObjectUrl: (file: File) => `blob:${file.name}`,
     releaseObjectUrl: vi.fn(),
@@ -980,6 +1002,128 @@ describe('PhotoUploadPage — batch delete', () => {
     // BatchEditPanel/count survives for the remaining photos (m2, solo2).
     expect(screen.queryByText(/photos? selected/)).toBeNull()
     expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull()
+  })
+
+  // U1: generalizing handleBatchDelete to accept an explicit `ids` param
+  // (for a future per-card delete, U2, not part of this task) -- these prove
+  // the selection-pruning behavior is now scoped to exactly the passed ids
+  // rather than unconditionally clearing the whole selection. There's no
+  // per-card delete UI yet to drive an explicit-id call through fireEvent,
+  // so `capturedOnBatchDelete` (module-level, captured from the real
+  // BatchEditPanel's `onBatchDelete` prop via the mock at the top of this
+  // file) is invoked directly with explicit id arguments.
+  describe('U1: explicit ids parameter', () => {
+    it('calling with no arguments still deletes every selected photo and clears the whole selection (unchanged default behavior)', () => {
+      const photos = [
+        makeEntry('a.jpg', 0),
+        makeEntry('b.jpg', 1),
+        makeEntry('c.jpg', 2),
+      ]
+      const removePhotosMock = makeStatefulPhotosMock(photos)
+      const releaseObjectUrlMock = vi.fn()
+      mockUseObjectUrls.mockReturnValue({
+        getObjectUrl: (file: File) => `blob:${file.name}`,
+        releaseObjectUrl: releaseObjectUrlMock,
+      })
+
+      render(<PhotoUploadPage />)
+
+      fireEvent.click(screen.getByAltText('a.jpg'))
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      expect(screen.getByText('2 photos selected')).toBeDefined()
+
+      act(() => {
+        capturedOnBatchDelete?.()
+      })
+
+      expect(removePhotosMock).toHaveBeenCalledOnce()
+      const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+      expect(new Set(removedIds)).toEqual(new Set([photos[0].id, photos[1].id]))
+
+      expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
+      expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[1].file)
+      expect(releaseObjectUrlMock).toHaveBeenCalledTimes(2)
+
+      // Whole selection cleared -- c.jpg (never selected) remains untouched.
+      expect(screen.queryAllByRole('img')).toHaveLength(1)
+      expect(screen.getByAltText('c.jpg')).toBeDefined()
+    })
+
+    it('calling with a single id from a 3-photo selection removes only that photo and prunes only its id, leaving the other 2 still selected', () => {
+      const photos = [
+        makeEntry('a.jpg', 0),
+        makeEntry('b.jpg', 1),
+        makeEntry('c.jpg', 2),
+        makeEntry('d.jpg', 3),
+      ]
+      const removePhotosMock = makeStatefulPhotosMock(photos)
+      const releaseObjectUrlMock = vi.fn()
+      mockUseObjectUrls.mockReturnValue({
+        getObjectUrl: (file: File) => `blob:${file.name}`,
+        releaseObjectUrl: releaseObjectUrlMock,
+      })
+
+      render(<PhotoUploadPage />)
+
+      // 3-photo selection: a, b, c. d stays unselected throughout.
+      fireEvent.click(screen.getByAltText('a.jpg'))
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      fireEvent.click(screen.getByAltText('c.jpg'))
+      expect(screen.getByText('3 photos selected')).toBeDefined()
+
+      act(() => {
+        capturedOnBatchDelete?.([photos[0].id])
+      })
+
+      expect(removePhotosMock).toHaveBeenCalledWith([photos[0].id])
+      expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
+      expect(releaseObjectUrlMock).toHaveBeenCalledOnce()
+
+      // a is gone; b, c, d remain, and b/c are still selected (only a's id
+      // was pruned from selectedIds) -- so the "2 photos selected" count
+      // (b, c) still reflects on the still-mounted BatchEditPanel mock.
+      expect(screen.queryByAltText('a.jpg')).toBeNull()
+      expect(screen.getByAltText('b.jpg')).toBeDefined()
+      expect(screen.getByAltText('c.jpg')).toBeDefined()
+      expect(screen.getByAltText('d.jpg')).toBeDefined()
+      expect(screen.getByText('2 photos selected')).toBeDefined()
+    })
+
+    it('deleting an id that is not currently selected still deletes that photo and leaves selectedIds completely unchanged', () => {
+      const photos = [
+        makeEntry('a.jpg', 0),
+        makeEntry('b.jpg', 1),
+        makeEntry('c.jpg', 2),
+      ]
+      const removePhotosMock = makeStatefulPhotosMock(photos)
+      const releaseObjectUrlMock = vi.fn()
+      mockUseObjectUrls.mockReturnValue({
+        getObjectUrl: (file: File) => `blob:${file.name}`,
+        releaseObjectUrl: releaseObjectUrlMock,
+      })
+
+      render(<PhotoUploadPage />)
+
+      // Select only b -- a 1-photo selection that does NOT include c.
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      expect(screen.getByText('1 photo selected')).toBeDefined()
+
+      // Delete c, which was never in the selection.
+      act(() => {
+        capturedOnBatchDelete?.([photos[2].id])
+      })
+
+      expect(removePhotosMock).toHaveBeenCalledWith([photos[2].id])
+      expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[2].file)
+      expect(releaseObjectUrlMock).toHaveBeenCalledOnce()
+
+      // c is gone; a, b remain. selectedIds is completely unchanged -- b is
+      // still the sole selected photo.
+      expect(screen.queryByAltText('c.jpg')).toBeNull()
+      expect(screen.getByAltText('a.jpg')).toBeDefined()
+      expect(screen.getByAltText('b.jpg')).toBeDefined()
+      expect(screen.getByText('1 photo selected')).toBeDefined()
+    })
   })
 })
 

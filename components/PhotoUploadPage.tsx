@@ -215,12 +215,24 @@ export default function PhotoUploadPage() {
     (a, b) => a.getTime() - b.getTime()
   )
 
-  function handleBatchDelete() {
+  // Accepts an explicit `ids` list (defaulting to the current selection) so
+  // a future per-card delete (not part of this unit) can delete a single
+  // photo that isn't necessarily selected. Prunes only those specific ids
+  // out of `selectedIds` -- mirroring `toggleSelect`'s build-a-new-Set
+  // pattern above -- rather than unconditionally clearing the whole
+  // selection, so deleting an unselected photo can't silently wipe out an
+  // unrelated multi-photo selection the user already made.
+  function handleBatchDelete(ids: string[] = Array.from(selectedIds)) {
+    const idSet = new Set(ids)
     for (const photo of photos) {
-      if (selectedIds.has(photo.id)) releaseObjectUrl(photo.file)
+      if (idSet.has(photo.id)) releaseObjectUrl(photo.file)
     }
-    removePhotos(Array.from(selectedIds))
-    clearSelection()
+    removePhotos(ids)
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
   }
 
   function handleImportClick() {
@@ -372,7 +384,22 @@ export default function PhotoUploadPage() {
                 distinctTimestamps={distinctSelectedTimestamps}
                 onBatchRename={handleBatchRename}
                 onBatchSetTimestamp={handleBatchSetTimestamp}
-                onBatchDelete={handleBatchDelete}
+                // Adapter, not a bare `handleBatchDelete` reference:
+                // BatchEditPanel wires its delete button as
+                // `onClick={onBatchDelete}`, so a plain click hands this prop
+                // the click's SyntheticEvent as its first argument. Forwarded
+                // straight through, that would land in `handleBatchDelete`'s
+                // new `ids` parameter and defeat its
+                // `= Array.from(selectedIds)` default (which only applies to
+                // a genuinely `undefined` argument), crashing on
+                // `new Set(event)`. Only a real `string[]` is forwarded —
+                // matching the explicit-ids shape a future per-card delete
+                // (not part of this unit) will call this same prop with —
+                // anything else (like a click event) falls through to the
+                // default, preserving today's whole-selection behavior.
+                onBatchDelete={(ids?: string[]) =>
+                  handleBatchDelete(Array.isArray(ids) ? ids : undefined)
+                }
                 onClearSelection={clearSelection}
               />
             )}
