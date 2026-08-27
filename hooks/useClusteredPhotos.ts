@@ -1,77 +1,35 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import { compareByCapturedAt, type PhotoEntry } from '@/hooks/usePhotos'
-import type { PhotoMetrics } from '@/lib/perceptual-hash'
-import {
-  buildDendrogram,
-  cutDendrogram,
-  hashToVector,
-  l2Normalize,
-  MAX_DISTANCE_THRESHOLD,
-  type Cluster,
-  type PhotoHashInput,
-} from '@/lib/photo-clustering'
+import { useClusterApi, type ClusterApiAvailability } from '@/hooks/useClusterApi'
 
 /**
- * Maps the UI's 0-100% similarity slider onto the raw cosine-distance
- * threshold (0.0-`MAX_DISTANCE_THRESHOLD`) `cutDendrogram` expects. Kept in
- * this hook (not the slider's own component) because the hook's public
- * contract takes `similarityPercent`, not a raw distance — the component
- * owns the slider's min/max/default UI concerns, this hook only owns turning
- * whatever percent it's given into clustering math.
+ * A cluster of photo ids, in the shape this hook works with internally.
+ * Built from `useClusterApi`'s `{clusterIndex, photoIds}` shape (renamed to
+ * `members` here) plus one-member clusters synthesized for every photo not
+ * covered by a returned cluster (see `useClusteredPhotos` below) — kept
+ * local to this file rather than imported from the now-removed local
+ * clustering module, since nothing else this file needs comes from there
+ * anymore.
  */
-function percentToDistanceThreshold(percent: number): number {
-  return (percent / 100) * MAX_DISTANCE_THRESHOLD
-}
-
-// How long `hashInputs` must stay unchanged before the expensive dendrogram
-// build (below) re-runs on it. `usePhotoMetrics` commits a new metrics Map
-// after every 5-photo chunk resolves, which otherwise gives `hashInputs` a
-// new identity roughly that often during a large import -- rebuilding the
-// full O(n^3)-ish dendrogram on every one of those ticks instead of once.
-const DENDROGRAM_REBUILD_DEBOUNCE_MS = 200
-
-/**
- * Returns `value`, but only updates to a new value after it has stayed the
- * same reference for `delayMs` -- except the very first value, which
- * commits immediately (so mounting onto an already-settled batch, the
- * common case, shows clusters right away instead of behind a fixed delay).
- * Used to decouple the expensive dendrogram build from every individual
- * metrics-arrival tick during an in-progress import; the cheap per-tick cut
- * (`cutDendrogram`) still runs on the live, undebounced value.
- */
-function useDebouncedValue<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value)
-  const isFirstRef = useRef(true)
-
-  useEffect(() => {
-    // `useState(value)` above already seeded `debounced` with the initial
-    // value at mount time, so the first effect run has nothing to commit --
-    // only later changes need debouncing.
-    if (isFirstRef.current) {
-      isFirstRef.current = false
-      return
-    }
-    const timer = setTimeout(() => setDebounced(value), delayMs)
-    return () => clearTimeout(timer)
-  }, [value, delayMs])
-
-  return debounced
+interface Cluster {
+  id: string
+  members: string[]
 }
 
 /**
  * A stable, content-derived identity for a cluster: the sorted-and-joined
- * member id list. `cutDendrogram` reassigns `cluster.id` as `cluster-${N}`
- * fresh on every call, purely from union-find discovery order — as metrics
- * resolve asynchronously, the similarity slider moves, or a delete shrinks
- * the batch, a given index can end up pointing at a completely different
- * real-world group of photos than it did on a prior render. Using
- * `cluster.id` as a React key or a selection-state map key would let a
- * stale selection from one cluster silently attach to an unrelated cluster
- * that later inherits the same index. This key is order-independent (sorts
- * before joining), so reordering a cluster's `members` for display never
- * changes its key.
+ * member id list. A cluster's synthetic `id` (either `cluster-${clusterIndex}`
+ * from the API or `single-${photoId}` for a synthesized singleton — see
+ * below) is not stable across re-clusters: as the API recomputes clusters at
+ * a new threshold or the photo set changes, a given index/id can end up
+ * pointing at a completely different real-world group of photos than it did
+ * on a prior render. Using that raw `id` as a React key or a selection-state
+ * map key would let a stale selection from one cluster silently attach to an
+ * unrelated cluster that later inherits the same id. This key is
+ * order-independent (sorts before joining), so reordering a cluster's
+ * `members` for display never changes its key.
  */
 export function clusterKey(cluster: Cluster): string {
   return [...cluster.members].sort().join(',')
@@ -105,21 +63,13 @@ function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEnt
  * `uploadIndex`) so this hook can't silently drift from `sortPhotos`'s
  * ordering rule.
  *
- * Every member id is guaranteed to resolve via `photosById`: `rawClusters`
- * is built from `hashInputs`, which is itself `photos.map(...)`, so a
- * cluster member can never reference an id absent from `photos`
- * (`cutDendrogram` never invents ids — see `lib/photo-clustering.test.ts`'s
- * "ignores a merge referencing an id no longer in the current photo set"
- * guard).
- *
- * Deliberately NOT `hierarchicalOrder` (`lib/photo-clustering.ts`'s
- * similarity-based ordering, which the old `ClusterView.tsx` used) — once
- * cluster members become drag targets in a later unit, a similarity-ordered
- * visual sequence would diverge from the chronologically-sorted `photos`
- * array `hooks/usePhotos.ts`'s `slotTimestamp` uses to compute a dropped
- * photo's new timestamp from its visually-adjacent neighbors, silently
- * corrupting that math. Chronological member order keeps visual order and
- * array order identical everywhere, inside a cluster included.
+ * Deliberately NOT the API's own member ordering (similarity-based) — once
+ * cluster members become drag targets, a similarity-ordered visual sequence
+ * would diverge from the chronologically-sorted `photos` array
+ * `hooks/usePhotos.ts`'s `slotTimestamp` uses to compute a dropped photo's
+ * new timestamp from its visually-adjacent neighbors, silently corrupting
+ * that math. Chronological member order keeps visual order and array order
+ * identical everywhere, inside a cluster included.
  */
 function sortMembersChronologically(members: string[], photosById: Map<string, PhotoEntry>): string[] {
   return [...members].sort((idA, idB) => compareByCapturedAt(photosById.get(idA)!, photosById.get(idB)!))
@@ -137,10 +87,6 @@ export type ClusterRenderBlock = { type: 'cluster'; cluster: Cluster } | { type:
 export interface UseClusteredPhotosResult {
   /** Chronologically-ordered cluster sections and singleton runs, ready to render. */
   renderBlocks: ClusterRenderBlock[]
-  /** L2-normalized perceptual-hash vector per photo with a resolved hash — reused by debug mode's pairwise-distance display. */
-  vectorsById: Map<string, number[]>
-  /** Per-photo hash (or `null` for in-flight/undecodable) fed into the clustering pipeline — reused by debug mode's hash display. */
-  hashInputs: PhotoHashInput[]
   /** `photos` indexed by id — built once here and reused by consumers (e.g. `components/PhotoGrid.tsx`) instead of each rebuilding its own copy. */
   photosById: Map<string, PhotoEntry>
   /**
@@ -148,7 +94,7 @@ export interface UseClusteredPhotosResult {
    * actually renders them — i.e. true DOM/visual order, not the flat,
    * purely-per-photo-chronological `photos` array order. A cluster's
    * members are NOT guaranteed to be array-contiguous in `photos` (a
-   * cluster is grouped by hash similarity, not time, so an unrelated,
+   * cluster is grouped by API similarity, not time, so an unrelated,
    * non-member photo captured in between two cluster members can still
    * land between them in `photos`), so consumers that need to resolve a
    * drag-and-drop's true visual neighbors (e.g.
@@ -156,75 +102,70 @@ export interface UseClusteredPhotosResult {
    * not `photos.map((p) => p.id)`.
    */
   visualOrder: string[]
+  /** Passed through from `useClusterApi` — see `hooks/useClusterApi.ts`'s `ClusterApiAvailability` doc. */
+  availability: ClusterApiAvailability
+  /** Passed through from `useClusterApi` — true while a cluster request (including its per-photo-rejection retry) is in flight. `renderBlocks` still reflects the last successful result while this is true (R9). */
+  isLoading: boolean
 }
 
 /**
- * Computes perceptual-hash clusters for a batch of photos and groups them
- * into chronologically-ordered render blocks (cluster sections and
- * singleton runs) — the pure computation half of what `components/
- * ClusterView.tsx` used to do inline, split out so it can be unit-tested
- * without rendering and reused by a future consumer without debug-mode UI
- * state (`debugMode`, `comparePair`) coming along for the ride. Mirrors
- * `hooks/usePhotoMetrics.ts`'s separation of computation from rendering.
+ * Fetches similarity clusters for a batch of photos from photo-tidy-api (via
+ * `useClusterApi`) and groups them into chronologically-ordered render
+ * blocks (cluster sections and singleton runs) — the pure computation half
+ * of what `components/PhotoGrid.tsx` renders. Mirrors the previous
+ * local-clustering version of this hook's separation of computation from
+ * rendering; only the clustering *source* changed (API call instead of a
+ * client-side dendrogram).
  *
- * `similarityPercent` is a 0-100 value (see `percentToDistanceThreshold`);
- * the caller owns whatever slider or control produces it.
+ * `similarityPercent` is a 0-100 value; the caller owns whatever slider or
+ * control produces it. `useClusterApi` maps it onto the API's 0.0-0.5
+ * threshold and owns the health gate, debouncing, and race-safety.
  */
-export function useClusteredPhotos(
-  photos: PhotoEntry[],
-  metrics: Map<string, PhotoMetrics | undefined>,
-  similarityPercent: number
-): UseClusteredPhotosResult {
+export function useClusteredPhotos(photos: PhotoEntry[], similarityPercent: number): UseClusteredPhotosResult {
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
-  const distanceThreshold = percentToDistanceThreshold(similarityPercent)
 
-  // Hash inputs for the clustering pipeline, and L2-normalized vectors for
-  // every photo with a resolved hash (reused by debug mode's pairwise
-  // distance display).
-  const hashInputs = useMemo<PhotoHashInput[]>(
-    () =>
-      photos.map((photo) => ({
-        id: photo.id,
-        // A photo whose metrics are still in flight (absent map entry, or
-        // present-but-`undefined`) is treated the same as "no hash" — it
-        // renders as a temporary singleton and re-clusters correctly once
-        // its real hash lands and `metrics` updates.
-        hash: metrics.get(photo.id)?.hash ?? null,
-      })),
-    [photos, metrics]
-  )
-  const vectorsById = useMemo(() => {
-    const map = new Map<string, number[]>()
-    for (const { id, hash } of hashInputs) {
-      if (hash !== null) map.set(id, l2Normalize(hashToVector(hash)))
+  const { clusters: apiClusters, availability, isLoading } = useClusterApi(photos, similarityPercent)
+
+  // Maps the API's `{clusterIndex, photoIds}` clusters into this file's
+  // internal `Cluster{id, members}` shape, then synthesizes a one-member
+  // `Cluster` for every photo NOT covered by any returned cluster, so it
+  // still renders as an ordinary singleton instead of silently vanishing
+  // from the grid. This single "cover every photo" rule handles several
+  // cases uniformly:
+  //  - R15/R16/KTD12: a photo excluded from the request (thumbnail failure,
+  //    or a per-photo API rejection) was never sent, so it can never appear
+  //    in `apiClusters` and is always picked up here.
+  //  - R5: at 0% similarity (or before any cluster call has ever
+  //    succeeded), `apiClusters` is empty and every photo renders as its
+  //    own ungrouped singleton, matching "render photos ungrouped."
+  //  - Mirrors the old local-clustering version's guarantee (there,
+  //    `cutDendrogram` always assigned every photo to at least a
+  //    single-member cluster) so this hook's full-coverage invariant is
+  //    unchanged by the clustering-source swap.
+  // Member ids not present in the current `photos` batch are dropped (and a
+  // cluster left with zero members is dropped entirely) rather than
+  // crashing `sortMembersChronologically` below — `useClusterApi` can hand
+  // back a stale `clusters` value (KTD8's stale-while-loading) referencing a
+  // photo id no longer in `photos` after a delete, briefly, until its next
+  // request (reflecting the new `photos`) supersedes it.
+  const rawClusters = useMemo<Cluster[]>(() => {
+    const fromApi: Cluster[] = apiClusters
+      .map((cluster) => ({
+        id: `cluster-${cluster.clusterIndex}`,
+        members: cluster.photoIds.filter((id) => photosById.has(id)),
+      }))
+      .filter((cluster) => cluster.members.length > 0)
+
+    const coveredIds = new Set(fromApi.flatMap((cluster) => cluster.members))
+
+    const singles: Cluster[] = []
+    for (const photo of photos) {
+      if (coveredIds.has(photo.id)) continue
+      singles.push({ id: `single-${photo.id}`, members: [photo.id] })
     }
-    return map
-  }, [hashInputs])
 
-  // The expensive O(n^3)-ish complete-linkage dendrogram build only
-  // depends on the batch's hashes, not the similarity threshold — building
-  // it once and cutting it cheaply (below) on every slider change is what
-  // keeps live re-clustering responsive without a Web Worker at this app's
-  // stated scale (~200+ photos). See lib/photo-clustering.ts's top comment.
-  // Debounced separately from `hashInputs` itself: `usePhotoMetrics` gives
-  // `hashInputs` a new identity roughly every 5 photos during a large
-  // import, and without debouncing this build reran on every one of those
-  // ticks instead of once. `cutDendrogram` below still cuts against the
-  // live, undebounced `hashInputs` — a photo that resolves mid-debounce
-  // just stays a temporary singleton (already the documented/tested
-  // behavior for in-flight metrics) until the next debounced build catches
-  // it up.
-  const debouncedHashInputs = useDebouncedValue(hashInputs, DENDROGRAM_REBUILD_DEBOUNCE_MS)
-  const dendrogram = useMemo(() => buildDendrogram(debouncedHashInputs), [debouncedHashInputs])
-
-  // Cheap O(n) cut — safe to re-run on every threshold-slider tick, and on
-  // every live (non-debounced) hashInputs change. cutDendrogram tolerates
-  // `dendrogram` lagging behind `hashInputs` (a merge referencing an id no
-  // longer present in the current batch is simply ignored).
-  const rawClusters = useMemo(
-    () => cutDendrogram(hashInputs, dendrogram, distanceThreshold),
-    [hashInputs, dendrogram, distanceThreshold]
-  )
+    return [...fromApi, ...singles]
+  }, [apiClusters, photos, photosById])
 
   // Orders each cluster's own members chronologically (see
   // sortMembersChronologically), then places clusters — and single,
@@ -280,5 +221,5 @@ export function useClusteredPhotos(
     return order
   }, [renderBlocks])
 
-  return { renderBlocks, vectorsById, hashInputs, photosById, visualOrder }
+  return { renderBlocks, photosById, visualOrder, availability, isLoading }
 }
