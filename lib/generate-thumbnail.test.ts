@@ -5,7 +5,8 @@ import { generateThumbnail } from './generate-thumbnail'
 //
 // jsdom can't decode real images or rasterize a canvas, so
 // createImageBitmap and the canvas 2D context / toDataURL are mocked at the
-// same boundary lib/perceptual-hash.test.ts uses. The mocked
+// same boundary the old (now-removed) local dHash module's own test file
+// used. The mocked
 // createImageBitmap "resize" step just returns an object carrying whatever
 // resizeWidth/resizeHeight it was asked for, and the mocked toDataURL
 // encodes the canvas's actual pixel dimensions into its return value (as

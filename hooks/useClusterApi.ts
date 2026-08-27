@@ -158,10 +158,10 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
   const [isLoading, setIsLoading] = useState(false)
   const [excludedPhotoIds, setExcludedPhotoIds] = useState<Set<string>>(new Set())
 
-  // Thumbnail cache keyed by File identity (KTD16), mirroring
-  // hooks/usePhotoMetrics.ts's cache-ref pattern. `null` records a File whose
-  // thumbnail generation failed, so it's excluded rather than retried every
-  // tick.
+  // Thumbnail cache keyed by File identity (KTD16), mirroring the old
+  // (now-removed) local-clustering metrics hook's cache-ref pattern. `null`
+  // records a File whose thumbnail generation failed, so it's excluded
+  // rather than retried every tick.
   const thumbnailCacheRef = useRef<Map<File, string | null>>(new Map())
 
   // Generation-token guard against a stale response landing after a newer

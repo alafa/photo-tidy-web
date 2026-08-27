@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
-import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import type { ClusterRenderBlock, UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import BatchEditPanel from './BatchEditPanel'
 
@@ -65,7 +64,6 @@ function makeEntry(name: string, index: number, capturedAt: string | null = `202
 }
 
 const getObjectUrl = (file: File) => `blob:${file.name}`
-const emptyMetrics = new Map<string, PhotoMetrics | undefined>()
 
 /**
  * Builds `renderBlocks` the same way the real `useClusteredPhotos` does
@@ -125,13 +123,7 @@ function flatResult(photos: PhotoEntry[], overrides: Partial<UseClusteredPhotosR
 // count, exactly as the real app wires them. Used to prove selection is
 // unified end to end rather than merely forwarded prop-for-prop within
 // PhotoGrid in isolation.
-function SelectionHarness({
-  photos,
-  metrics,
-}: {
-  photos: PhotoEntry[]
-  metrics: Map<string, PhotoMetrics | undefined>
-}) {
+function SelectionHarness({ photos }: { photos: PhotoEntry[] }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
 
   function toggleSelect(id: string, checked: boolean) {
@@ -158,7 +150,6 @@ function SelectionHarness({
     <>
       <PhotoGrid
         photos={photos}
-        metrics={metrics}
         getObjectUrl={getObjectUrl}
         selectedIds={selectedIds}
         onSelect={toggleSelect}
@@ -181,7 +172,7 @@ describe('PhotoGrid', () => {
   it('renders all photo filenames', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('b.jpg')).toBeDefined()
   })
@@ -192,7 +183,6 @@ describe('PhotoGrid', () => {
     render(
       <PhotoGrid
         photos={photos}
-        metrics={emptyMetrics}
         getObjectUrl={getObjectUrl}
         onReorder={vi.fn()}
       />
@@ -204,14 +194,14 @@ describe('PhotoGrid', () => {
   it('does NOT add drag attributes when onReorder is absent', () => {
     const photos = [makeEntry('a.jpg', 0)]
     mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(document.querySelector('[aria-roledescription="sortable item"]')).toBeNull()
   })
 
   it('renders the correct number of cards', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
     mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(screen.getAllByRole('img')).toHaveLength(3)
   })
 
@@ -222,7 +212,6 @@ describe('PhotoGrid', () => {
     render(
       <PhotoGrid
         photos={photos}
-        metrics={emptyMetrics}
         getObjectUrl={getObjectUrl}
         selectedIds={new Set(['a.jpg-0'])}
         onSelect={onSelect}
@@ -240,7 +229,7 @@ describe('PhotoGrid', () => {
     ]
     mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('b.jpg')).toBeDefined()
@@ -261,7 +250,7 @@ describe('PhotoGrid', () => {
       clusteredResult(photos, [[solo1.id], [p1.id, p2.id, p3.id], [solo2.id]])
     )
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const sections = document.querySelectorAll('section')
     expect(sections).toHaveLength(1)
@@ -285,7 +274,7 @@ describe('PhotoGrid', () => {
   it('moving the slider updates similarityPercent and re-renders without tearing down and recreating an unrelated card', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const imgBefore = screen.getByAltText('a.jpg')
     const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
@@ -305,7 +294,7 @@ describe('PhotoGrid', () => {
     const photos = [solo1, p1, p2]
     mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[solo1.id], [p1.id, p2.id]]))
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     expect(screen.queryByRole('checkbox', { name: 'Debug mode' })).toBeNull()
     expect(screen.queryByText(/cosine distance/i)).toBeNull()
@@ -317,7 +306,7 @@ describe('PhotoGrid', () => {
       const photos = [makeEntry('a.jpg', 0)]
       mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'checking' }))
 
-      render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
       expect(slider.disabled).toBe(true)
@@ -328,7 +317,7 @@ describe('PhotoGrid', () => {
       const photos = [makeEntry('a.jpg', 0)]
       mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'unavailable' }))
 
-      render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
       expect(slider.disabled).toBe(true)
@@ -339,7 +328,7 @@ describe('PhotoGrid', () => {
       const photos = [makeEntry('a.jpg', 0)]
       mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'available' }))
 
-      render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
       expect(slider.disabled).toBe(false)
@@ -354,7 +343,7 @@ describe('PhotoGrid', () => {
       const lastKnown = clusteredResult(photos, [[solo1.id], [p1.id, p2.id]], { availability: 'available' })
 
       mockUseClusteredPhotos.mockReturnValue(lastKnown)
-      const { rerender } = render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      const { rerender } = render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       expect(document.querySelectorAll('section')).toHaveLength(1)
       expect(screen.getByText('solo1.jpg')).toBeDefined()
@@ -367,7 +356,7 @@ describe('PhotoGrid', () => {
       // contract, covered by their own tests) — PhotoGrid must not gate its
       // grid render on availability.
       mockUseClusteredPhotos.mockReturnValue({ ...lastKnown, availability: 'unavailable' })
-      rerender(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      rerender(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       expect(document.querySelectorAll('section')).toHaveLength(1)
       expect(screen.getByText('solo1.jpg')).toBeDefined()
@@ -381,7 +370,7 @@ describe('PhotoGrid', () => {
       const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
       mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'available', isLoading: true }))
 
-      render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
       expect(slider.disabled).toBe(false)
@@ -394,7 +383,7 @@ describe('PhotoGrid', () => {
       const photos = [makeEntry('a.jpg', 0)]
       mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { isLoading: false }))
 
-      render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
       expect(screen.queryByRole('status')).toBeNull()
     })
@@ -423,7 +412,7 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
 
   it("SortableContext's items is the full flat chronological id list, spanning across the cluster and both singleton runs (KTD2)", () => {
     render(
-      <PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     // Sanity: m1/m2 really did cluster together into one bordered section.
@@ -434,7 +423,7 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
 
   it('renders cluster members in the order the hook provides them (chronological, not upload-index order) -- the critical KTD3 guarantee behind within-cluster drag resolution', () => {
     render(
-      <PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     // m1 (uploadIndex 5, captured first) renders before m2 (uploadIndex 1,
@@ -457,7 +446,7 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
 
   it('cluster member cards render as SortablePhotoCard (real drag sources), not plain PhotoCard, when onReorder is provided', () => {
     render(
-      <PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     const section = document.querySelector('section') as HTMLElement
@@ -483,7 +472,7 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
   })
 
   it('selecting a cluster member updates the same selectedIds a standalone selection would, visible in BatchEditPanel\'s count', () => {
-    render(<SelectionHarness photos={photos} metrics={emptyMetrics} />)
+    render(<SelectionHarness photos={photos} />)
 
     // No BatchEditPanel until something is selected.
     expect(screen.queryByText(/selected/)).toBeNull()
@@ -500,7 +489,7 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
   })
 
   it('selecting photos both inside and outside a cluster in the same session produces one combined selection, not two separate ones', () => {
-    render(<SelectionHarness photos={photos} metrics={emptyMetrics} />)
+    render(<SelectionHarness photos={photos} />)
 
     fireEvent.click(screen.getByAltText('p1.jpg')) // cluster member
     fireEvent.click(screen.getByAltText('solo.jpg')) // standalone
@@ -523,7 +512,6 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
     render(
       <PhotoGrid
         photos={photos}
-        metrics={emptyMetrics}
         getObjectUrl={getObjectUrl}
         onNameChange={onNameChange}
         onTimestampChange={onTimestampChange}

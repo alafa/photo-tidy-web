@@ -1,10 +1,10 @@
 /**
  * Client-side base64 JPEG thumbnail generation for a photo `File`, capped
  * at ~300px on the longest side, for sending to photo-tidy-api's cluster
- * endpoint (its `"base64-encoded thumbnail"` request field). Adapts
- * lib/perceptual-hash.ts's decode-and-resize technique (before that file is
- * deleted in a later unit) but skips its `getImageData` pixel math — that
- * was specific to hashing; here `canvas.toDataURL()` is enough.
+ * endpoint (its `"base64-encoded thumbnail"` request field). Adapts the
+ * decode-and-resize technique the old (now-removed) local dHash module
+ * used, but skips its `getImageData` pixel math — that was specific to
+ * hashing; here `canvas.toDataURL()` is enough.
  */
 
 const MAX_DIMENSION = 300
@@ -12,10 +12,9 @@ const JPEG_QUALITY = 0.8
 
 // `createImageBitmap` is documented to never throw synchronously, but a
 // pathological/corrupt file can make it hang -- neither resolve nor reject
-// -- rather than fail cleanly. See lib/perceptual-hash.ts's
-// DECODE_TIMEOUT_MS comment for the full rationale; the same guard is
-// needed here so a single stuck decode can't stall an entire batch of
-// thumbnail generation.
+// -- rather than fail cleanly. The same guard the old (now-removed) local
+// dHash module used for this same rationale is needed here so a single
+// stuck decode can't stall an entire batch of thumbnail generation.
 const DECODE_TIMEOUT_MS = 10_000
 
 /** Races `promise` against a timer; a timeout rejects the same way a real
@@ -60,9 +59,9 @@ function computeTargetDimensions(
  * prefix stripped) for `file`, capped at ~300px on its longest side. Never
  * throws: an undecodable file, a hung decode, or a missing 2D canvas
  * context all resolve to `null` so one bad photo doesn't block a batch —
- * mirrors lib/perceptual-hash.ts's `computePhotoMetrics` never-throws
- * convention. Callers exclude a `null` result's photo from the cluster
- * request rather than treating it as a hard error.
+ * mirrors the never-throws convention the old (now-removed) local dHash
+ * module's own metrics computation used. Callers exclude a `null` result's
+ * photo from the cluster request rather than treating it as a hard error.
  */
 export async function generateThumbnail(file: File): Promise<string | null> {
   let bitmap: ImageBitmap

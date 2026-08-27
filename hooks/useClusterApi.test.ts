@@ -56,8 +56,9 @@ function clusterFail(status = 500) {
 
 /**
  * Renders `useClusterApi` through a props object threaded via
- * `initialProps`/`rerender`, mirroring `usePhotoMetrics.test.ts`'s
- * convention — critical here because `photos` array *identity* is a
+ * `initialProps`/`rerender`, mirroring the convention the old (now-removed)
+ * local-clustering metrics hook's own test file used — critical here
+ * because `photos` array *identity* is a
  * trigger (KTD9): a callback that reconstructs `[photo]` inline on every
  * call would hand the hook a new array on every internal state-driven
  * re-render (not just explicit `rerender()` calls), which the hook would

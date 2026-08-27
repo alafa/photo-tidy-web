@@ -1,15 +1,28 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
-import { range, makeHashFromPositions } from '@/lib/test-helpers/hash-fixtures'
+import type { PhotoEntry } from '@/hooks/usePhotos'
+import type { ClusterRenderBlock, UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import PhotoUploadPage from './PhotoUploadPage'
 
 afterEach(cleanup)
 
-// Mock hooks so we can control EXIF output. Only `usePhotos` itself is
-// mocked -- `compareByCapturedAt` is kept real (via importOriginal) since
+// Mock hooks so we can control EXIF output. `usePhotos` itself is mocked --
+// `compareByCapturedAt` is kept real (via importOriginal) since
 // `hooks/useClusteredPhotos.ts` imports it from this module for chronological
-// member ordering, exercised here through the real (unmocked)
-// useClusteredPhotos pipeline underneath PhotoGrid.
+// member ordering.
+//
+// `useClusteredPhotos` is mocked entirely (same technique as
+// `components/PhotoGrid.test.tsx`) rather than left real: real clustering now
+// goes through `useClusterApi` -> an actual network `fetch` to
+// photo-tidy-api's proxy routes, which this file has no interest in
+// exercising -- these tests care about PhotoUploadPage's own wiring (drag,
+// delete, batch editing, Google Photos import/upload), not the clustering
+// pipeline itself (covered by hooks/useClusteredPhotos.test.ts and
+// hooks/useClusterApi.test.ts). A handful of tests below still want a real
+// multi-member cluster on screen to exercise cluster-aware drag/delete/
+// batch-timestamp logic; they get one by overriding this mock's
+// implementation to return a specific `renderBlocks` shape, the same way
+// PhotoGrid.test.tsx's `clusteredResult` helper does.
 vi.mock('@/hooks/usePhotos', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/hooks/usePhotos')>()
   return { ...actual, usePhotos: vi.fn() }
@@ -26,9 +39,66 @@ vi.mock('@/hooks/useGooglePhotosPicker', () => ({
 vi.mock('@/hooks/useGooglePhotosUpload', () => ({
   useGooglePhotosUpload: vi.fn(),
 }))
-vi.mock('@/hooks/usePhotoMetrics', () => ({
-  usePhotoMetrics: vi.fn(),
+const mockUseClusteredPhotos =
+  vi.fn<(photos: PhotoEntry[], similarityPercent: number) => UseClusteredPhotosResult>()
+vi.mock('@/hooks/useClusteredPhotos', () => ({
+  useClusteredPhotos: (photos: PhotoEntry[], similarityPercent: number) =>
+    mockUseClusteredPhotos(photos, similarityPercent),
+  clusterKey: (cluster: { members: string[] }) => [...cluster.members].sort().join(','),
 }))
+
+/**
+ * Builds `renderBlocks` the same way the real `useClusteredPhotos` does
+ * (adjacent single-member "clusters" bundled into one `'singles'` block, any
+ * 2+-member group standing alone as a `'cluster'` block) from a plain
+ * ordered list of groups -- mirrors `components/PhotoGrid.test.tsx`'s helper
+ * of the same name exactly, duplicated here rather than shared since it's a
+ * small, test-only fixture builder.
+ */
+function buildRenderBlocks(groups: string[][]): ClusterRenderBlock[] {
+  const blocks: ClusterRenderBlock[] = []
+  for (const members of groups) {
+    if (members.length > 1) {
+      blocks.push({ type: 'cluster', cluster: { id: `cluster-${members.join('-')}`, members } })
+      continue
+    }
+    const single = { id: `single-${members[0]}`, members }
+    const last = blocks[blocks.length - 1]
+    if (last?.type === 'singles') last.clusters.push(single)
+    else blocks.push({ type: 'singles', clusters: [single] })
+  }
+  return blocks
+}
+
+/** Builds a full `UseClusteredPhotosResult` mock return value from `photos` and a `groups` shape (see `buildRenderBlocks`). */
+function clusteredResult(
+  photos: PhotoEntry[],
+  groups: string[][],
+  overrides: Partial<UseClusteredPhotosResult> = {}
+): UseClusteredPhotosResult {
+  const photosById = new Map(photos.map((p) => [p.id, p]))
+  const renderBlocks = buildRenderBlocks(groups)
+  const visualOrder = renderBlocks.flatMap((block) =>
+    block.type === 'cluster' ? block.cluster.members : block.clusters.map((c) => c.members[0])
+  )
+  return {
+    renderBlocks,
+    photosById,
+    visualOrder,
+    availability: 'available',
+    isLoading: false,
+    ...overrides,
+  }
+}
+
+/** Shorthand for the common "no clusters, every photo a plain singleton" shape -- the default for every test below unless overridden. */
+function flatResult(photos: PhotoEntry[], overrides: Partial<UseClusteredPhotosResult> = {}): UseClusteredPhotosResult {
+  return clusteredResult(
+    photos,
+    photos.map((p) => [p.id]),
+    overrides
+  )
+}
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
@@ -82,30 +152,26 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
-import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 const mockUsePhotos = vi.mocked(usePhotos)
 const mockUseObjectUrls = vi.mocked(useObjectUrls)
 const mockUseGoogleAuth = vi.mocked(useGoogleAuth)
 const mockUseGooglePhotosPicker = vi.mocked(useGooglePhotosPicker)
 const mockUseGooglePhotosUpload = vi.mocked(useGooglePhotosUpload)
-const mockUsePhotoMetrics = vi.mocked(usePhotoMetrics)
 
 function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
 }
 
-// Hash-fixture helpers for U3's within-cluster/cross-block drag tests below
-// -- same technique as components/PhotoGrid.test.tsx and
-// hooks/useClusteredPhotos.test.ts: hashes built from explicit "on" bit
-// positions so cosine distances between fixtures are exactly predictable.
-const HASH_TOTAL_BITS = 128
-
-const hashFromPositions = makeHashFromPositions(HASH_TOTAL_BITS)
-
 beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
+  // Default: no clustering (every photo its own singleton) -- matches the
+  // pre-U6 "no metrics -> no clustering" baseline most tests below rely on.
+  // Tests that need a real multi-member cluster on screen override this with
+  // their own `mockUseClusteredPhotos.mockImplementation(...)` before
+  // rendering (see `renderWithCluster` and similar below).
+  mockUseClusteredPhotos.mockImplementation((photos) => flatResult(photos))
   mockUseObjectUrls.mockReturnValue({
     getObjectUrl: (file: File) => `blob:${file.name}`,
     releaseObjectUrl: vi.fn(),
@@ -132,7 +198,6 @@ beforeEach(() => {
     retryFailed: vi.fn(),
     reset: vi.fn(),
   })
-  mockUsePhotoMetrics.mockReturnValue(new Map())
 })
 
 describe('PhotoUploadPage', () => {
@@ -348,14 +413,14 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
   // sections and singleton runs -- in one DndContext/SortableContext
   // (KTD2). `handleDragEnd` itself needs no changes (it only ever resolves
   // from/to via `photos.findIndex`), but these scenarios prove that holds
-  // once real clustering is in the picture, using the real (unmocked)
-  // useClusteredPhotos pipeline via PhotoGrid -- only dnd-kit itself is
-  // mocked here, same as the rest of this describe block.
+  // once a real cluster is in the picture -- `useClusteredPhotos` is mocked
+  // (see top of file) to report m1/m2 as a 2-member cluster; only dnd-kit
+  // itself is mocked otherwise, same as the rest of this describe block.
   describe('across a real cluster (KTD2/KTD3)', () => {
     // solo1, then a 2-member cluster (m1, m2), then solo2 -- passed
     // pre-sorted chronologically, exactly as hooks/usePhotos.ts would
-    // produce. m1/m2 share an identical hash so they cluster at the 0%
-    // default threshold.
+    // produce. m1/m2 are reported as a cluster by the mocked
+    // useClusteredPhotos below.
     const solo1 = makeEntry('solo1.jpg', 0)
     const m1 = makeEntry('m1.jpg', 1)
     const m2 = makeEntry('m2.jpg', 2)
@@ -369,11 +434,8 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
         reorderPhotos: vi.fn(),
         updatePhotoTimestamp: updatePhotoTimestampMock,
       })
-      mockUsePhotoMetrics.mockReturnValue(
-        new Map([
-          [m1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-          [m2.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-        ])
+      mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+        clusteredResult(currentPhotos, [[solo1.id], [m1.id, m2.id], [solo2.id]])
       )
       render(<PhotoUploadPage />)
       // Sanity: m1/m2 really did render as a bordered cluster section.
@@ -465,11 +527,11 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
     }
 
     it('non-contiguous cluster: resolves the dropped timestamp from the true visual neighbors, not the flat-array neighbors', () => {
-      // A and C cluster together (matching hashes); B does not, and B's
-      // capturedAt sits strictly between A's and C's. The flat,
-      // purely-chronological `photos` array is [A, B, C], but the cluster
-      // (anchored to A, its earliest member) renders visually as [A, C, B]
-      // -- the cluster section first, B's singleton run after.
+      // A and C are reported as a cluster by the mocked useClusteredPhotos
+      // below; B is not, and B's capturedAt sits strictly between A's and
+      // C's. The flat, purely-chronological `photos` array is [A, B, C], but
+      // the cluster (anchored to A, its earliest member) renders visually as
+      // [A, C, B] -- the cluster section first, B's singleton run after.
       const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
       const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
       const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
@@ -482,12 +544,8 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
         reorderPhotos: vi.fn(),
         updatePhotoTimestamp: updatePhotoTimestampMock,
       })
-      mockUsePhotoMetrics.mockReturnValue(
-        new Map([
-          [a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-          [c.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }], // identical to a
-          [b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }], // orthogonal -- doesn't cluster
-        ])
+      mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+        clusteredResult(currentPhotos, [[a.id, c.id], [b.id]])
       )
 
       render(<PhotoUploadPage />)
@@ -516,10 +574,11 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
     })
 
     it("null-timestamp cluster-mate: resolves the dropped timestamp from the true visual neighbor, not the null-dated member's flat-array tail position", () => {
-      // D1 (dated) and N1 (null capturedAt) cluster together (matching
-      // hashes). D2 is dated earlier than D1; D3 is dated later than D1.
-      // `sortPhotos` (hooks/usePhotos.ts) puts every dated photo before
-      // every null-dated one regardless of cluster membership, so the flat
+      // D1 (dated) and N1 (null capturedAt) are reported as a cluster by the
+      // mocked useClusteredPhotos below. D2 is dated earlier than D1; D3 is
+      // dated later than D1. `sortPhotos` (hooks/usePhotos.ts) puts every
+      // dated photo before every null-dated one regardless of cluster
+      // membership, so the flat
       // array is [D2, D1, D3, N1] -- N1 always at the tail. But the cluster
       // (anchored to D1, its only dated member) renders mid-grid, right
       // after D2 and before D3 -- so N1's true visual position is
@@ -537,13 +596,8 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
         reorderPhotos: vi.fn(),
         updatePhotoTimestamp: updatePhotoTimestampMock,
       })
-      mockUsePhotoMetrics.mockReturnValue(
-        new Map([
-          [d1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-          [n1.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }], // identical to d1
-          [d2.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(30, 39)) }],
-          [d3.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
-        ])
+      mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+        clusteredResult(currentPhotos, [[d2.id], [d1.id, n1.id], [d3.id]])
       )
 
       render(<PhotoUploadPage />)
@@ -916,14 +970,11 @@ describe('PhotoUploadPage — batch delete', () => {
       getObjectUrl: (file: File) => `blob:${file.name}`,
       releaseObjectUrl: releaseObjectUrlMock,
     })
-    // m1/m2 share an identical hash so they cluster at the 0% default
-    // threshold -- same fixture technique as the "across a real cluster"
-    // drag tests above.
-    mockUsePhotoMetrics.mockReturnValue(
-      new Map([
-        [photos[1].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-        [photos[2].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-      ])
+    // m1/m2 are reported as a cluster by the mocked useClusteredPhotos below
+    // -- same fixture technique as the "across a real cluster" drag tests
+    // above.
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[photos[0].id], [photos[1].id, photos[2].id], [photos[3].id]])
     )
 
     render(<PhotoUploadPage />)
@@ -951,11 +1002,8 @@ describe('PhotoUploadPage — batch delete', () => {
       getObjectUrl: (file: File) => `blob:${file.name}`,
       releaseObjectUrl: releaseObjectUrlMock,
     })
-    mockUsePhotoMetrics.mockReturnValue(
-      new Map([
-        [photos[1].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-        [photos[2].id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-      ])
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[photos[0].id], [photos[1].id, photos[2].id], [photos[3].id]])
     )
 
     render(<PhotoUploadPage />)
@@ -1046,22 +1094,22 @@ describe('PhotoUploadPage — unified grid (no view toggle)', () => {
     expect(screen.getAllByRole('button', { name: 'Clear selection' }).length).toBeGreaterThan(0)
   })
 
-  it('calls usePhotoMetrics unconditionally with the current photos', () => {
+  it('calls useClusteredPhotos (via PhotoGrid) unconditionally with the current photos', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
     render(<PhotoUploadPage />)
 
-    expect(mockUsePhotoMetrics).toHaveBeenCalledWith(photos)
+    expect(mockUseClusteredPhotos).toHaveBeenCalledWith(photos, expect.any(Number))
   })
 })
 
 // Finding #2: distinctSelectedTimestamps (PhotoUploadPage.tsx) dedupes the
 // current selection's existing capturedAt values by exact millisecond and
 // feeds BatchEditPanel's quick-pick buttons. This exercises the real
-// derivation -- not a mock or a hand-duplicated copy of its logic -- through
-// the real (unmocked) useClusteredPhotos pipeline underneath PhotoGrid, with
-// a selection spanning two distinct real clusters.
+// derivation -- not a mock or a hand-duplicated copy of its logic -- with a
+// selection spanning two distinct clusters reported by the mocked
+// useClusteredPhotos (see top of file).
 describe('PhotoUploadPage — cross-cluster batch quick-pick timestamps (finding #2)', () => {
   function makeEntry(name: string, index: number, capturedAt: string) {
     const file = makeFile(name)
@@ -1088,8 +1136,8 @@ describe('PhotoUploadPage — cross-cluster batch quick-pick timestamps (finding
   })
 
   it('quick-pick buttons show the union of distinct timestamps from both clusters, not either cluster alone', () => {
-    // Two distinct real clusters: m1a/m1b share one hash (cluster A), m2a/m2b
-    // share a different, non-matching hash (cluster B). Each member carries
+    // Two distinct clusters: m1a/m1b (cluster A), m2a/m2b (cluster B),
+    // reported by the mocked useClusteredPhotos below. Each member carries
     // its own distinct capturedAt, so a selection spanning one member from
     // each cluster spans two distinct timestamps.
     const m1a = makeEntry('m1a.jpg', 0, '2025-01-01T10:00:00Z')
@@ -1103,12 +1151,10 @@ describe('PhotoUploadPage — cross-cluster batch quick-pick timestamps (finding
       processFiles: vi.fn(),
       reorderPhotos: vi.fn(),
     })
-    mockUsePhotoMetrics.mockReturnValue(
-      new Map([
-        [m1a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-        [m1b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(0, 9)) }],
-        [m2a.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
-        [m2b.id, { width: 1, height: 1, size: 1, hash: hashFromPositions(range(60, 69)) }],
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [
+        [m1a.id, m1b.id],
+        [m2a.id, m2b.id],
       ])
     )
 

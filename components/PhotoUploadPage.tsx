@@ -16,7 +16,6 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
-import { usePhotoMetrics } from '@/hooks/usePhotoMetrics'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import BatchEditPanel from './BatchEditPanel'
@@ -78,9 +77,6 @@ export default function PhotoUploadPage() {
     cancelImport,
   } = useGooglePhotosPicker({ accessToken, addPhotos })
   const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
-  // Metrics must start computing as soon as photos are added (KTD12) —
-  // called here, unconditionally, and passed down to PhotoGrid.
-  const metrics = usePhotoMetrics(photos)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
@@ -387,7 +383,6 @@ export default function PhotoUploadPage() {
             >
               <PhotoGrid
                 photos={photos}
-                metrics={metrics}
                 getObjectUrl={getObjectUrl}
                 onReorder={reorderPhotos}
                 onNameChange={updatePhotoName}

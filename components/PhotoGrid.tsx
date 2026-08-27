@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SortableContext, rectSortingStrategy } from '@dnd-kit/sortable'
 import type { PhotoEntry } from '@/hooks/usePhotos'
-import type { PhotoMetrics } from '@/lib/perceptual-hash'
 import { useClusteredPhotos, clusterKey } from '@/hooks/useClusteredPhotos'
 import PhotoCard from './PhotoCard'
 import SortablePhotoCard from './SortablePhotoCard'
@@ -18,7 +17,6 @@ const MAX_SIMILARITY_PERCENT = 100
 
 type Props = {
   photos: PhotoEntry[]
-  metrics: Map<string, PhotoMetrics | undefined>
   getObjectUrl: (file: File) => string
   onReorder?: (from: number, to: number) => void
   onNameChange?: (id: string, newName: string) => void
@@ -39,7 +37,6 @@ type Props = {
 
 export default function PhotoGrid({
   photos,
-  metrics,
   getObjectUrl,
   onReorder,
   onNameChange,
