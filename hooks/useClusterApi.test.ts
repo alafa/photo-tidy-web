@@ -415,7 +415,6 @@ describe('useClusterApi', () => {
       expect(clusterRequestBody(1).photos.map((p) => p.id)).toEqual(['b'])
       expect(result.current.clusters).toEqual([{ clusterIndex: 0, photoIds: ['b'] }])
       expect(result.current.availability).toBe('available')
-      expect(result.current.excludedPhotoIds.has('a')).toBe(true)
     })
 
     it('becomes unavailable, keeping the last successful clusters, when the retry also fails', async () => {
@@ -447,14 +446,14 @@ describe('useClusterApi', () => {
   })
 
   describe('thumbnail failures (R16)', () => {
-    it('omits a photo whose cached thumbnail is null from the request and reports it in excludedPhotoIds', async () => {
+    it('omits a photo whose cached thumbnail is null from the request', async () => {
       const photoA = makePhoto(makeFile('a.jpg'), 'a')
       const photoB = makePhoto(makeFile('b.jpg'), 'b')
       const photos = [photoA, photoB]
       mockGenerateThumbnail.mockImplementation(async (file: File) =>
         file.name === 'a.jpg' ? null : `thumb-${file.name}`,
       )
-      const { result, rerender } = renderClusterApi(photos)
+      const { rerender } = renderClusterApi(photos)
       await flushHealthCheck()
 
       queueCluster(clusterOk([{ clusterIndex: 0, photoIds: ['b'] }]))
@@ -464,8 +463,6 @@ describe('useClusterApi', () => {
       })
 
       expect(clusterRequestBody(0).photos.map((p) => p.id)).toEqual(['b'])
-      expect(result.current.excludedPhotoIds.has('a')).toBe(true)
-      expect(result.current.excludedPhotoIds.has('b')).toBe(false)
     })
   })
 
@@ -516,6 +513,59 @@ describe('useClusterApi', () => {
       })
 
       expect(clusterCallCount()).toBe(2)
+    })
+  })
+
+  describe('skips a redundant request on a metadata-only photos change', () => {
+    it('does not fire a new /api/cluster call on a rename/timestamp-edit (same Files, new array identity)', async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+      const { rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      queueCluster(clusterOk([{ clusterIndex: 0, photoIds: ['a', 'b'] }]))
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(clusterCallCount()).toBe(1)
+
+      // Simulate a rename: same underlying Files/ids, but a brand-new
+      // `photos` array (as hooks/usePhotos.ts's updatePhotoName produces)
+      // and a changed `filename` on one entry.
+      const renamedPhotoA: PhotoEntry = { ...photoA, filename: 'renamed-a.jpg' }
+      const renamedPhotos = [renamedPhotoA, photoB]
+      rerender({ photos: renamedPhotos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(clusterCallCount()).toBe(1)
+    })
+
+    it('does not fire a new /api/cluster call on a reorder (same Files, different array order)', async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+      const { rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      queueCluster(clusterOk([{ clusterIndex: 0, photoIds: ['a', 'b'] }]))
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(clusterCallCount()).toBe(1)
+
+      // Simulate a reorder: same Files/ids, new array identity, different order.
+      const reorderedPhotos = [photoB, photoA]
+      rerender({ photos: reorderedPhotos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(clusterCallCount()).toBe(1)
     })
   })
 

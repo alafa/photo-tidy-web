@@ -1,10 +1,8 @@
 /**
  * Client-side base64 JPEG thumbnail generation for a photo `File`, capped
  * at ~300px on the longest side, for sending to photo-tidy-api's cluster
- * endpoint (its `"base64-encoded thumbnail"` request field). Adapts the
- * decode-and-resize technique the old (now-removed) local dHash module
- * used, but skips its `getImageData` pixel math — that was specific to
- * hashing; here `canvas.toDataURL()` is enough.
+ * endpoint (its `"base64-encoded thumbnail"` request field). Decodes and
+ * resizes via `createImageBitmap`, then encodes with `canvas.toDataURL()`.
  */
 
 const MAX_DIMENSION = 300
@@ -12,9 +10,8 @@ const JPEG_QUALITY = 0.8
 
 // `createImageBitmap` is documented to never throw synchronously, but a
 // pathological/corrupt file can make it hang -- neither resolve nor reject
-// -- rather than fail cleanly. The same guard the old (now-removed) local
-// dHash module used for this same rationale is needed here so a single
-// stuck decode can't stall an entire batch of thumbnail generation.
+// -- rather than fail cleanly. This guard ensures a single stuck decode
+// can't stall an entire batch of thumbnail generation.
 const DECODE_TIMEOUT_MS = 10_000
 
 /** Races `promise` against a timer; a timeout rejects the same way a real
@@ -58,10 +55,9 @@ function computeTargetDimensions(
  * Produces a base64-encoded JPEG thumbnail (the `data:image/jpeg;base64,`
  * prefix stripped) for `file`, capped at ~300px on its longest side. Never
  * throws: an undecodable file, a hung decode, or a missing 2D canvas
- * context all resolve to `null` so one bad photo doesn't block a batch —
- * mirrors the never-throws convention the old (now-removed) local dHash
- * module's own metrics computation used. Callers exclude a `null` result's
- * photo from the cluster request rather than treating it as a hard error.
+ * context all resolve to `null` so one bad photo doesn't block a batch.
+ * Callers exclude a `null` result's photo from the cluster request rather
+ * than treating it as a hard error.
  */
 export async function generateThumbnail(file: File): Promise<string | null> {
   let bitmap: ImageBitmap
@@ -77,20 +73,26 @@ export async function generateThumbnail(file: File): Promise<string | null> {
 
   try {
     const { width, height } = computeTargetDimensions(bitmap.width, bitmap.height)
+    // Already at or under the cap: computeTargetDimensions returns the
+    // original size unchanged, so resizing would be a same-size no-op —
+    // draw `bitmap` directly instead of decoding a redundant resized copy.
+    const needsResize = width !== bitmap.width || height !== bitmap.height
 
-    let resized: ImageBitmap
-    try {
-      resized = await withTimeout(
-        createImageBitmap(bitmap, {
-          resizeWidth: width,
-          resizeHeight: height,
-          resizeQuality: 'high',
-        }),
-        DECODE_TIMEOUT_MS,
-        'createImageBitmap timed out resizing bitmap'
-      )
-    } catch {
-      return null
+    let source: ImageBitmap = bitmap
+    if (needsResize) {
+      try {
+        source = await withTimeout(
+          createImageBitmap(bitmap, {
+            resizeWidth: width,
+            resizeHeight: height,
+            resizeQuality: 'high',
+          }),
+          DECODE_TIMEOUT_MS,
+          'createImageBitmap timed out resizing bitmap'
+        )
+      } catch {
+        return null
+      }
     }
 
     try {
@@ -100,12 +102,15 @@ export async function generateThumbnail(file: File): Promise<string | null> {
       const ctx = canvas.getContext('2d')
       if (!ctx) return null
 
-      ctx.drawImage(resized, 0, 0)
+      ctx.drawImage(source, 0, 0)
       const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY)
       const commaIndex = dataUrl.indexOf(',')
       return commaIndex === -1 ? null : dataUrl.slice(commaIndex + 1)
     } finally {
-      resized.close()
+      // Only close `source` here when it's the separately-decoded resized
+      // bitmap — the no-resize path reuses `bitmap` itself, which the outer
+      // finally below already closes.
+      if (needsResize) source.close()
     }
   } finally {
     // Release the bitmap's backing memory as soon as we're done with it —

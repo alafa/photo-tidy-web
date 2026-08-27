@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
-import type { ClusterRenderBlock, UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
+import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
+import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
 import PhotoUploadPage from './PhotoUploadPage'
 
 afterEach(cleanup)
@@ -46,59 +47,6 @@ vi.mock('@/hooks/useClusteredPhotos', () => ({
     mockUseClusteredPhotos(photos, similarityPercent),
   clusterKey: (cluster: { members: string[] }) => [...cluster.members].sort().join(','),
 }))
-
-/**
- * Builds `renderBlocks` the same way the real `useClusteredPhotos` does
- * (adjacent single-member "clusters" bundled into one `'singles'` block, any
- * 2+-member group standing alone as a `'cluster'` block) from a plain
- * ordered list of groups -- mirrors `components/PhotoGrid.test.tsx`'s helper
- * of the same name exactly, duplicated here rather than shared since it's a
- * small, test-only fixture builder.
- */
-function buildRenderBlocks(groups: string[][]): ClusterRenderBlock[] {
-  const blocks: ClusterRenderBlock[] = []
-  for (const members of groups) {
-    if (members.length > 1) {
-      blocks.push({ type: 'cluster', cluster: { id: `cluster-${members.join('-')}`, members } })
-      continue
-    }
-    const single = { id: `single-${members[0]}`, members }
-    const last = blocks[blocks.length - 1]
-    if (last?.type === 'singles') last.clusters.push(single)
-    else blocks.push({ type: 'singles', clusters: [single] })
-  }
-  return blocks
-}
-
-/** Builds a full `UseClusteredPhotosResult` mock return value from `photos` and a `groups` shape (see `buildRenderBlocks`). */
-function clusteredResult(
-  photos: PhotoEntry[],
-  groups: string[][],
-  overrides: Partial<UseClusteredPhotosResult> = {}
-): UseClusteredPhotosResult {
-  const photosById = new Map(photos.map((p) => [p.id, p]))
-  const renderBlocks = buildRenderBlocks(groups)
-  const visualOrder = renderBlocks.flatMap((block) =>
-    block.type === 'cluster' ? block.cluster.members : block.clusters.map((c) => c.members[0])
-  )
-  return {
-    renderBlocks,
-    photosById,
-    visualOrder,
-    availability: 'available',
-    isLoading: false,
-    ...overrides,
-  }
-}
-
-/** Shorthand for the common "no clusters, every photo a plain singleton" shape -- the default for every test below unless overridden. */
-function flatResult(photos: PhotoEntry[], overrides: Partial<UseClusteredPhotosResult> = {}): UseClusteredPhotosResult {
-  return clusteredResult(
-    photos,
-    photos.map((p) => [p.id]),
-    overrides
-  )
-}
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null

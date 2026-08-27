@@ -34,7 +34,6 @@ function apiResult(overrides: Partial<UseClusterApiResult> = {}): UseClusterApiR
     clusters: [],
     availability: 'available' as ClusterApiAvailability,
     isLoading: false,
-    excludedPhotoIds: new Set<string>(),
     ...overrides,
   }
 }
@@ -197,7 +196,6 @@ describe('useClusteredPhotos', () => {
     mockUseClusterApi.mockReturnValue(
       apiResult({
         clusters: [{ clusterIndex: 0, photoIds: ['a', 'b'] }],
-        excludedPhotoIds: new Set(['excluded']),
       })
     )
 
@@ -225,7 +223,6 @@ describe('useClusteredPhotos', () => {
     mockUseClusterApi.mockReturnValue(
       apiResult({
         clusters: [{ clusterIndex: 0, photoIds: ['a', 'b'] }],
-        excludedPhotoIds: new Set(['b']),
       })
     )
 

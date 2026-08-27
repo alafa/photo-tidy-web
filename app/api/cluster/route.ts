@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server'
-import {
-  clusterApiErrorBody,
-  fetchUpstreamWithTimeout,
-  parseUpstreamJson,
-} from '@/lib/cluster-api-server'
+import { fetchUpstreamWithTimeout, parseUpstreamJson } from '@/lib/cluster-api-server'
+import { upstreamErrorBody } from '@/lib/google-photos-server'
 
 // Set above this app's existing longest proxy timeout (45s for uploads) to
 // absorb photo-tidy-api's documented slow first request while its CLIP
@@ -15,7 +12,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   try {
     body = await request.json()
   } catch {
-    return NextResponse.json(clusterApiErrorBody('Invalid JSON body', 'INVALID_REQUEST'), { status: 400 })
+    return NextResponse.json(upstreamErrorBody('Invalid JSON body', 'INVALID_REQUEST'), { status: 400 })
   }
 
   const clusterApiUrl = process.env.CLUSTER_API_URL ?? 'http://localhost:8000'

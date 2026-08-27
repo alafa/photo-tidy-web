@@ -40,16 +40,11 @@ interface ClusterApiSuccessBody {
  *   per-photo-rejection retry) is in flight. Tracked separately from
  *   `clusters` so the caller can show a non-blocking loading indicator
  *   without blanking the grid (R9).
- * - `excludedPhotoIds`: ids left out of the last request that produced
- *   `clusters` — either because their thumbnail failed to generate (R16) or
- *   because photo-tidy-api rejected them by id and the retry succeeded
- *   without them (R15). The caller renders these as ordinary singletons.
  */
 export interface UseClusterApiResult {
   clusters: ApiCluster[]
   availability: ClusterApiAvailability
   isLoading: boolean
-  excludedPhotoIds: Set<string>
 }
 
 // R7: debounce slider changes 500ms before calling the API.
@@ -98,6 +93,15 @@ function extractRejectedPhotoId(body: unknown): string | null {
   if (typeof detail !== 'string') return null
   const match = /^Photo '([^']+)':/.exec(detail)
   return match ? match[1] : null
+}
+
+/** True when `a` and `b` contain exactly the same members (order-independent). */
+function setsEqual<T>(a: Set<T>, b: Set<T>): boolean {
+  if (a.size !== b.size) return false
+  for (const item of a) {
+    if (!b.has(item)) return false
+  }
+  return true
 }
 
 type AttemptResult =
@@ -156,13 +160,18 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
   const [availability, setAvailability] = useState<ClusterApiAvailability>('checking')
   const [clusters, setClusters] = useState<ApiCluster[]>([])
   const [isLoading, setIsLoading] = useState(false)
-  const [excludedPhotoIds, setExcludedPhotoIds] = useState<Set<string>>(new Set())
 
-  // Thumbnail cache keyed by File identity (KTD16), mirroring the old
-  // (now-removed) local-clustering metrics hook's cache-ref pattern. `null`
-  // records a File whose thumbnail generation failed, so it's excluded
-  // rather than retried every tick.
+  // Thumbnail cache keyed by File identity (KTD16) — a base64 thumbnail is
+  // expensive to regenerate, so once a File has one it's reused across
+  // re-clusters instead of being recomputed every request. `null` records a
+  // File whose thumbnail generation failed, so it's excluded rather than
+  // retried every tick.
   const thumbnailCacheRef = useRef<Map<File, string | null>>(new Map())
+
+  // The File-identity set and threshold actually sent in the last request
+  // this hook fired, so the effect below can skip firing again when neither
+  // has changed (see the skip check there). `null` until the first request.
+  const lastRequestRef = useRef<{ fileIds: Set<File>; threshold: number } | null>(null)
 
   // Generation-token guard against a stale response landing after a newer
   // trigger superseded it (KTD4) — mirrors
@@ -229,20 +238,35 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
     // R5/R8: call only when photos are loaded.
     if (photos.length === 0) return
 
+    const threshold = percentToThreshold(debouncedPercent)
+    const currentFileIds = new Set(photos.map((p) => p.file))
+
+    // `photos` also gets a new array identity on a rename/timestamp-edit/
+    // reorder (see hooks/usePhotos.ts), none of which change which Files are
+    // present. Only an actual add/delete (changing the File set) or a real
+    // threshold change (R10) should fire a new request — so skip when
+    // neither differs from the last request this hook actually sent.
+    if (
+      lastRequestRef.current !== null &&
+      lastRequestRef.current.threshold === threshold &&
+      setsEqual(lastRequestRef.current.fileIds, currentFileIds)
+    ) {
+      return
+    }
+    lastRequestRef.current = { fileIds: currentFileIds, threshold }
+
     // KTD4/KTD9: bump the generation once per trigger (debounced-threshold
     // commit or `photos` identity change) — this effect's own dependency
     // array is exactly those two triggers (plus `availability`).
     const myGeneration = ++generationRef.current
     const isCurrent = () => generationRef.current === myGeneration
-    const threshold = percentToThreshold(debouncedPercent)
 
     async function run() {
       setIsLoading(true)
 
       // Drop cache entries for Files no longer present in `photos` (KTD16).
-      const currentFiles = new Set(photos.map((p) => p.file))
       for (const file of thumbnailCacheRef.current.keys()) {
-        if (!currentFiles.has(file)) thumbnailCacheRef.current.delete(file)
+        if (!currentFileIds.has(file)) thumbnailCacheRef.current.delete(file)
       }
 
       // Generate a thumbnail only for a File not already cached (KTD16).
@@ -300,15 +324,14 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
 
       if (result.ok) {
         setClusters(result.clusters)
-        setExcludedPhotoIds(excludeIds)
         setAvailability('available')
         setIsLoading(false)
       } else {
         // R13/KTD10/KTD11: any failure other than a single-photo rejection
         // resolved by the retry above — network error, timeout, unparseable
         // body, a non-2xx not naming one photo, or a second rejection on the
-        // retry — becomes 'unavailable'. `clusters`/`excludedPhotoIds` are
-        // left untouched (KTD14).
+        // retry — becomes 'unavailable'. `clusters` is left untouched
+        // (KTD14).
         setAvailability('unavailable')
         setIsLoading(false)
       }
@@ -322,5 +345,5 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
     })
   }, [availability, debouncedPercent, photos])
 
-  return { clusters, availability, isLoading, excludedPhotoIds }
+  return { clusters, availability, isLoading }
 }

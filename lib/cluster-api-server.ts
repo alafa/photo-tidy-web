@@ -1,24 +1,5 @@
 import { NextResponse } from 'next/server'
-
-export interface ClusterApiErrorBody {
-  error: { message: string; status: string }
-}
-
-export function clusterApiErrorBody(message: string, status: string): ClusterApiErrorBody {
-  return { error: { message, status } }
-}
-
-// AbortSignal.timeout(ms) aborts fetch with a TimeoutError DOMException.
-// Some runtimes surface a plain AbortError instead, so check both names
-// rather than relying on one specific error shape. Checked via a `name`
-// property rather than `instanceof Error`/`instanceof DOMException` —
-// DOMException doesn't reliably extend Error (or exist as the same
-// constructor) across every runtime this code can run in.
-export function isTimeoutError(err: unknown): boolean {
-  if (typeof err !== 'object' || err === null || !('name' in err)) return false
-  const name = (err as { name: unknown }).name
-  return name === 'TimeoutError' || name === 'AbortError'
-}
+import { isTimeoutError, upstreamErrorBody } from '@/lib/google-photos-server'
 
 // Shared fetch-plus-timeout handling for every route that proxies a request
 // to photo-tidy-api. Centralizes the try/catch around the fetch (504 on
@@ -41,14 +22,14 @@ export async function fetchUpstreamWithTimeout(
     if (isTimeoutError(err)) {
       return {
         errorResponse: NextResponse.json(
-          clusterApiErrorBody('Request to the clustering service timed out', 'REQUEST_TIMEOUT'),
+          upstreamErrorBody('Request to the clustering service timed out', 'REQUEST_TIMEOUT'),
           { status: 504 },
         ),
       }
     }
     return {
       errorResponse: NextResponse.json(
-        clusterApiErrorBody('Failed to reach the clustering service', 'UPSTREAM_UNREACHABLE'),
+        upstreamErrorBody('Failed to reach the clustering service', 'UPSTREAM_UNREACHABLE'),
         { status: 502 },
       ),
     }
@@ -70,7 +51,7 @@ export async function parseUpstreamJson(
   } catch {
     return {
       errorResponse: NextResponse.json(
-        clusterApiErrorBody('Clustering service returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'),
+        upstreamErrorBody('Clustering service returned a non-JSON response', 'INVALID_UPSTREAM_RESPONSE'),
         { status: upstream.ok ? 502 : upstream.status },
       ),
     }
