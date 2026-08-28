@@ -2,18 +2,15 @@ import { useState } from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
-import type { PhotoMetrics } from '@/lib/perceptual-hash'
-import { range, makeHashFromPositions } from '@/lib/test-helpers/hash-fixtures'
+import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
+import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
 import BatchEditPanel from './BatchEditPanel'
 
 afterEach(cleanup)
 
 // Mock dnd-kit so tests don't need a real DndContext. `items` passed to
 // SortableContext is captured so U3's tests can prove it's the full flat
-// chronological id list (KTD2) without simulating a real pointer drag --
-// this repo has no precedent for that, and `useSortable`'s static
-// `data-testid="drag-listener"` attribute (below) is instead used to prove
-// the debug Compare button (KTD9) sits outside the drag-listener wrapper.
+// chronological id list (KTD2) without simulating a real pointer drag.
 let capturedSortableItems: string[] | null = null
 
 vi.mock('@dnd-kit/sortable', () => ({
@@ -32,6 +29,36 @@ vi.mock('@dnd-kit/sortable', () => ({
   rectSortingStrategy: vi.fn(),
 }))
 
+// U5: `useClusteredPhotos` now wraps a real HTTP-backed hook
+// (`hooks/useClusterApi.ts`) — its own shaping/availability/loading
+// behavior is covered by hooks/useClusteredPhotos.test.ts and
+// hooks/useClusterApi.test.ts. This file mocks it entirely and only
+// exercises what PhotoGrid itself is responsible for: turning
+// `renderBlocks` into DOM, and wiring `availability`/`isLoading` into the
+// slider's disabled state, the unavailable message, and the loading
+// indicator.
+const mockUseClusteredPhotos =
+  vi.fn<(photos: PhotoEntry[], similarityPercent: number) => UseClusteredPhotosResult>()
+vi.mock('@/hooks/useClusteredPhotos', () => ({
+  useClusteredPhotos: (photos: PhotoEntry[], similarityPercent: number) =>
+    mockUseClusteredPhotos(photos, similarityPercent),
+  clusterKey: (cluster: { members: string[] }) => [...cluster.members].sort().join(','),
+  // Mirrors the real hook's semantics exactly (earliest non-null capturedAt
+  // among members, Infinity when every member is null) — PhotoGrid.tsx's
+  // day-bucketing pass calls this directly, so a stub that always returned
+  // 0 (or omitted the export) would either sort every test cluster into one
+  // bucket or crash with "no export defined on the mock".
+  earliestCapturedAtMs: (cluster: { members: string[] }, photosById: Map<string, PhotoEntry>) => {
+    let earliest = Infinity
+    for (const id of cluster.members) {
+      const capturedAt = photosById.get(id)?.capturedAt ?? null
+      if (capturedAt === null) continue
+      earliest = Math.min(earliest, capturedAt.getTime())
+    }
+    return earliest
+  },
+}))
+
 beforeEach(() => {
   capturedSortableItems = null
 })
@@ -39,15 +66,6 @@ beforeEach(() => {
 import PhotoGrid from './PhotoGrid'
 
 // --- test helpers -------------------------------------------------------
-//
-// Hashes are built from explicit "on" bit positions (not raw hex literals)
-// so cosine distances between fixtures are exactly predictable by hand —
-// same technique as hooks/useClusteredPhotos.test.ts and the old
-// components/ClusterView.test.tsx.
-
-const HASH_TOTAL_BITS = 128
-
-const hashFromPositions = makeHashFromPositions(HASH_TOTAL_BITS)
 
 function makeEntry(name: string, index: number, capturedAt: string | null = `2025-0${index + 1}-01T10:00:00Z`): PhotoEntry {
   return {
@@ -60,25 +78,14 @@ function makeEntry(name: string, index: number, capturedAt: string | null = `202
   }
 }
 
-function makeMetrics(hash: string | null, width = 100, height = 100, size = 1000): PhotoMetrics {
-  return { width, height, size, hash }
-}
-
 const getObjectUrl = (file: File) => `blob:${file.name}`
-const emptyMetrics = new Map<string, PhotoMetrics | undefined>()
 
 // Mirrors PhotoUploadPage's own selectedIds + toggleSelect (U4): a single
 // page-level Set, passed to PhotoGrid and reflected in BatchEditPanel's
 // count, exactly as the real app wires them. Used to prove selection is
 // unified end to end rather than merely forwarded prop-for-prop within
 // PhotoGrid in isolation.
-function SelectionHarness({
-  photos,
-  metrics,
-}: {
-  photos: PhotoEntry[]
-  metrics: Map<string, PhotoMetrics | undefined>
-}) {
+function SelectionHarness({ photos }: { photos: PhotoEntry[] }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
 
   function toggleSelect(id: string, checked: boolean) {
@@ -105,7 +112,6 @@ function SelectionHarness({
     <>
       <PhotoGrid
         photos={photos}
-        metrics={metrics}
         getObjectUrl={getObjectUrl}
         selectedIds={selectedIds}
         onSelect={toggleSelect}
@@ -127,17 +133,18 @@ function SelectionHarness({
 describe('PhotoGrid', () => {
   it('renders all photo filenames', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('b.jpg')).toBeDefined()
   })
 
   it('renders SortablePhotoCard (with drag attributes) when onReorder is provided', () => {
     const photos = [makeEntry('a.jpg', 0)]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
     render(
       <PhotoGrid
         photos={photos}
-        metrics={emptyMetrics}
         getObjectUrl={getObjectUrl}
         onReorder={vi.fn()}
       />
@@ -148,23 +155,25 @@ describe('PhotoGrid', () => {
 
   it('does NOT add drag attributes when onReorder is absent', () => {
     const photos = [makeEntry('a.jpg', 0)]
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(document.querySelector('[aria-roledescription="sortable item"]')).toBeNull()
   })
 
   it('renders the correct number of cards', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
     expect(screen.getAllByRole('img')).toHaveLength(3)
   })
 
   it('forwards selection props to cards (checked/onSelect reach the underlying card)', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
     const onSelect = vi.fn()
     render(
       <PhotoGrid
         photos={photos}
-        metrics={emptyMetrics}
         getObjectUrl={getObjectUrl}
         selectedIds={new Set(['a.jpg-0'])}
         onSelect={onSelect}
@@ -180,13 +189,9 @@ describe('PhotoGrid', () => {
       makeEntry('b.jpg', 1),
       makeEntry('c.jpg', 2),
     ]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      ['a.jpg-0', makeMetrics(hashFromPositions(range(0, 9)))],
-      ['b.jpg-1', makeMetrics(hashFromPositions(range(30, 39)))],
-      ['c.jpg-2', makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     expect(screen.getByText('a.jpg')).toBeDefined()
     expect(screen.getByText('b.jpg')).toBeDefined()
@@ -196,24 +201,18 @@ describe('PhotoGrid', () => {
     expect((screen.getByLabelText(/Similarity/) as HTMLInputElement).value).toBe('0')
   })
 
-  it('a 3-member cluster at the current threshold renders one bordered section with a "3 related photos" header, positioned chronologically among singleton blocks', () => {
-    // p1/p2/p3 are hash-identical (distance 0, clusters at 0%); solo1 sorts
-    // chronologically before them, solo2 sorts chronologically after them.
+  it('a 3-member cluster renders one bordered section with a "3 related photos" header, positioned chronologically among singleton blocks', () => {
     const solo1 = makeEntry('solo1.jpg', 0, '2024-12-01T00:00:00Z')
     const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
     const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
     const p3 = makeEntry('p3.jpg', 3, '2025-01-03T00:00:00Z')
     const solo2 = makeEntry('solo2.jpg', 4, '2025-06-01T00:00:00Z')
     const photos = [solo1, p1, p2, p3, solo2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p3.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo1.id, makeMetrics(hashFromPositions(range(60, 69)))],
-      [solo2.id, makeMetrics(hashFromPositions(range(90, 99)))],
-    ])
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[solo1.id], [p1.id, p2.id, p3.id], [solo2.id]])
+    )
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const sections = document.querySelectorAll('section')
     expect(sections).toHaveLength(1)
@@ -234,158 +233,122 @@ describe('PhotoGrid', () => {
     expect(sections[0].compareDocumentPosition(solo2Img) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('moving the slider live re-renders blocks without tearing down and recreating an unrelated card', () => {
-    // Both photos have no resolved hash, so they remain singletons at every
-    // threshold — proving the re-render is a live update, not a remount.
+  it('moving the slider updates similarityPercent and re-renders without tearing down and recreating an unrelated card', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const imgBefore = screen.getByAltText('a.jpg')
-    fireEvent.change(screen.getByLabelText(/Similarity/), { target: { value: '50' } })
+    const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '50' } })
     const imgAfter = screen.getByAltText('a.jpg')
 
+    expect(slider.value).toBe('50')
     expect(imgAfter).toBe(imgBefore)
   })
 
-  it('debug mode is off by default: no checked toggle, no PairwiseDistances panel, no active Compare affordances', () => {
-    const p1 = makeEntry('p1.jpg', 0)
-    const p2 = makeEntry('p2.jpg', 1)
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    ])
+  // R14: the hash-distance debug panel (debug-mode toggle, pairwise-distance
+  // display, per-card Compare button) is removed entirely.
+  it('renders no debug-mode UI: no "Debug mode" checkbox, no pairwise-distance panel, no Compare buttons', () => {
+    const solo1 = makeEntry('solo1.jpg', 0, '2024-12-01T00:00:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+    const photos = [solo1, p1, p2]
+    mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[solo1.id], [p1.id, p2.id]]))
 
-    render(<PhotoGrid photos={[p1, p2]} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    const debugToggle = screen.getByRole('checkbox', { name: 'Debug mode' }) as HTMLInputElement
-    expect(debugToggle.checked).toBe(false)
+    expect(screen.queryByRole('checkbox', { name: 'Debug mode' })).toBeNull()
     expect(screen.queryByText(/cosine distance/i)).toBeNull()
     expect(screen.queryByRole('button', { name: 'Compare' })).toBeNull()
   })
 
-  it('toggling debug mode on renders the PairwiseDistances panel for each multi-member cluster and a Compare button on every card', () => {
-    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
-    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
-    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
-    const photos = [solo, p1, p2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+  describe('availability/loading wiring (R9, R12, R13, KTD13, KTD14)', () => {
+    it("disables the slider and shows no message while availability is 'checking'", () => {
+      const photos = [makeEntry('a.jpg', 0)]
+      mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'checking' }))
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+      const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
+      expect(slider.disabled).toBe(true)
+      expect(screen.queryByText('Clustering service unavailable')).toBeNull()
+    })
 
-    // Pairwise distance line for the two-member cluster.
-    expect(screen.getByText(/p1\.jpg ↔ p2\.jpg/)).toBeDefined()
+    it("disables the slider and shows 'Clustering service unavailable' while availability is 'unavailable'", () => {
+      const photos = [makeEntry('a.jpg', 0)]
+      mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'unavailable' }))
 
-    // A Compare button renders as a sibling on every card, clustered or not.
-    expect(screen.getAllByRole('button', { name: 'Compare' })).toHaveLength(3)
-  })
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-  // Finding #3: handleCompareClick's 3-branch state machine (no prior
-  // selection -> pick first; one already picked -> pick second and
-  // complete the pair; a complete pair already exists -> reset to a fresh
-  // single pick) only had branch 1 covered previously. These two tests
-  // cover branches 2 and 3.
-  it('branch 2: clicking Compare on a second, different photo completes the pair and renders the computed Cosine distance', () => {
-    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
-    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
-    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
-    const photos = [solo, p1, p2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+      const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
+      expect(slider.disabled).toBe(true)
+      expect(screen.getByText('Clustering service unavailable')).toBeDefined()
+    })
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+    it('keeps the slider enabled when availability is available', () => {
+      const photos = [makeEntry('a.jpg', 0)]
+      mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'available' }))
 
-    // Blocks render chronologically: solo (earliest) first, then the
-    // p1/p2 cluster section -- so Compare buttons in document order are
-    // [solo, p1, p2].
-    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
-    fireEvent.click(compareButtons[1]) // p1: first pick (branch 1)
-    fireEvent.click(compareButtons[2]) // p2: completes the pair (branch 2)
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    expect(screen.getByText(/A: p1\.jpg/)).toBeDefined()
-    expect(screen.getByText(/B: p2\.jpg/)).toBeDefined()
-    // p1/p2 share an identical hash, so cosine distance is exactly 0.
-    expect(screen.getByText(/Cosine distance: 0\.000/)).toBeDefined()
-  })
+      const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
+      expect(slider.disabled).toBe(false)
+      expect(screen.queryByText('Clustering service unavailable')).toBeNull()
+    })
 
-  it('branch 3: clicking Compare on a third photo after a complete pair resets to a fresh single pick of that third photo', () => {
-    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
-    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
-    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
-    const photos = [solo, p1, p2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+    it("keeps rendering the last-known renderBlocks when availability transitions from 'available' to 'unavailable' mid-session (KTD14)", () => {
+      const solo1 = makeEntry('solo1.jpg', 0, '2024-12-01T00:00:00Z')
+      const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+      const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+      const photos = [solo1, p1, p2]
+      const lastKnown = clusteredResult(photos, [[solo1.id], [p1.id, p2.id]], { availability: 'available' })
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+      mockUseClusteredPhotos.mockReturnValue(lastKnown)
+      const { rerender } = render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
-    fireEvent.click(compareButtons[1]) // p1
-    fireEvent.click(compareButtons[2]) // p2 -- completes the pair
-    expect(screen.getByText(/Cosine distance:/)).toBeDefined()
+      expect(document.querySelectorAll('section')).toHaveLength(1)
+      expect(screen.getByText('solo1.jpg')).toBeDefined()
+      expect(screen.getByText('p1.jpg')).toBeDefined()
+      expect(screen.getByText('p2.jpg')).toBeDefined()
 
-    fireEvent.click(compareButtons[0]) // solo -- a complete pair already exists (branch 3)
+      // A mid-session cluster-call failure (per hooks/useClusterApi.ts) flips
+      // availability to 'unavailable' but keeps the same last-successful
+      // renderBlocks (this is useClusterApi/useClusteredPhotos's own
+      // contract, covered by their own tests) — PhotoGrid must not gate its
+      // grid render on availability.
+      mockUseClusteredPhotos.mockReturnValue({ ...lastKnown, availability: 'unavailable' })
+      rerender(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    // Resets to a fresh single pick of solo -- not appended as a third
-    // element, and not still showing the old p1/p2 pair.
-    expect(screen.getByText(/A: solo\.jpg/)).toBeDefined()
-    expect(screen.queryByText(/B: /)).toBeNull()
-    expect(screen.getByText(/Click a second photo to compare\./)).toBeDefined()
-    expect(screen.queryByText(/Cosine distance:/)).toBeNull()
-  })
+      expect(document.querySelectorAll('section')).toHaveLength(1)
+      expect(screen.getByText('solo1.jpg')).toBeDefined()
+      expect(screen.getByText('p1.jpg')).toBeDefined()
+      expect(screen.getByText('p2.jpg')).toBeDefined()
+      expect(screen.getByText('Clustering service unavailable')).toBeDefined()
+      expect((screen.getByLabelText(/Similarity/) as HTMLInputElement).disabled).toBe(true)
+    })
 
-  // Finding #4: comparePair must reset (rather than keep a stale id) when
-  // a compared photo is deleted -- otherwise `photosById.get(id)?.filename`
-  // resolves to `undefined` and the panel literally renders "undefined".
-  it('resets comparePair when one of the compared photos is removed from photos/metrics (e.g. deleted)', () => {
-    const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
-    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
-    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
-    const photos = [solo, p1, p2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+    it('shows a non-blocking loading indicator and keeps the slider enabled and the grid rendered while isLoading is true (R9)', () => {
+      const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+      mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { availability: 'available', isLoading: true }))
 
-    const { rerender } = render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />
-    )
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
-    const compareButtons = screen.getAllByRole('button', { name: 'Compare' })
-    fireEvent.click(compareButtons[1]) // p1
-    fireEvent.click(compareButtons[2]) // p2 -- completes the pair
-    expect(screen.getByText(/Cosine distance:/)).toBeDefined()
+      const slider = screen.getByLabelText(/Similarity/) as HTMLInputElement
+      expect(slider.disabled).toBe(false)
+      expect(screen.getByText('a.jpg')).toBeDefined()
+      expect(screen.getByText('b.jpg')).toBeDefined()
+      expect(screen.getByRole('status')).toBeDefined()
+    })
 
-    // Simulate p2 being deleted: re-render with a shorter photos/metrics
-    // list that excludes it, mirroring how PhotoUploadPage's
-    // handleBatchDelete removes a photo from the `photos` prop.
-    const remainingPhotos = [solo, p1]
-    const remainingMetrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
-    rerender(
-      <PhotoGrid photos={remainingPhotos} metrics={remainingMetrics} getObjectUrl={getObjectUrl} />
-    )
+    it('shows no loading indicator when isLoading is false', () => {
+      const photos = [makeEntry('a.jpg', 0)]
+      mockUseClusteredPhotos.mockReturnValue(flatResult(photos, { isLoading: false }))
 
-    expect(screen.queryByText(/undefined/)).toBeNull()
-    expect(
-      screen.getByText(/Click "Compare" on any two photos to see their hashes and distance\./)
-    ).toBeDefined()
+      render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
+
+      expect(screen.queryByRole('status')).toBeNull()
+    })
   })
 })
 
@@ -402,16 +365,16 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
   const m2 = makeEntry('m2.jpg', 1, '2025-01-02T00:00:00Z')
   const solo2 = makeEntry('solo2.jpg', 9, '2025-06-01T00:00:00Z')
   const photos = [solo1, m1, m2, solo2]
-  const metrics = new Map<string, PhotoMetrics | undefined>([
-    [m1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [m2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [solo1.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    [solo2.id, makeMetrics(hashFromPositions(range(90, 99)))],
-  ])
+
+  beforeEach(() => {
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[solo1.id], [m1.id, m2.id], [solo2.id]])
+    )
+  })
 
   it("SortableContext's items is the full flat chronological id list, spanning across the cluster and both singleton runs (KTD2)", () => {
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     // Sanity: m1/m2 really did cluster together into one bordered section.
@@ -420,16 +383,15 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
     expect(capturedSortableItems).toEqual([solo1.id, m1.id, m2.id, solo2.id])
   })
 
-  it('renders cluster members in chronological (array) order, not upload-index order -- the critical KTD3 guarantee behind within-cluster drag resolution', () => {
+  it('renders cluster members in the order the hook provides them (chronological, not upload-index order) -- the critical KTD3 guarantee behind within-cluster drag resolution', () => {
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     // m1 (uploadIndex 5, captured first) renders before m2 (uploadIndex 1,
     // captured second) -- the opposite of upload-index order, proving
-    // capturedAt (not hierarchicalOrder or upload order) drives the visual
-    // sequence that dnd-kit's `items` list and PhotoUploadPage's
-    // handleDragEnd (`photos.findIndex`) both key off.
+    // PhotoGrid renders `renderBlocks` in the order given rather than
+    // re-deriving its own order from `photos`.
     const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
     expect(imgs).toEqual(['solo1.jpg', 'm1.jpg', 'm2.jpg', 'solo2.jpg'])
 
@@ -446,7 +408,7 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
 
   it('cluster member cards render as SortablePhotoCard (real drag sources), not plain PhotoCard, when onReorder is provided', () => {
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
     )
 
     const section = document.querySelector('section') as HTMLElement
@@ -458,66 +420,21 @@ describe('PhotoGrid — U3: drag wiring spans the unified sequence (KTD2/KTD3)',
       expect(img.closest('[aria-roledescription="sortable item"]')).not.toBeNull()
     }
   })
-
-  it("debug mode's Compare button on a cluster member renders as a DOM sibling outside the card's drag-listener wrapper (KTD9), so clicking it cannot trigger a drag", () => {
-    render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
-    )
-
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
-
-    const img = screen.getByAltText('m1.jpg')
-    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
-    expect(dragWrapper).not.toBeNull()
-
-    const cardWrapper = dragWrapper.parentElement as HTMLElement
-    const compareButton = within(cardWrapper).getByRole('button', { name: 'Compare' })
-
-    // A true sibling of the drag wrapper, not nested inside it -- dnd-kit's
-    // pointer listeners (spread onto dragWrapper) never cover this button,
-    // so no stopPropagation is needed for it to avoid starting a drag.
-    expect(dragWrapper.contains(compareButton)).toBe(false)
-    expect(cardWrapper.contains(compareButton)).toBe(true)
-
-    fireEvent.click(compareButton)
-    expect(screen.getByText(/A: m1\.jpg/)).toBeDefined()
-  })
-
-  it('starting a drag from a card (interacting with the drag-listener wrapper itself) does not toggle its debug-mode compare state', () => {
-    render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />
-    )
-
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
-    expect(screen.getByText(/on any two photos to see their hashes and distance/)).toBeDefined()
-
-    const img = screen.getByAltText('m1.jpg')
-    const dragWrapper = img.closest('[data-testid="drag-listener"]') as HTMLElement
-    fireEvent.pointerDown(dragWrapper)
-    fireEvent.click(dragWrapper)
-
-    // comparePair is untouched by interacting with the drag-listener region
-    // itself -- only the dedicated Compare button (outside that region)
-    // sets it.
-    expect(screen.getByText(/on any two photos to see their hashes and distance/)).toBeDefined()
-  })
 })
 
 describe('PhotoGrid — U4: unified selection and inline editing across cluster and standalone cards', () => {
-  // solo sits chronologically before a 2-member cluster (p1/p2, hash-identical
-  // so they group at the 0% default threshold).
+  // solo sits chronologically before a 2-member cluster (p1/p2).
   const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
   const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
   const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
   const photos = [solo, p1, p2]
-  const metrics = new Map<string, PhotoMetrics | undefined>([
-    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-  ])
+
+  beforeEach(() => {
+    mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[solo.id], [p1.id, p2.id]]))
+  })
 
   it('selecting a cluster member updates the same selectedIds a standalone selection would, visible in BatchEditPanel\'s count', () => {
-    render(<SelectionHarness photos={photos} metrics={metrics} />)
+    render(<SelectionHarness photos={photos} />)
 
     // No BatchEditPanel until something is selected.
     expect(screen.queryByText(/selected/)).toBeNull()
@@ -534,7 +451,7 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
   })
 
   it('selecting photos both inside and outside a cluster in the same session produces one combined selection, not two separate ones', () => {
-    render(<SelectionHarness photos={photos} metrics={metrics} />)
+    render(<SelectionHarness photos={photos} />)
 
     fireEvent.click(screen.getByAltText('p1.jpg')) // cluster member
     fireEvent.click(screen.getByAltText('solo.jpg')) // standalone
@@ -557,7 +474,6 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
     render(
       <PhotoGrid
         photos={photos}
-        metrics={metrics}
         getObjectUrl={getObjectUrl}
         onNameChange={onNameChange}
         onTimestampChange={onTimestampChange}
@@ -604,16 +520,15 @@ describe('PhotoGrid — U2: delete icon overlay', () => {
   const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
   const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
   const photos = [solo, p1, p2]
-  const metrics = new Map<string, PhotoMetrics | undefined>([
-    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-  ])
+
+  beforeEach(() => {
+    mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[solo.id], [p1.id, p2.id]]))
+  })
 
   it('clicking a card\'s delete icon calls onDelete with that card\'s id, exactly once', () => {
     const onDelete = vi.fn()
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onDelete={onDelete} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onDelete={onDelete} />
     )
 
     // p1 is a cluster member -- prove the id-bound wiring works there too.
@@ -625,13 +540,10 @@ describe('PhotoGrid — U2: delete icon overlay', () => {
     expect(onDelete).toHaveBeenCalledWith(p1.id)
   })
 
-  it('renders a delete icon on every card, with or without debug mode, clustered or not -- no card is missing it', () => {
+  it('renders a delete icon on every card, clustered or not -- no card is missing it', () => {
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onDelete={vi.fn()} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onDelete={vi.fn()} />
     )
-    expect(screen.getAllByRole('button', { name: 'Delete photo' })).toHaveLength(3)
-
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Debug mode' }))
     expect(screen.getAllByRole('button', { name: 'Delete photo' })).toHaveLength(3)
   })
 
@@ -639,7 +551,6 @@ describe('PhotoGrid — U2: delete icon overlay', () => {
     render(
       <PhotoGrid
         photos={photos}
-        metrics={metrics}
         getObjectUrl={getObjectUrl}
         onReorder={vi.fn()}
         onDelete={vi.fn()}
@@ -675,16 +586,15 @@ describe('PhotoGrid — U4: zoom icon overlay', () => {
   const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
   const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
   const photos = [solo, p1, p2]
-  const metrics = new Map<string, PhotoMetrics | undefined>([
-    [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    [solo.id, makeMetrics(hashFromPositions(range(60, 69)))],
-  ])
+
+  beforeEach(() => {
+    mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[solo.id], [p1.id, p2.id]]))
+  })
 
   it('clicking a card\'s zoom icon calls onZoom with that card\'s id, exactly once', () => {
     const onZoom = vi.fn()
     render(
-      <PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} onZoom={onZoom} />
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onZoom={onZoom} />
     )
 
     // p1 is a cluster member -- prove the id-bound wiring works there too.
@@ -700,7 +610,6 @@ describe('PhotoGrid — U4: zoom icon overlay', () => {
     render(
       <PhotoGrid
         photos={photos}
-        metrics={metrics}
         getObjectUrl={getObjectUrl}
         onReorder={vi.fn()}
         onZoom={vi.fn()}
@@ -746,8 +655,9 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     const day2 = makeEntry('day2.jpg', 1, '2026-08-21T10:00:00Z')
     const day3 = makeEntry('day3.jpg', 2, '2026-08-22T10:00:00Z')
     const photos = [day1, day2, day3]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const headings = dayHeadings()
     expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026', 'August 21, 2026', 'August 22, 2026'])
@@ -769,12 +679,9 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     const p1 = makeEntry('p1.jpg', 0, '2026-08-20T00:00:00Z')
     const p2 = makeEntry('p2.jpg', 1, '2026-08-22T00:00:00Z')
     const photos = [p1, p2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [p1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p2.id, makeMetrics(hashFromPositions(range(0, 9)))],
-    ])
+    mockUseClusteredPhotos.mockReturnValue(clusteredResult(photos, [[p1.id, p2.id]]))
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     // Sanity: they really did cluster into one 2-member section.
     const sections = document.querySelectorAll('section')
@@ -799,13 +706,9 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     const s2 = makeEntry('s2.jpg', 1, '2026-08-21T01:00:00Z')
     const s3 = makeEntry('s3.jpg', 2, '2026-08-21T02:00:00Z')
     const photos = [s1, s2, s3]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [s1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [s2.id, makeMetrics(hashFromPositions(range(30, 39)))],
-      [s3.id, makeMetrics(hashFromPositions(range(60, 69)))],
-    ])
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     // Sanity: still a flat run of singles, no cluster section.
     expect(document.querySelectorAll('section')).toHaveLength(0)
@@ -832,8 +735,13 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     // Passed with undated photos interleaved in the input array -- ordering
     // must come from the hook's null-last sort, not input order.
     const photos = [undated1, dated1, undated2, dated2]
+    // Display order is chronological (null-last, tie-broken by uploadIndex)
+    // regardless of input order -- mirrors what the real hook would produce.
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[dated1.id], [dated2.id], [undated1.id], [undated2.id]])
+    )
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const headings = dayHeadings()
     expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026', 'August 21, 2026', 'Undated'])
@@ -849,8 +757,9 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
 
   it('a batch with zero dated photos (all null capturedAt) renders exactly one "Undated" header and no dated headers', () => {
     const photos = [makeEntry('u1.jpg', 0, null), makeEntry('u2.jpg', 1, null)]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     expect(dayHeadings().map((h) => h.textContent)).toEqual(['Undated'])
   })
@@ -859,8 +768,9 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     const a = makeEntry('a.jpg', 0, '2026-08-20T01:00:00Z')
     const b = makeEntry('b.jpg', 1, '2026-08-20T22:00:00Z')
     const photos = [a, b]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
 
-    render(<PhotoGrid photos={photos} metrics={emptyMetrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     const headings = dayHeadings()
     expect(headings.map((h) => h.textContent)).toEqual(['August 20, 2026'])
@@ -872,23 +782,21 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
   })
 
   it('moving the similarity slider (changing cluster membership) re-renders day headers without duplicating or dropping any -- same count/order regardless of clustering state', () => {
-    // p1/p2 are hash-close enough to merge only once the slider is raised
-    // (distance 0.3, same shape as the hook's own "raises similarityPercent"
-    // test); both are on the same calendar day, s1/s2 fall on two other
-    // distinct days that never change membership.
+    // p1/p2 only cluster once the slider is raised past 50%; both are on
+    // the same calendar day, s1/s2 fall on two other distinct days that
+    // never change membership.
     const s1 = makeEntry('s1.jpg', 0, '2026-08-19T00:00:00Z')
     const p1 = makeEntry('p1.jpg', 1, '2026-08-20T00:00:00Z')
     const p2 = makeEntry('p2.jpg', 2, '2026-08-20T01:00:00Z')
     const s2 = makeEntry('s2.jpg', 3, '2026-08-21T00:00:00Z')
     const photos = [s1, p1, p2, s2]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [s1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [p1.id, makeMetrics(hashFromPositions(range(30, 39)))],
-      [p2.id, makeMetrics(hashFromPositions(range(33, 42)))],
-      [s2.id, makeMetrics(hashFromPositions(range(90, 99)))],
-    ])
+    mockUseClusteredPhotos.mockImplementation((_photos, similarityPercent) =>
+      similarityPercent >= 70
+        ? clusteredResult(photos, [[s1.id], [p1.id, p2.id], [s2.id]])
+        : flatResult(photos)
+    )
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     // Before: p1/p2 too strict to cluster at the 0% default -- no section.
     expect(document.querySelectorAll('section')).toHaveLength(0)
@@ -918,15 +826,11 @@ describe('PhotoGrid — U5: day-boundary headers', () => {
     const clusterB = makeEntry('clusterB.jpg', 3, '2026-08-20T04:00:00Z')
     const single3 = makeEntry('single3.jpg', 4, '2026-08-20T05:00:00Z')
     const photos = [single1, single2, clusterA, clusterB, single3]
-    const metrics = new Map<string, PhotoMetrics | undefined>([
-      [single1.id, makeMetrics(hashFromPositions(range(0, 9)))],
-      [single2.id, makeMetrics(hashFromPositions(range(30, 39)))],
-      [clusterA.id, makeMetrics(hashFromPositions(range(60, 69)))],
-      [clusterB.id, makeMetrics(hashFromPositions(range(60, 69)))],
-      [single3.id, makeMetrics(hashFromPositions(range(90, 99)))],
-    ])
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[single1.id], [single2.id], [clusterA.id, clusterB.id], [single3.id]])
+    )
 
-    render(<PhotoGrid photos={photos} metrics={metrics} getObjectUrl={getObjectUrl} />)
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
 
     // Sanity: exactly one 2-member cluster section formed.
     const sections = document.querySelectorAll('section')
