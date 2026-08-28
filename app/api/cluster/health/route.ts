@@ -1,10 +1,13 @@
 import { NextResponse } from 'next/server'
 import { fetchUpstreamWithTimeout, parseUpstreamJson } from '@/lib/cluster-api-server'
 
-// Set above this app's existing longest proxy timeout (45s for uploads) to
-// absorb photo-tidy-api's documented slow first request while its CLIP
-// model loads lazily on first use.
-const HEALTH_TIMEOUT_MS = 60_000
+// Short, unlike CLUSTER_TIMEOUT_MS: /health never touches the CLIP model
+// (photo-tidy-api's handler is a bare {"status": "ok"}), so it doesn't need
+// the long allowance that absorbs the model's slow first load. A short
+// timeout here means a hung connection surfaces as "unavailable" in
+// seconds rather than leaving the slider silently disabled for up to a
+// minute with no explanation.
+const HEALTH_TIMEOUT_MS = 8_000
 
 export async function GET(): Promise<NextResponse> {
   const clusterApiUrl = process.env.CLUSTER_API_URL ?? 'http://localhost:8000'

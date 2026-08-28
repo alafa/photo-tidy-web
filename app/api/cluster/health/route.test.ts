@@ -23,7 +23,7 @@ describe('GET /api/cluster/health', () => {
     expect(await res.json()).toEqual({ status: 'ok' })
   })
 
-  it('passes an AbortSignal with a timeout above the 45s upload-route timeout to the upstream fetch', async () => {
+  it('passes an AbortSignal with a short timeout to the upstream fetch, unlike the cluster route (KTD15: /health never touches the CLIP model)', async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     mockFetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'ok' }) })
 
@@ -32,7 +32,7 @@ describe('GET /api/cluster/health', () => {
     const options = mockFetch.mock.calls[0][1]
     expect(options.signal).toBeInstanceOf(AbortSignal)
     const timeoutMs = timeoutSpy.mock.calls[0][0]
-    expect(timeoutMs).toBeGreaterThan(45_000)
+    expect(timeoutMs).toBeLessThan(45_000)
   })
 
   it('returns a structured 502 error when photo-tidy-api is unreachable (connection refused)', async () => {
