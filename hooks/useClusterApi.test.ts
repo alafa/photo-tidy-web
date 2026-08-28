@@ -54,6 +54,24 @@ function clusterFail(status = 500) {
   return { ok: false, status, json: async () => ({ error: { message: 'boom' } }) }
 }
 
+/** A 400 whose body itself fails to parse -- exercises postCluster's explicit
+ * try/catch around `res.json()`, distinct from a well-formed-but-rejecting body. */
+function clusterMalformed400() {
+  return {
+    ok: false,
+    status: 400,
+    json: async () => {
+      throw new SyntaxError('Unexpected token in JSON')
+    },
+  }
+}
+
+/** A 400 whose `detail` doesn't match the `Photo '<id>': ...` shape --
+ * extractRejectedPhotoId must return null for this, not a false-positive id. */
+function clusterUnmatchedDetail() {
+  return { ok: false, status: 400, json: async () => ({ detail: 'Something else went wrong' }) }
+}
+
 /**
  * Renders `useClusterApi` through a props object threaded via
  * `initialProps`/`rerender`, mirroring the convention the old (now-removed)
@@ -363,6 +381,57 @@ describe('useClusterApi', () => {
 
       expect(result.current.clusters).toEqual([{ clusterIndex: 0, photoIds: ['a'] }])
     })
+
+    it('discards an in-flight >0% response after the slider drops to 0%, rather than applying it once settled', async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+
+      let resolveFirst!: (v: unknown) => void
+      const firstPending = new Promise((resolve) => {
+        resolveFirst = resolve
+      })
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/cluster/health') return Promise.resolve(healthResponse)
+        if (url === '/api/cluster') {
+          const next = clusterQueue.shift()
+          if (next === 'FIRST_PENDING') return firstPending
+          return next ? Promise.resolve(next) : Promise.reject(new Error('unexpected cluster call'))
+        }
+        return Promise.reject(new Error('unexpected url'))
+      })
+
+      const { result, rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      // A >0% request starts and is held pending (e.g. a slow cold-started backend).
+      queueCluster('FIRST_PENDING')
+      rerender({ photos, percent: 40 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      expect(result.current.isLoading).toBe(true)
+
+      // The user drops the slider to 0% before that request resolves. This
+      // trigger fails the R5 gate (percent <= 0), so it must invalidate the
+      // still-in-flight >0% request rather than leaving it free to land.
+      rerender({ photos, percent: 0 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      // Now the stale >0% response finally resolves.
+      await act(async () => {
+        resolveFirst(clusterOk([{ clusterIndex: 0, photoIds: ['a', 'b'] }]))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // It must not have been applied: the hook never had a successful
+      // result before this, so `clusters` must still be empty, not the
+      // stale grouped result computed for the abandoned 40% threshold.
+      expect(result.current.clusters).toEqual([])
+      expect(result.current.isLoading).toBe(false)
+    })
   })
 
   describe('stale-while-loading', () => {
@@ -622,6 +691,194 @@ describe('useClusterApi', () => {
       })
 
       expect(mockGenerateThumbnail).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('network and parsing failures', () => {
+    it('becomes unavailable when the first /api/cluster attempt rejects (network error)', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/cluster/health') return Promise.resolve(healthResponse)
+        if (url === '/api/cluster') return Promise.reject(new TypeError('network error'))
+        return Promise.reject(new Error('unexpected url'))
+      })
+
+      const photo = makePhoto(makeFile('a.jpg'), 'a')
+      const photos = [photo]
+      const { result, rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(result.current.availability).toBe('unavailable')
+      expect(result.current.isLoading).toBe(false)
+    })
+
+    it('becomes unavailable when the retry attempt itself rejects (network error)', async () => {
+      let clusterCall = 0
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/cluster/health') return Promise.resolve(healthResponse)
+        if (url === '/api/cluster') {
+          clusterCall += 1
+          if (clusterCall === 1) return Promise.resolve(clusterRejected('a'))
+          return Promise.reject(new TypeError('network error on retry'))
+        }
+        return Promise.reject(new Error('unexpected url'))
+      })
+
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+      const { result, rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(clusterCall).toBe(2)
+      expect(result.current.availability).toBe('unavailable')
+    })
+
+    it('becomes unavailable when the health check fetch itself rejects (not just a non-ok response)', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/cluster/health') return Promise.reject(new TypeError('network error'))
+        return Promise.reject(new Error('unexpected cluster call'))
+      })
+
+      const { result } = renderClusterApi([])
+      await flushHealthCheck()
+
+      expect(result.current.availability).toBe('unavailable')
+    })
+
+    it('treats a 400 whose body fails to parse as a non-photo-specific failure (no retry)', async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+      const { result, rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      queueCluster(clusterMalformed400())
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(clusterCallCount()).toBe(1)
+      expect(result.current.availability).toBe('unavailable')
+    })
+
+    it("treats a 400 whose detail doesn't match the 'Photo <id>:' shape as a non-photo-specific failure (no retry)", async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photos = [photoA, photoB]
+      const { result, rerender } = renderClusterApi(photos)
+      await flushHealthCheck()
+
+      queueCluster(clusterUnmatchedDetail())
+      rerender({ photos, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(clusterCallCount()).toBe(1)
+      expect(result.current.availability).toBe('unavailable')
+    })
+  })
+
+  describe('supersession during thumbnail generation and during a retry', () => {
+    it('discards a stale generation when a new trigger fires while thumbnail generation is still pending', async () => {
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      let resolveThumbnailA!: (v: string | null) => void
+      const pendingThumbnailA = new Promise<string | null>((resolve) => {
+        resolveThumbnailA = resolve
+      })
+      mockGenerateThumbnail.mockImplementation(async (file: File) =>
+        file.name === 'a.jpg' ? pendingThumbnailA : `thumb-${file.name}`,
+      )
+
+      const photosA = [photoA]
+      const { result, rerender } = renderClusterApi(photosA)
+      await flushHealthCheck()
+
+      rerender({ photos: photosA, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      // Thumbnail generation for photoA is still pending, so no /api/cluster
+      // call has been made yet.
+      expect(clusterCallCount()).toBe(0)
+
+      // A new trigger (photo set change) supersedes the still-thumbnail-generating
+      // first attempt before it ever reaches its isCurrent() check at that point.
+      queueCluster(clusterOk([{ clusterIndex: 0, photoIds: ['a', 'b'] }]))
+      rerender({ photos: [photoA, photoB], percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // Now let the first (stale) generation's thumbnail resolve.
+      await act(async () => {
+        resolveThumbnailA('thumb-a.jpg')
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      // The stale generation must never have reached postCluster.
+      expect(clusterCallCount()).toBe(1)
+      expect(result.current.clusters).toEqual([{ clusterIndex: 0, photoIds: ['a', 'b'] }])
+    })
+
+    it('discards a stale same-generation retry response when a new trigger fires while the retry is in flight', async () => {
+      let clusterCall = 0
+      let resolveRetry!: (v: unknown) => void
+      const pendingRetry = new Promise((resolve) => {
+        resolveRetry = resolve
+      })
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/cluster/health') return Promise.resolve(healthResponse)
+        if (url === '/api/cluster') {
+          clusterCall += 1
+          if (clusterCall === 1) return Promise.resolve(clusterRejected('a'))
+          if (clusterCall === 2) return pendingRetry
+          return Promise.resolve(clusterOk([{ clusterIndex: 0, photoIds: ['a', 'b', 'c'] }]))
+        }
+        return Promise.reject(new Error('unexpected url'))
+      })
+
+      const photoA = makePhoto(makeFile('a.jpg'), 'a')
+      const photoB = makePhoto(makeFile('b.jpg'), 'b')
+      const photoC = makePhoto(makeFile('c.jpg'), 'c')
+      const photosAB = [photoA, photoB]
+      const { result, rerender } = renderClusterApi(photosAB)
+      await flushHealthCheck()
+
+      rerender({ photos: photosAB, percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      // First call rejected photo 'a'; the retry (second call) is now pending.
+      expect(clusterCall).toBe(2)
+
+      // A new trigger (photo added) supersedes the in-flight retry.
+      rerender({ photos: [photoA, photoB, photoC], percent: 30 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(clusterCall).toBe(3)
+
+      // Resolve the stale retry -- its result must be discarded.
+      await act(async () => {
+        resolveRetry(clusterOk([{ clusterIndex: 0, photoIds: ['b'] }]))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(result.current.clusters).toEqual([{ clusterIndex: 0, photoIds: ['a', 'b', 'c'] }])
+      expect(result.current.availability).toBe('available')
     })
   })
 })

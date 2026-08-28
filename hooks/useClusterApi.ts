@@ -233,10 +233,24 @@ export function useClusterApi(photos: PhotoEntry[], similarityPercent: number): 
   useEffect(() => {
     // R12/KTD13: no cluster call while checking or unavailable.
     if (availability !== 'available') return
-    // R5: call only when the (live) slider is above 0%.
-    if (livePercentRef.current <= 0) return
-    // R5/R8: call only when photos are loaded.
-    if (photos.length === 0) return
+
+    // R5: at 0% (or once every photo is gone), invalidate whatever request
+    // was previously in flight rather than leaving its generation valid --
+    // otherwise a stale response computed for the old threshold/photo-set
+    // could still land and get applied after this point, since nothing else
+    // bumps generationRef on this path. Also reset isLoading here: the
+    // invalidated request's own run() will see isCurrent() go false and
+    // return without touching isLoading, and no replacement request is
+    // fired on this path to reset it later, so it would otherwise get stuck
+    // true. Deferred to a microtask (not called synchronously in the effect
+    // body) to match this file's existing convention of only ever calling
+    // the state setters from inside an async callback -- see checkHealth()
+    // and run() above.
+    if (livePercentRef.current <= 0 || photos.length === 0) {
+      generationRef.current += 1
+      queueMicrotask(() => setIsLoading(false))
+      return
+    }
 
     const threshold = percentToThreshold(debouncedPercent)
     const currentFileIds = new Set(photos.map((p) => p.file))
