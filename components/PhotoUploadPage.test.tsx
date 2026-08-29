@@ -1539,7 +1539,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
     }
   }
 
-  it('confirmed: releases every object URL, calls removePhotos with every id, clearAllPersisted, reset, and clears selection', async () => {
+  it('confirmed: releases every object URL, calls notifyPhotoRemoved for every id, removePhotos with every id, clearAllPersisted, reset, and clears selection', async () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
     const removePhotosMock = vi.fn()
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
@@ -1558,6 +1558,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
     })
 
     const resetMock = vi.fn()
+    const notifyPhotoRemovedMock = vi.fn()
     mockUseGooglePhotosUpload.mockReturnValue({
       uploadState: 'idle',
       photoStates: new Map(),
@@ -1565,7 +1566,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
       retryFailed: vi.fn(),
       reset: resetMock,
       seedPhotoStates: vi.fn(),
-      notifyPhotoRemoved: vi.fn(),
+      notifyPhotoRemoved: notifyPhotoRemovedMock,
     })
 
     vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -1585,6 +1586,13 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
     expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[2].file)
     expect(releaseObjectUrlMock).toHaveBeenCalledTimes(3)
 
+    // Clear all funnels through the same notifyPhotoRemoved path a regular
+    // delete uses (KTD9/KTD13), for every photo id.
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(photos[0].id)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(photos[1].id)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(photos[2].id)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledTimes(3)
+
     expect(removePhotosMock).toHaveBeenCalledOnce()
     const removedIds = removePhotosMock.mock.calls[0][0] as string[]
     expect(new Set(removedIds)).toEqual(new Set(photos.map((p) => p.id)))
@@ -1593,7 +1601,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
     expect(resetMock).toHaveBeenCalledOnce()
   })
 
-  it('not confirmed: calls none of releaseObjectUrl, removePhotos, clearAllPersisted, or reset', () => {
+  it('not confirmed: calls none of releaseObjectUrl, notifyPhotoRemoved, removePhotos, clearAllPersisted, or reset', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
     const removePhotosMock = vi.fn()
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
@@ -1612,6 +1620,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
     })
 
     const resetMock = vi.fn()
+    const notifyPhotoRemovedMock = vi.fn()
     mockUseGooglePhotosUpload.mockReturnValue({
       uploadState: 'idle',
       photoStates: new Map(),
@@ -1619,7 +1628,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
       retryFailed: vi.fn(),
       reset: resetMock,
       seedPhotoStates: vi.fn(),
-      notifyPhotoRemoved: vi.fn(),
+      notifyPhotoRemoved: notifyPhotoRemovedMock,
     })
 
     vi.spyOn(window, 'confirm').mockReturnValue(false)
@@ -1630,6 +1639,7 @@ describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
 
     expect(window.confirm).toHaveBeenCalledWith('Clear all photos? This cannot be undone.')
     expect(releaseObjectUrlMock).not.toHaveBeenCalled()
+    expect(notifyPhotoRemovedMock).not.toHaveBeenCalled()
     expect(removePhotosMock).not.toHaveBeenCalled()
     expect(clearAllPersistedMock).not.toHaveBeenCalled()
     expect(resetMock).not.toHaveBeenCalled()

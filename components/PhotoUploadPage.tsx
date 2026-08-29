@@ -262,7 +262,7 @@ export default function PhotoUploadPage() {
   const handleDeletePhoto = useCallback((id: string) => handleBatchDelete([id]), [handleBatchDelete])
   const handleCloseLightbox = useCallback(() => setZoomedPhotoId(null), [])
 
-  // Comprehensive reset (KTD2's "Clear all"): a deliberately much larger
+  // Comprehensive reset (KTD9's "Clear all"): a deliberately much larger
   // blast radius than a single-photo delete, so it's gated behind a native
   // confirm() -- this codebase has no modal/dialog component, and a native
   // confirm is the simplest option consistent with its current UI
@@ -274,6 +274,7 @@ export default function PhotoUploadPage() {
     if (!window.confirm('Clear all photos? This cannot be undone.')) return
     for (const photo of photos) {
       releaseObjectUrl(photo.file)
+      notifyPhotoRemoved(photo.id)
     }
     removePhotos(photos.map((p) => p.id))
     await clearAllPersisted()

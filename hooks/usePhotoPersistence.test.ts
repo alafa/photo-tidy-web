@@ -274,6 +274,49 @@ describe('usePhotoPersistence — write-through', () => {
     expect(record.uploadIndex).toBe(0)
   })
 
+  it('CRITICAL: after restore, the write-through effect does not call putPhotoRecord for any restored photo', async () => {
+    // Regression test for a bug where lastPersistedRef was seeded from the
+    // raw PhotoRecord array (record.blob), while hydratePhotos received
+    // PhotoEntry objects whose `.file` is a brand-new File wrapping that
+    // same Blob. Since `new File([blob], ...) !== blob`, every restored
+    // photo would look "changed" and get rewritten on every load. The fix
+    // seeds lastPersistedRef with the same File objects handed to
+    // hydratePhotos.
+    //
+    // Uses a real `useState` for `photos` (rather than the
+    // externally-rerendered `photos` prop `renderPersistence` normally
+    // uses) so `hydratePhotos` behaves like the real `usePhotos.hydratePhotos`
+    // -- a genuine state setter. This matters: restore() calls
+    // hydratePhotos(entries) and setIsRestoring(false) back-to-back with no
+    // await between them, so React batches them into one render, meaning
+    // the write-through effect only ever observes `photos` and
+    // `isRestoring` in sync, exactly as it does in the real app.
+    const record = makeRecord({ id: 'r1', filename: 'orig.jpg' })
+    mockGetAllPhotoRecords.mockResolvedValue([record])
+
+    function useHarness() {
+      const [photos, setPhotos] = React.useState<PhotoEntry[]>([])
+      const persistence = usePhotoPersistence(photos, setPhotos, vi.fn())
+      return { photos, ...persistence }
+    }
+
+    const { result } = renderHook(() => useHarness())
+    await waitFor(() => expect(result.current.isRestoring).toBe(false))
+
+    expect(result.current.photos).toHaveLength(1)
+    expect(result.current.photos[0].id).toBe('r1')
+
+    // Give the write-through effect a chance to run and settle.
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(mockPutPhotoRecord).not.toHaveBeenCalled()
+    expect(mockDeletePhotoRecord).not.toHaveBeenCalled()
+  })
+
   it('calls requestPersistence exactly once, fired after the first successful put', async () => {
     const photoA = makePhoto({ id: 'a', file: makeFile('a.jpg') })
     const photoB = makePhoto({ id: 'b', file: makeFile('b.jpg') })

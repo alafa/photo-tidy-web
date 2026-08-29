@@ -27,7 +27,7 @@ interface PendingUploadToken extends UploadToken {
   photoId: string
 }
 
-function chunkArray<T>(arr: T[], size: number): T[][] {
+export function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = []
   for (let i = 0; i < arr.length; i += size) {
     chunks.push(arr.slice(i, i + size))
@@ -101,6 +101,11 @@ export interface UseGooglePhotosUploadOptions {
 }
 
 export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
+  // Extracted once so batchCreate's useCallback can depend on this stable
+  // reference instead of the whole `options` object — callers often pass a
+  // fresh object literal each render, which would otherwise recreate
+  // batchCreate (and transitively startUpload/retryFailed) every render.
+  const onMediaItemIdSet = options?.onMediaItemIdSet
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [photoStates, setPhotoStates] = useState<Map<string, PhotoUploadState>>(new Map())
 
@@ -444,7 +449,7 @@ export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
             // UseGooglePhotosUploadOptions.onMediaItemIdSet), but never for
             // a photo the user has already deleted locally.
             if (!removedPhotoIdsRef.current.has(item.photoId)) {
-              options?.onMediaItemIdSet?.(item.photoId, result.mediaItem.id)
+              onMediaItemIdSet?.(item.photoId, result.mediaItem.id)
             }
           }
         }
@@ -488,7 +493,7 @@ export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
         throw new Error('One or more batch-create chunks failed')
       }
     },
-    [markChunkFailed, reconcileAndSetStatus, options]
+    [markChunkFailed, reconcileAndSetStatus, onMediaItemIdSet]
   )
 
   const startUpload = useCallback(

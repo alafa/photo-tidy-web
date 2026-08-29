@@ -9,7 +9,7 @@ function readAsDataURL(file: File): Promise<string> {
   })
 }
 
-function dataURLtoBlob(dataURL: string): Blob {
+export function dataURLtoBlob(dataURL: string): Blob {
   const [header, data] = dataURL.split(',')
   const mime = header.match(/:(.*?);/)?.[1] ?? 'image/jpeg'
   const binary = atob(data)

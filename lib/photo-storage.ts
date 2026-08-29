@@ -26,8 +26,18 @@ export interface PhotoRecord {
   thumbnail: Blob | null
 }
 
+// Memoized connection, shared across every call — opening a fresh
+// `indexedDB.open()` connection (and closing it) on every single
+// get/put/delete would mean a write-through pass touching a chunk of
+// records opens one connection per record. Reused until the connection
+// itself reports it's gone away (see onversionchange/onclose below), at
+// which point it's nulled out so the next call transparently reopens.
+let dbPromise: Promise<IDBDatabase> | null = null
+
 function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise
+
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
 
     request.onupgradeneeded = () => {
@@ -37,9 +47,29 @@ function openDb(): Promise<IDBDatabase> {
       }
     }
 
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      // Only one DB version exists today, so there's no upgrade logic to
+      // run here — just drop the cached connection so the next call
+      // reopens fresh, whenever the connection closes for any reason
+      // (another tab upgrading the schema, or the connection being closed
+      // out from under us).
+      db.onversionchange = () => {
+        db.close()
+        dbPromise = null
+      }
+      db.onclose = () => {
+        dbPromise = null
+      }
+      resolve(db)
+    }
+    request.onerror = () => {
+      dbPromise = null
+      reject(request.error)
+    }
   })
+
+  return dbPromise
 }
 
 /** Wraps an `IDBRequest` in a Promise, rejecting with the request's own
@@ -57,13 +87,9 @@ async function withStore<T>(
   fn: (store: IDBObjectStore) => IDBRequest<T>
 ): Promise<T> {
   const db = await openDb()
-  try {
-    const tx = db.transaction(STORE_NAME, mode)
-    const store = tx.objectStore(STORE_NAME)
-    return await requestToPromise(fn(store))
-  } finally {
-    db.close()
-  }
+  const tx = db.transaction(STORE_NAME, mode)
+  const store = tx.objectStore(STORE_NAME)
+  return await requestToPromise(fn(store))
 }
 
 /** Returns every stored photo record, in no particular order. */

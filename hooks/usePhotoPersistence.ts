@@ -28,6 +28,8 @@ import {
   type PhotoRecord,
 } from '@/lib/photo-storage'
 import { generateThumbnail } from '@/lib/generate-thumbnail'
+import { dataURLtoBlob } from '@/lib/exif-write'
+import { chunkArray } from '@/hooks/useGooglePhotosUpload'
 
 const RESTORE_FAILURE_MESSAGE = "Couldn't load your saved photos — starting a new session."
 const SAVE_FAILURE_MESSAGE = "Some photos couldn't be saved — your browser's storage may be full."
@@ -36,15 +38,6 @@ const SAVE_FAILURE_MESSAGE = "Some photos couldn't be saved — your browser's s
 // thread in one long synchronous run; between chunks we yield via a
 // zero-delay setTimeout.
 const WRITE_CHUNK_SIZE = 15
-
-function base64ToBlob(base64: string, type: string): Blob {
-  const byteString = atob(base64)
-  const bytes = new Uint8Array(byteString.length)
-  for (let i = 0; i < byteString.length; i++) {
-    bytes[i] = byteString.charCodeAt(i)
-  }
-  return new Blob([bytes], { type })
-}
 
 function recordToEntry(record: PhotoRecord): PhotoEntry {
   return {
@@ -77,14 +70,6 @@ function hasChangedSincePersisted(
     actualUploadIndex !== prevRecord.uploadIndex ||
     photo.mediaItemId !== prevRecord.mediaItemId
   )
-}
-
-function chunk<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = []
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size))
-  }
-  return chunks
 }
 
 export function usePhotoPersistence(
@@ -138,11 +123,20 @@ export function usePhotoPersistence(
       const seedMap = new Map<string, string>()
       const persistedMap = new Map<string, PhotoRecord>()
       const thumbCache = new Map<string, Blob | null>()
-      for (const record of records) {
-        persistedMap.set(record.id, record)
+      records.forEach((record, i) => {
+        // Seed with the SAME File object just handed to hydratePhotos
+        // (entries[i].file), not the raw record.blob straight out of
+        // IndexedDB. hasChangedSincePersisted compares `photo.file !==
+        // prevRecord.blob` by reference — recordToEntry wraps record.blob
+        // in a brand-new `File`, which is never === the original Blob, so
+        // seeding with record.blob would make every restored photo look
+        // "changed" and trigger a full rewrite on every load. `file` stays
+        // the same object reference across metadata-only edits elsewhere
+        // (rename/timestamp), so this keeps the comparison stable.
+        persistedMap.set(record.id, { ...record, blob: entries[i].file })
         thumbCache.set(record.id, record.thumbnail)
         if (record.mediaItemId) seedMap.set(record.id, record.mediaItemId)
-      }
+      })
       seedPhotoStates(seedMap)
       lastPersistedRef.current = persistedMap
       thumbnailCacheRef.current = thumbCache
@@ -164,79 +158,89 @@ export function usePhotoPersistence(
       const currentIds = new Set(photos.map((p) => p.id))
 
       // Removed: present in lastPersistedRef but no longer in `photos`.
-      for (const id of prevMap.keys()) {
-        if (currentIds.has(id)) continue
-        try {
-          await deletePhotoRecord(id)
-        } catch {
-          // Deletion failure isn't recoverable by retry logic here (there's
-          // no "pending delete" list) — leaving the stale record behind is
-          // the safe failure mode; it just won't be surfaced in the UI
-          // again since `photos` no longer contains it.
+      async function runDeletes() {
+        for (const id of prevMap.keys()) {
+          if (currentIds.has(id)) continue
+          try {
+            await deletePhotoRecord(id)
+          } catch {
+            // Deletion failure isn't recoverable by retry logic here (there's
+            // no "pending delete" list) — leaving the stale record behind is
+            // the safe failure mode; it just won't be surfaced in the UI
+            // again since `photos` no longer contains it.
+          }
+          lastPersistedRef.current.delete(id)
+          thumbnailCacheRef.current.delete(id)
         }
-        lastPersistedRef.current.delete(id)
-        thumbnailCacheRef.current.delete(id)
       }
 
       // New or changed: compare against the last-known-persisted record,
       // using the photo's ACTUAL current array index (not its own
       // possibly-stale `uploadIndex` field — see hooks/usePhotos.ts's
       // renumberByPosition doc comment) as the value to persist.
-      const pending: { photo: PhotoEntry; actualUploadIndex: number }[] = []
-      photos.forEach((photo, actualUploadIndex) => {
-        const prevRecord = lastPersistedRef.current.get(photo.id)
-        if (!prevRecord || hasChangedSincePersisted(photo, actualUploadIndex, prevRecord)) {
-          pending.push({ photo, actualUploadIndex })
-        }
-      })
+      async function runWrites() {
+        const pending: { photo: PhotoEntry; actualUploadIndex: number }[] = []
+        photos.forEach((photo, actualUploadIndex) => {
+          const prevRecord = lastPersistedRef.current.get(photo.id)
+          if (!prevRecord || hasChangedSincePersisted(photo, actualUploadIndex, prevRecord)) {
+            pending.push({ photo, actualUploadIndex })
+          }
+        })
 
-      const batches = chunk(pending, WRITE_CHUNK_SIZE)
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i]
-        await Promise.all(
-          batch.map(async ({ photo, actualUploadIndex }) => {
-            let thumbnail: Blob | null
-            if (thumbnailCacheRef.current.has(photo.id)) {
-              thumbnail = thumbnailCacheRef.current.get(photo.id) ?? null
-            } else {
-              const base64 = await generateThumbnail(photo.file)
-              thumbnail = base64 === null ? null : base64ToBlob(base64, 'image/jpeg')
-              thumbnailCacheRef.current.set(photo.id, thumbnail)
-            }
-
-            const record: PhotoRecord = {
-              id: photo.id,
-              blob: photo.file,
-              filename: photo.filename,
-              type: photo.file.type,
-              lastModified: photo.file.lastModified,
-              capturedAt: photo.capturedAt === null ? null : photo.capturedAt.getTime(),
-              source: photo.source,
-              uploadIndex: actualUploadIndex,
-              thumbnail,
-              ...(photo.mediaItemId !== undefined ? { mediaItemId: photo.mediaItemId } : {}),
-            }
-
-            try {
-              await putPhotoRecord(record)
-              lastPersistedRef.current.set(photo.id, record)
-              if (!hasRequestedPersistenceRef.current) {
-                hasRequestedPersistenceRef.current = true
-                void requestPersistence()
+        const batches = chunkArray(pending, WRITE_CHUNK_SIZE)
+        for (let i = 0; i < batches.length; i++) {
+          const batch = batches[i]
+          await Promise.all(
+            batch.map(async ({ photo, actualUploadIndex }) => {
+              let thumbnail: Blob | null
+              if (thumbnailCacheRef.current.has(photo.id)) {
+                thumbnail = thumbnailCacheRef.current.get(photo.id) ?? null
+              } else {
+                const base64 = await generateThumbnail(photo.file)
+                thumbnail = base64 === null ? null : dataURLtoBlob(`data:image/jpeg;base64,${base64}`)
+                thumbnailCacheRef.current.set(photo.id, thumbnail)
               }
-            } catch {
-              // Quota exceeded or any other failure: don't crash the batch,
-              // don't mark it persisted (so the next write-through pass,
-              // triggered by any future `photos` change, retries it).
-              setStorageWarning(SAVE_FAILURE_MESSAGE)
-            }
-          }),
-        )
 
-        if (i < batches.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 0))
+              const record: PhotoRecord = {
+                id: photo.id,
+                blob: photo.file,
+                filename: photo.filename,
+                type: photo.file.type,
+                lastModified: photo.file.lastModified,
+                capturedAt: photo.capturedAt === null ? null : photo.capturedAt.getTime(),
+                source: photo.source,
+                uploadIndex: actualUploadIndex,
+                thumbnail,
+                ...(photo.mediaItemId !== undefined ? { mediaItemId: photo.mediaItemId } : {}),
+              }
+
+              try {
+                await putPhotoRecord(record)
+                lastPersistedRef.current.set(photo.id, record)
+                if (!hasRequestedPersistenceRef.current) {
+                  hasRequestedPersistenceRef.current = true
+                  void requestPersistence()
+                }
+              } catch {
+                // Quota exceeded or any other failure: don't crash the batch,
+                // don't mark it persisted (so the next write-through pass,
+                // triggered by any future `photos` change, retries it).
+                setStorageWarning(SAVE_FAILURE_MESSAGE)
+              }
+            }),
+          )
+
+          if (i < batches.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
         }
       }
+
+      // Deletions and writes touch disjoint ids (a removed id can never
+      // also be a changed id, since `pending` is only ever built from ids
+      // still present in `photos`), so there's no correctness reason to
+      // serialize them — run both passes concurrently.
+      await Promise.all([runDeletes(), runWrites()])
     }
 
     void writeThrough()
