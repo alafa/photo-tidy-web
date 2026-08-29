@@ -1803,3 +1803,80 @@ describe('useGooglePhotosUpload — U3: notifyPhotoRemoved', () => {
     expect(result.current.photoStates.get('p2')?.status).toBe('done')
   })
 })
+
+describe('useGooglePhotosUpload — Fix #1: startUpload skips photos already done', () => {
+  it('re-upload after restore: seeded already-done photo is left untouched, only the new photo is uploaded', async () => {
+    const donePhoto = makePhoto({ id: 'p-done', filename: 'done.jpg' })
+    const newPhoto = makePhoto({ id: 'p-new', filename: 'new.jpg' })
+
+    const mockFetch = vi.fn()
+    // Only the new photo should participate: album creation, its own
+    // upload, batchCreate (with only its token), and reconciliation.
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-new' }) // upload newPhoto
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-new', status: { message: 'Success' }, mediaItem: { id: 'm-new', filename: 'new.jpg' } },
+        ],
+      }),
+    }) // batchCreate
+    mockFetch.mockResolvedValueOnce(reconcileSuccess()) // reconcile
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    // Seed as if restored from IndexedDB with an already-uploaded photo.
+    act(() => {
+      result.current.seedPhotoStates(new Map([['p-done', 'm-done-original']]))
+    })
+    expect(result.current.photoStates.get('p-done')).toEqual({ status: 'done', mediaItemId: 'm-done-original' })
+
+    await act(() => result.current.startUpload([donePhoto, newPhoto], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('done')
+
+    // The already-done photo's entry is completely untouched.
+    expect(result.current.photoStates.get('p-done')).toEqual({ status: 'done', mediaItemId: 'm-done-original' })
+
+    // The new photo uploaded normally.
+    expect(result.current.photoStates.get('p-new')?.status).toBe('done')
+    expect(result.current.photoStates.get('p-new')?.mediaItemId).toBe('m-new')
+
+    // No fetch call ever referenced the already-done photo's upload — every
+    // upload-tokens body only ever contains the new photo's token.
+    const batchCall = mockFetch.mock.calls.find((c) => c[0] === '/api/google-photos/batch-create')
+    expect(batchCall).toBeDefined()
+    const batchBody = JSON.parse(batchCall![1].body)
+    expect(batchBody.uploadTokens).toEqual([{ token: 'token-new', filename: 'new.jpg' }])
+    expect(mockFetch.mock.calls.length).toBe(4)
+  })
+
+  it('every photo already done: uploadState becomes done immediately with no network calls at all', async () => {
+    const donePhoto1 = makePhoto({ id: 'p-done-1', filename: 'a.jpg' })
+    const donePhoto2 = makePhoto({ id: 'p-done-2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    act(() => {
+      result.current.seedPhotoStates(
+        new Map([
+          ['p-done-1', 'm-1'],
+          ['p-done-2', 'm-2'],
+        ])
+      )
+    })
+
+    await act(() => result.current.startUpload([donePhoto1, donePhoto2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('done')
+    expect(mockFetch).not.toHaveBeenCalled()
+    // Untouched.
+    expect(result.current.photoStates.get('p-done-1')).toEqual({ status: 'done', mediaItemId: 'm-1' })
+    expect(result.current.photoStates.get('p-done-2')).toEqual({ status: 'done', mediaItemId: 'm-2' })
+  })
+})

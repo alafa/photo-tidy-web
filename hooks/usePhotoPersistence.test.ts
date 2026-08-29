@@ -317,6 +317,51 @@ describe('usePhotoPersistence — write-through', () => {
     expect(mockDeletePhotoRecord).not.toHaveBeenCalled()
   })
 
+  it('Fix #2: a photo deleted while its write is still in flight is not left orphaned in lastPersistedRef — it gets cleaned up via deletePhotoRecord', async () => {
+    // Simulate: photo A is added (write starts, `putPhotoRecord` still
+    // pending) -> user deletes A before it resolves (re-render with A
+    // removed from `photos`) -> the pending `putPhotoRecord` resolves.
+    // Before the fix, the resolving write would unconditionally commit A to
+    // lastPersistedRef with no re-check that A is still present, orphaning
+    // its record in IndexedDB forever (it reappears on next reload since
+    // nothing will ever call deletePhotoRecord for it).
+    let resolvePut!: (value: undefined) => void
+    mockPutPhotoRecord.mockImplementation(
+      () => new Promise((resolve) => { resolvePut = resolve }),
+    )
+
+    const photoA = makePhoto({ id: 'a', filename: 'a.jpg', file: makeFile('a.jpg') })
+    const { result, rerender } = renderPersistence([])
+    await waitFor(() => expect(result.current.isRestoring).toBe(false))
+
+    rerender({ photos: [photoA] })
+    await waitFor(() => expect(mockPutPhotoRecord).toHaveBeenCalledTimes(1))
+
+    // Delete photoA before its write resolves.
+    rerender({ photos: [] })
+
+    // Give the deletion's own write-through pass a chance to run (it will
+    // find nothing to delete yet, since lastPersistedRef doesn't have 'a'
+    // registered — the whole point of this race).
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(mockDeletePhotoRecord).not.toHaveBeenCalled()
+
+    // Now let the original, now-stale write resolve.
+    await act(async () => {
+      resolvePut(undefined)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // The in-flight write's own completion must detect photoA is no longer
+    // present and clean up after itself.
+    await waitFor(() => expect(mockDeletePhotoRecord).toHaveBeenCalledWith('a'))
+  })
+
   it('calls requestPersistence exactly once, fired after the first successful put', async () => {
     const photoA = makePhoto({ id: 'a', file: makeFile('a.jpg') })
     const photoB = makePhoto({ id: 'b', file: makeFile('b.jpg') })
@@ -374,5 +419,20 @@ describe('usePhotoPersistence — clearAllPersisted', () => {
     })
 
     expect(hydratePhotos).not.toHaveBeenCalled()
+  })
+
+  it('Fix #3: clearAllPhotoRecords rejecting does not make clearAllPersisted reject, and sets storageWarning', async () => {
+    mockClearAllPhotoRecords.mockRejectedValue(new Error('IndexedDB unavailable'))
+    const { result } = renderPersistence([])
+    await waitFor(() => expect(result.current.isRestoring).toBe(false))
+
+    await expect(
+      act(async () => {
+        await result.current.clearAllPersisted()
+      }),
+    ).resolves.toBeUndefined()
+
+    await waitFor(() => expect(result.current.storageWarning).toEqual(expect.any(String)))
+    expect(result.current.storageWarning).not.toBe('')
   })
 })

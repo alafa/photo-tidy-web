@@ -29,10 +29,11 @@ import {
 } from '@/lib/photo-storage'
 import { generateThumbnail } from '@/lib/generate-thumbnail'
 import { dataURLtoBlob } from '@/lib/exif-write'
-import { chunkArray } from '@/hooks/useGooglePhotosUpload'
+import { chunkArray } from '@/lib/chunk-array'
 
 const RESTORE_FAILURE_MESSAGE = "Couldn't load your saved photos — starting a new session."
 const SAVE_FAILURE_MESSAGE = "Some photos couldn't be saved — your browser's storage may be full."
+const CLEAR_FAILURE_MESSAGE = "Couldn't fully clear saved photos — some data may remain in storage."
 
 // Writes are batched so a large restore/first-save doesn't block the main
 // thread in one long synchronous run; between chunks we yield via a
@@ -99,6 +100,16 @@ export function usePhotoPersistence(
   // requestPersistence() is fired once, ever, the first time any write
   // succeeds — not on every write.
   const hasRequestedPersistenceRef = useRef(false)
+
+  // Mirrors the latest `photos` prop so an in-flight write (a `putPhotoRecord`
+  // still pending when the photo it's writing gets deleted) can check,
+  // right before it commits to lastPersistedRef, whether the photo it just
+  // wrote is still actually present — see the race guarded against in the
+  // write-through effect below.
+  const latestPhotosRef = useRef(photos)
+  useEffect(() => {
+    latestPhotosRef.current = photos
+  }, [photos])
 
   useEffect(() => {
     const myGeneration = ++generationRef.current
@@ -216,6 +227,29 @@ export function usePhotoPersistence(
 
               try {
                 await putPhotoRecord(record)
+
+                // The photo may have been deleted (triggering its own
+                // write-through pass, whose runDeletes() read
+                // lastPersistedRef before this write had registered itself)
+                // while this write was in flight. Committing it to
+                // lastPersistedRef now would leave an orphaned record in
+                // IndexedDB that nothing will ever delete — reappearing on
+                // the next reload. Detect that here, against the LATEST
+                // photos, not the `photos` this effect run closed over.
+                const stillPresent = latestPhotosRef.current.some((p) => p.id === photo.id)
+                if (!stillPresent) {
+                  try {
+                    await deletePhotoRecord(photo.id)
+                  } catch {
+                    // Best-effort cleanup — if this also fails there's
+                    // nothing more to do here; not worth surfacing a
+                    // storage warning for a photo the user already deleted.
+                  }
+                  lastPersistedRef.current.delete(photo.id)
+                  thumbnailCacheRef.current.delete(photo.id)
+                  return
+                }
+
                 lastPersistedRef.current.set(photo.id, record)
                 if (!hasRequestedPersistenceRef.current) {
                   hasRequestedPersistenceRef.current = true
@@ -250,9 +284,22 @@ export function usePhotoPersistence(
     // Invalidate any in-flight restore so its late hydratePhotos/ref-seed
     // can't re-populate what's about to be cleared.
     generationRef.current += 1
-    await clearAllPhotoRecords()
-    lastPersistedRef.current = new Map()
-    thumbnailCacheRef.current.clear()
+    // Never throw to the caller (components/PhotoUploadPage.tsx's
+    // handleClearAll awaits this and then unconditionally runs its own
+    // reset()/setSelectedIds cleanup) — whether or not the underlying
+    // IndexedDB clear actually succeeds, the caller has already released
+    // object URLs and cleared its in-memory `photos` unconditionally, so
+    // our own bookkeeping should reflect "nothing is known to be persisted"
+    // regardless, and any failure is surfaced via storageWarning instead of
+    // a rejection.
+    try {
+      await clearAllPhotoRecords()
+    } catch {
+      setStorageWarning(CLEAR_FAILURE_MESSAGE)
+    } finally {
+      lastPersistedRef.current = new Map()
+      thumbnailCacheRef.current.clear()
+    }
   }, [])
 
   return { isRestoring, storageWarning, clearAllPersisted }

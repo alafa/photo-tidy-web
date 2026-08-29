@@ -4,6 +4,7 @@ import { useState, useCallback, useRef } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { writeTimestamp } from '@/lib/exif-write'
 import type { UploadToken, Album, BatchCreateResult, NewMediaItemResult } from '@/lib/google-photos-types'
+import { chunkArray } from '@/lib/chunk-array'
 
 export type UploadState = 'idle' | 'uploading' | 'done' | 'error'
 export type PhotoUploadStatus = 'pending' | 'uploading' | 'done' | 'failed'
@@ -25,14 +26,6 @@ export interface PhotoUploadState {
 // upload failed, so no token exists for them at all).
 interface PendingUploadToken extends UploadToken {
   photoId: string
-}
-
-export function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = []
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size))
-  }
-  return chunks
 }
 
 // Raw-byte uploads to Google are independent per photo (batch-create matches
@@ -507,18 +500,35 @@ export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
         return
       }
 
+      // Skip photos already known 'done' (e.g. seeded via seedPhotoStates
+      // after an IndexedDB restore, or already uploaded earlier in this
+      // session) — without this, every call would unconditionally re-upload
+      // everything, creating duplicate media items/album entries in Google
+      // Photos for photos that already made it there. If nothing is left to
+      // upload, this is a no-op: same as the empty-photos case above, no
+      // album creation or network calls.
+      const photosToUpload = photos.filter((photo) => photoStates.get(photo.id)?.status !== 'done')
+      if (photosToUpload.length === 0) {
+        setUploadState('done')
+        return
+      }
+
       // Claim this call's own generation before anything else — reset() and
       // any later startUpload()/retryFailed() call bump uploadGenerationRef,
       // which invalidates isCurrent() for every await below this point.
       const myGeneration = ++uploadGenerationRef.current
       const isCurrent = () => uploadGenerationRef.current === myGeneration
 
-      // Initialize all photo states to pending. These, and setUploadState
+      // Initialize photo states for this session. These, and setUploadState
       // below, run before any await — they establish this new session and
       // must always apply, so they're intentionally not isCurrent()-gated.
+      // Photos already 'done' keep their existing entry (mediaItemId
+      // included) untouched; everything else being (re)submitted this run
+      // starts fresh at 'pending'.
       const initialStates = new Map<string, PhotoUploadState>()
       for (const photo of photos) {
-        initialStates.set(photo.id, { status: 'pending' })
+        const existing = photoStates.get(photo.id)
+        initialStates.set(photo.id, existing?.status === 'done' ? existing : { status: 'pending' })
       }
       setPhotoStates(initialStates)
       setUploadState('uploading')
@@ -559,7 +569,7 @@ export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
       // silently orphaning these photos outside any album.
       const albumId = albumIdRef.current
 
-      const tokens = await uploadWithConcurrency(photos, accessToken, uploadSinglePhoto, isCurrent)
+      const tokens = await uploadWithConcurrency(photosToUpload, accessToken, uploadSinglePhoto, isCurrent)
 
       if (!isCurrent()) return
 
@@ -575,7 +585,7 @@ export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
 
       if (isCurrent()) setUploadState('done')
     },
-    [uploadState, uploadSinglePhoto, batchCreate]
+    [uploadState, photoStates, uploadSinglePhoto, batchCreate]
   )
 
   const retryFailed = useCallback(
