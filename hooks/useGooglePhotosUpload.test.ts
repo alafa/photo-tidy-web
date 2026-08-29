@@ -1556,3 +1556,250 @@ describe('useGooglePhotosUpload — Fix #2: reset() invalidates in-flight reconc
     expect(result.current.photoStates.get('p1')?.status).toBe('done')
   })
 })
+
+describe('useGooglePhotosUpload — U3: onMediaItemIdSet option', () => {
+  it('fires exactly once per successfully-created item, with the correct (photoId, mediaItemId) pair', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // upload p2
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'b.jpg' } },
+        ],
+      }),
+    }) // batchCreate
+    mockFetch.mockResolvedValueOnce(reconcileSuccess()) // reconcile
+    vi.stubGlobal('fetch', mockFetch)
+
+    const onMediaItemIdSet = vi.fn()
+    const { result } = renderHook(() => useGooglePhotosUpload({ onMediaItemIdSet }))
+
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.uploadState).toBe('done')
+    expect(onMediaItemIdSet).toHaveBeenCalledTimes(2)
+    expect(onMediaItemIdSet).toHaveBeenCalledWith('p1', 'm1')
+    expect(onMediaItemIdSet).toHaveBeenCalledWith('p2', 'm2')
+  })
+
+  it('does not fire for a photo whose batch-create result is a failure (no mediaItem.id)', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Invalid argument', code: 3 } },
+        ],
+      }),
+    }) // batchCreate — fails
+    vi.stubGlobal('fetch', mockFetch)
+
+    const onMediaItemIdSet = vi.fn()
+    const { result } = renderHook(() => useGooglePhotosUpload({ onMediaItemIdSet }))
+
+    await act(() => result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('failed')
+    expect(onMediaItemIdSet).not.toHaveBeenCalled()
+  })
+
+  it('the critical race: notifyPhotoRemoved while batch-create/reconcile is in-flight prevents the removed photo from being resurrected or having its mediaItemId reported, while the other photo completes normally — proving the narrower removedPhotoIdsRef mechanism (not an uploadGenerationRef bump) is what protects it', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // upload p2
+
+    // batchCreate's fetch call hangs until we resolve it manually, so we can
+    // remove photo1 while its (and photo2's) batch-create result is still
+    // in flight.
+    let resolveBatchCreate!: (value: Response) => void
+    const hangingBatchCreate = new Promise<Response>((res) => {
+      resolveBatchCreate = res
+    })
+    mockFetch.mockReturnValueOnce(hangingBatchCreate)
+
+    // Reconciliation, once reached, resolves normally.
+    mockFetch.mockResolvedValueOnce(reconcileSuccess())
+
+    vi.stubGlobal('fetch', mockFetch)
+
+    const onMediaItemIdSet = vi.fn()
+    const { result } = renderHook(() => useGooglePhotosUpload({ onMediaItemIdSet }))
+
+    act(() => {
+      void result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN)
+    })
+
+    // Flush microtasks so album creation and both raw uploads complete and
+    // the (now in-flight, hanging) batch-create call has been issued.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('uploading')
+    expect(result.current.photoStates.get('p2')?.status).toBe('uploading')
+
+    // The user deletes photo1 locally while batch-create's result for it is
+    // still in flight.
+    act(() => result.current.notifyPhotoRemoved('p1'))
+
+    // Removed immediately — does not wait for the in-flight call to resolve.
+    expect(result.current.photoStates.has('p1')).toBe(false)
+
+    // Now let the late batch-create result resolve, reporting SUCCESS for
+    // BOTH photos — the worst case, since it proves the removal (not luck,
+    // e.g. photo1 happening to fail anyway) is what keeps it out.
+    resolveBatchCreate({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'b.jpg' } },
+        ],
+      }),
+    } as unknown as Response)
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    expect(result.current.uploadState).toBe('done')
+
+    // The removed photo must never reappear in photoStates, and its
+    // mediaItemId must never have been reported to the caller.
+    expect(result.current.photoStates.has('p1')).toBe(false)
+    expect(onMediaItemIdSet).not.toHaveBeenCalledWith('p1', 'm1')
+
+    // The OTHER, non-removed photo's upload completes normally to 'done' —
+    // proving a single photo's removal does not collaterally kill unrelated
+    // in-flight work in the same batch (which bumping uploadGenerationRef
+    // would have caused).
+    expect(result.current.photoStates.get('p2')?.status).toBe('done')
+    expect(result.current.photoStates.get('p2')?.mediaItemId).toBe('m2')
+    expect(onMediaItemIdSet).toHaveBeenCalledWith('p2', 'm2')
+  })
+})
+
+describe('useGooglePhotosUpload — U3: seedPhotoStates', () => {
+  it('marks the given photo ids status "done" with the given mediaItemId, without any network call or re-upload attempt', () => {
+    const mockFetch = vi.fn()
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    act(() => {
+      result.current.seedPhotoStates(
+        new Map([
+          ['p1', 'm1'],
+          ['p2', 'm2'],
+        ])
+      )
+    })
+
+    expect(result.current.photoStates.get('p1')).toEqual({ status: 'done', mediaItemId: 'm1' })
+    expect(result.current.photoStates.get('p2')).toEqual({ status: 'done', mediaItemId: 'm2' })
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('does not overwrite an existing entry already in photoStates (e.g. one mid-upload)', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+
+    // Make the raw upload hang so p1 stays 'uploading' at the moment we seed.
+    let resolveUpload!: (value: Response) => void
+    const hangingUpload = new Promise<Response>((res) => {
+      resolveUpload = res
+    })
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockReturnValueOnce(hangingUpload) // upload p1 — hangs
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    act(() => {
+      void result.current.startUpload([photo1], 'Trip', ACCESS_TOKEN)
+    })
+
+    // Flush microtasks so p1 reaches 'uploading'.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('uploading')
+
+    act(() => {
+      result.current.seedPhotoStates(new Map([['p1', 'seeded-media-id']]))
+    })
+
+    // The mid-upload entry must be left completely untouched — not clobbered
+    // by the seed.
+    expect(result.current.photoStates.get('p1')?.status).toBe('uploading')
+    expect(result.current.photoStates.get('p1')?.mediaItemId).toBeUndefined()
+
+    // Let the hanging upload resolve normally so it doesn't leak into later tests.
+    resolveUpload({ ok: true, text: async () => 'token-1' } as unknown as Response)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
+        ],
+      }),
+    })
+    mockFetch.mockResolvedValueOnce(reconcileSuccess())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    expect(result.current.photoStates.get('p1')?.status).toBe('done')
+  })
+})
+
+describe('useGooglePhotosUpload — U3: notifyPhotoRemoved', () => {
+  it('deletes the given photo id from photoStates immediately', async () => {
+    const photo1 = makePhoto({ id: 'p1', filename: 'a.jpg' })
+    const photo2 = makePhoto({ id: 'p2', filename: 'b.jpg' })
+
+    const mockFetch = vi.fn()
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'album-1' }) }) // album
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-1' }) // upload p1
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => 'token-2' }) // upload p2
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        newMediaItemResults: [
+          { uploadToken: 'token-1', status: { message: 'Success' }, mediaItem: { id: 'm1', filename: 'a.jpg' } },
+          { uploadToken: 'token-2', status: { message: 'Success' }, mediaItem: { id: 'm2', filename: 'b.jpg' } },
+        ],
+      }),
+    }) // batchCreate
+    mockFetch.mockResolvedValueOnce(reconcileSuccess()) // reconcile
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useGooglePhotosUpload())
+
+    await act(() => result.current.startUpload([photo1, photo2], 'Trip', ACCESS_TOKEN))
+
+    expect(result.current.photoStates.has('p1')).toBe(true)
+
+    act(() => result.current.notifyPhotoRemoved('p1'))
+
+    expect(result.current.photoStates.has('p1')).toBe(false)
+    // Unrelated photo untouched.
+    expect(result.current.photoStates.get('p2')?.status).toBe('done')
+  })
+})

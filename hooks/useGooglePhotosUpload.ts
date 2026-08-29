@@ -88,7 +88,19 @@ function describeUpstreamFailure(
   }
 }
 
-export function useGooglePhotosUpload() {
+export interface UseGooglePhotosUploadOptions {
+  // Fired exactly once per photo, at the moment batch-create reports
+  // item-creation success with a real mediaItem.id for it — the same point
+  // KTD3 (below) stores mediaItemId into photoStates. Independent of
+  // whether album-membership reconciliation subsequently succeeds: a
+  // mediaItemId is a one-way durable fact about Google's state, not UI
+  // state, so callers (e.g. IndexedDB persistence) should treat it as safe
+  // to persist immediately, even across a generation boundary. Never fired
+  // for a photo that notifyPhotoRemoved() has been called for.
+  onMediaItemIdSet?: (photoId: string, mediaItemId: string) => void
+}
+
+export function useGooglePhotosUpload(options?: UseGooglePhotosUploadOptions) {
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [photoStates, setPhotoStates] = useState<Map<string, PhotoUploadState>>(new Map())
 
@@ -102,6 +114,20 @@ export function useGooglePhotosUpload() {
   // instead of writing a stale confirmation into whatever session runs now.
   // Mirrors importGenerationRef in hooks/useGooglePhotosPicker.ts.
   const uploadGenerationRef = useRef(0)
+
+  // Photo ids the user has deleted locally while their upload may still be
+  // in flight. Deliberately NOT folded into uploadGenerationRef: bumping
+  // that coarse, whole-session token on a single photo's delete would
+  // invalidate isCurrent() for every OTHER photo's still-in-flight upload
+  // in the same batch too, silently killing unrelated progress. This set is
+  // narrower — it only ever suppresses writes for the specific photo id(s)
+  // named, so one deletion can never collaterally abort the rest of the
+  // batch. Checked alongside (never instead of) isCurrent() at every
+  // photoStates write that lands as the result of an async operation, so a
+  // late-resolving batch-create/reconciliation result for a removed photo
+  // can never resurrect it or hand its mediaItemId to a caller that would
+  // persist it.
+  const removedPhotoIdsRef = useRef<Set<string>>(new Set())
 
   const uploadSinglePhoto = useCallback(
     async (photo: PhotoEntry, accessToken: string, isCurrent: () => boolean): Promise<PendingUploadToken | null> => {
@@ -158,7 +184,7 @@ export function useGooglePhotosUpload() {
         return { photoId: photo.id, token: uploadToken, filename: photo.filename }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err)
-        if (isCurrent()) {
+        if (isCurrent() && !removedPhotoIdsRef.current.has(photo.id)) {
           setPhotoStates((prev) => {
             const next = new Map(prev)
             next.set(photo.id, { status: 'failed', error: errorMessage })
@@ -180,6 +206,7 @@ export function useGooglePhotosUpload() {
       setPhotoStates((prev) => {
         const next = new Map(prev)
         for (const item of batch) {
+          if (removedPhotoIdsRef.current.has(item.photoId)) continue
           if (next.get(item.photoId)?.status === 'uploading') {
             next.set(item.photoId, { status: 'failed', error: message })
           }
@@ -254,6 +281,7 @@ export function useGooglePhotosUpload() {
           setPhotoStates((prev) => {
             const next = new Map(prev)
             for (const { photoId } of items) {
+              if (removedPhotoIdsRef.current.has(photoId)) continue
               next.set(photoId, {
                 ...next.get(photoId),
                 status: 'failed',
@@ -277,6 +305,7 @@ export function useGooglePhotosUpload() {
           setPhotoStates((prev) => {
             const next = new Map(prev)
             for (const { photoId } of items) {
+              if (removedPhotoIdsRef.current.has(photoId)) continue
               next.set(photoId, { ...next.get(photoId), status: 'done' })
             }
             return next
@@ -300,6 +329,7 @@ export function useGooglePhotosUpload() {
         setPhotoStates((prev) => {
           const next = new Map(prev)
           for (const { item, confirmed: itemConfirmed } of perItemResults) {
+            if (removedPhotoIdsRef.current.has(item.photoId)) continue
             next.set(item.photoId, {
               ...next.get(item.photoId),
               ...(itemConfirmed
@@ -409,6 +439,13 @@ export function useGooglePhotosUpload() {
           const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
           if (result && isBatchCreateSuccess(result.status) && result.mediaItem?.id) {
             reconcilable.push({ photoId: item.photoId, mediaItemId: result.mediaItem.id })
+            // A mediaItemId is a one-way durable fact the instant it's
+            // known — fire regardless of isCurrent() (see
+            // UseGooglePhotosUploadOptions.onMediaItemIdSet), but never for
+            // a photo the user has already deleted locally.
+            if (!removedPhotoIdsRef.current.has(item.photoId)) {
+              options?.onMediaItemIdSet?.(item.photoId, result.mediaItem.id)
+            }
           }
         }
 
@@ -416,6 +453,7 @@ export function useGooglePhotosUpload() {
           setPhotoStates((prev) => {
             const next = new Map(prev)
             for (const item of batch) {
+              if (removedPhotoIdsRef.current.has(item.photoId)) continue
               const result: NewMediaItemResult | undefined = resultsByToken.get(item.token)
               if (result && isBatchCreateSuccess(result.status)) {
                 if (result.mediaItem?.id) {
@@ -450,7 +488,7 @@ export function useGooglePhotosUpload() {
         throw new Error('One or more batch-create chunks failed')
       }
     },
-    [markChunkFailed, reconcileAndSetStatus]
+    [markChunkFailed, reconcileAndSetStatus, options]
   )
 
   const startUpload = useCallback(
@@ -622,6 +660,47 @@ export function useGooglePhotosUpload() {
     setUploadState('idle')
     setPhotoStates(new Map())
     albumIdRef.current = undefined
+    // A fresh session starting from a clean photoStates map has no notion
+    // of "already removed" photos left over from a prior session — without
+    // clearing this, a photo id that happens to be reused in a later
+    // session (e.g. re-adding the same local file) would be permanently,
+    // silently barred from ever completing.
+    removedPhotoIdsRef.current = new Set()
+  }, [])
+
+  // Marks a photo as removed by the user: adds it to removedPhotoIdsRef so
+  // every subsequent photoStates write guarded by that check (see refs
+  // above) silently skips it — including a batch-create/reconciliation
+  // result for it that's already in flight — and deletes its current entry
+  // from photoStates immediately, so it disappears from the UI right away
+  // rather than waiting for that in-flight call to resolve.
+  const notifyPhotoRemoved = useCallback((photoId: string) => {
+    removedPhotoIdsRef.current.add(photoId)
+    setPhotoStates((prev) => {
+      if (!prev.has(photoId)) return prev
+      const next = new Map(prev)
+      next.delete(photoId)
+      return next
+    })
+  }, [])
+
+  // Seeds photoStates with photos already known (from a prior, persisted
+  // session — e.g. restored from IndexedDB) to have a real mediaItemId.
+  // Intended to be called once, right after restore, before any upload has
+  // started in this hook instance. Never overwrites an id already present
+  // in photoStates — a guard that makes repeat/late calls safe, though in
+  // practice this should only ever run against an empty map.
+  const seedPhotoStates = useCallback((seedMap: Map<string, string>) => {
+    setPhotoStates((prev) => {
+      let changed = false
+      const next = new Map(prev)
+      for (const [photoId, mediaItemId] of seedMap) {
+        if (next.has(photoId)) continue
+        next.set(photoId, { status: 'done', mediaItemId })
+        changed = true
+      }
+      return changed ? next : prev
+    })
   }, [])
 
   return {
@@ -630,5 +709,7 @@ export function useGooglePhotosUpload() {
     startUpload,
     retryFailed,
     reset,
+    seedPhotoStates,
+    notifyPhotoRemoved,
   }
 }
