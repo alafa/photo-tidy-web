@@ -16,6 +16,7 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
+import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import PhotoLightbox from './PhotoLightbox'
@@ -68,6 +69,8 @@ export default function PhotoUploadPage() {
     batchUpdateNames,
     batchSetTimestamps,
     removePhotos,
+    hydratePhotos,
+    setPhotoMediaItemId,
   } = usePhotos()
   const { getObjectUrl, releaseObjectUrl } = useObjectUrls()
   const { isSignedIn, accountEmail, isExpiringSoon, accessToken, signIn, signOut } = useGoogleAuth()
@@ -77,7 +80,13 @@ export default function PhotoUploadPage() {
     startImport,
     cancelImport,
   } = useGooglePhotosPicker({ accessToken, addPhotos })
-  const { uploadState, photoStates, startUpload, retryFailed, reset } = useGooglePhotosUpload()
+  const { uploadState, photoStates, startUpload, retryFailed, reset, seedPhotoStates, notifyPhotoRemoved } =
+    useGooglePhotosUpload({ onMediaItemIdSet: setPhotoMediaItemId })
+  const { isRestoring, storageWarning, clearAllPersisted } = usePhotoPersistence(
+    photos,
+    hydratePhotos,
+    seedPhotoStates
+  )
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [albumName, setAlbumName] = useState('')
@@ -118,6 +127,7 @@ export default function PhotoUploadPage() {
   const zoomedPhoto = zoomedPhotoId ? photosById.get(zoomedPhotoId) ?? null : null
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    if (isRestoring) return
     if (e.target.files && e.target.files.length > 0) {
       setSelectedIds(new Set())
       processFiles(e.target.files)
@@ -133,6 +143,7 @@ export default function PhotoUploadPage() {
   function handleDrop(e: React.DragEvent<HTMLLabelElement>) {
     e.preventDefault()
     e.stopPropagation()
+    if (isRestoring) return
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       setSelectedIds(new Set())
       processFiles(e.dataTransfer.files)
@@ -236,6 +247,7 @@ export default function PhotoUploadPage() {
       for (const id of ids) {
         const photo = photosById.get(id)
         if (photo) releaseObjectUrl(photo.file)
+        notifyPhotoRemoved(id)
       }
       removePhotos(ids)
       setSelectedIds((prev) => {
@@ -244,11 +256,30 @@ export default function PhotoUploadPage() {
         return next
       })
     },
-    [selectedIds, photosById, releaseObjectUrl, removePhotos]
+    [selectedIds, photosById, releaseObjectUrl, removePhotos, notifyPhotoRemoved]
   )
 
   const handleDeletePhoto = useCallback((id: string) => handleBatchDelete([id]), [handleBatchDelete])
   const handleCloseLightbox = useCallback(() => setZoomedPhotoId(null), [])
+
+  // Comprehensive reset (KTD2's "Clear all"): a deliberately much larger
+  // blast radius than a single-photo delete, so it's gated behind a native
+  // confirm() -- this codebase has no modal/dialog component, and a native
+  // confirm is the simplest option consistent with its current UI
+  // vocabulary. Order matters: object URLs are released (and
+  // notifyPhotoRemoved called) against the CURRENT `photos` before
+  // removePhotos clears the in-memory list, then IndexedDB is wiped, then
+  // useGooglePhotosUpload's own tracking is reset.
+  async function handleClearAll() {
+    if (!window.confirm('Clear all photos? This cannot be undone.')) return
+    for (const photo of photos) {
+      releaseObjectUrl(photo.file)
+    }
+    removePhotos(photos.map((p) => p.id))
+    await clearAllPersisted()
+    reset()
+    setSelectedIds(new Set())
+  }
 
   function handleImportClick() {
     setNamePromptValue(albumName)
@@ -290,6 +321,18 @@ export default function PhotoUploadPage() {
           signOut={signOut}
         />
 
+        {isRestoring && (
+          <span className="text-xs text-zinc-500 dark:text-zinc-400 mb-2 block">
+            Restoring your photos…
+          </span>
+        )}
+
+        {storageWarning && (
+          <div className="bg-red-50 border border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300 rounded-lg px-3 py-2 text-sm mb-3">
+            {storageWarning}
+          </div>
+        )}
+
         <label
           className="flex flex-col items-center justify-center w-full border-2 border-dashed border-zinc-300 rounded-xl p-10 cursor-pointer hover:border-zinc-400 transition-colors mb-8 bg-white dark:bg-zinc-900 dark:border-zinc-700"
           onDragOver={handleDragOver}
@@ -306,6 +349,7 @@ export default function PhotoUploadPage() {
             multiple
             accept="image/jpeg,image/png,image/tiff"
             onChange={handleChange}
+            disabled={isRestoring}
             className="sr-only"
           />
         </label>
@@ -314,7 +358,7 @@ export default function PhotoUploadPage() {
           <div className="flex flex-col items-start gap-2 mb-8">
             <button
               onClick={pickerStatus === 'idle' ? handleImportClick : cancelImport}
-              disabled={pickerStatus === 'downloading' || isNamePromptOpen}
+              disabled={pickerStatus === 'downloading' || isNamePromptOpen || isRestoring}
               className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pickerStatus === 'idle' ? 'Import from Google Photos' : 'Cancel import'}
@@ -451,7 +495,14 @@ export default function PhotoUploadPage() {
               </DragOverlay>
             </DndContext>
 
-            <div className="mt-6 flex justify-end">
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={handleClearAll}
+                disabled={isRestoring}
+                className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Clear all
+              </button>
               <button
                 onClick={() => downloadAll(photos)}
                 className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"

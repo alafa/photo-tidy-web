@@ -40,6 +40,9 @@ vi.mock('@/hooks/useGooglePhotosPicker', () => ({
 vi.mock('@/hooks/useGooglePhotosUpload', () => ({
   useGooglePhotosUpload: vi.fn(),
 }))
+vi.mock('@/hooks/usePhotoPersistence', () => ({
+  usePhotoPersistence: vi.fn(),
+}))
 const mockUseClusteredPhotos =
   vi.fn<(photos: PhotoEntry[], similarityPercent: number) => UseClusteredPhotosResult>()
 vi.mock('@/hooks/useClusteredPhotos', () => ({
@@ -133,11 +136,13 @@ import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
+import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
 const mockUsePhotos = vi.mocked(usePhotos)
 const mockUseObjectUrls = vi.mocked(useObjectUrls)
 const mockUseGoogleAuth = vi.mocked(useGoogleAuth)
 const mockUseGooglePhotosPicker = vi.mocked(useGooglePhotosPicker)
 const mockUseGooglePhotosUpload = vi.mocked(useGooglePhotosUpload)
+const mockUsePhotoPersistence = vi.mocked(usePhotoPersistence)
 
 function makeFile(name: string): File {
   return new File([], name, { type: 'image/jpeg' })
@@ -179,6 +184,13 @@ beforeEach(() => {
     startUpload: vi.fn(),
     retryFailed: vi.fn(),
     reset: vi.fn(),
+    seedPhotoStates: vi.fn(),
+    notifyPhotoRemoved: vi.fn(),
+  })
+  mockUsePhotoPersistence.mockReturnValue({
+    isRestoring: false,
+    storageWarning: null,
+    clearAllPersisted: vi.fn(),
   })
 })
 
@@ -907,6 +919,8 @@ describe('PhotoUploadPage — batch delete', () => {
       startUpload: startUploadMock,
       retryFailed: vi.fn(),
       reset: vi.fn(),
+      seedPhotoStates: vi.fn(),
+      notifyPhotoRemoved: vi.fn(),
     })
 
     const removePhotosMock = makeStatefulPhotosMock(photos)
@@ -1385,5 +1399,313 @@ describe('PhotoUploadPage — zoom lightbox (U4)', () => {
     expect(removePhotosMock).toHaveBeenCalledWith([photos[0].id])
     // Lightbox is untouched by the unrelated delete click.
     expect(screen.getByRole('button', { name: 'Close' })).toBeDefined()
+  })
+})
+
+// Persist-photo-session-indexeddb: PhotoUploadPage wires usePhotoPersistence
+// (isRestoring/storageWarning/clearAllPersisted) alongside
+// useGooglePhotosUpload's seedPhotoStates/notifyPhotoRemoved. Persistence
+// itself (IndexedDB reads/writes) is entirely mocked out here and covered by
+// hooks/usePhotoPersistence.test.ts -- these tests only prove PhotoUploadPage
+// surfaces isRestoring/storageWarning in the UI, disables interactions while
+// restoring, and calls the right functions from "Clear all" and the delete
+// path.
+describe('PhotoUploadPage — restore-from-persistence UI (KTD2)', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+      source: 'local' as const,
+    }
+  }
+
+  function signIn() {
+    mockUseGoogleAuth.mockReturnValue({
+      accessToken: 'token-123',
+      expiresAt: Date.now() + 60_000,
+      accountEmail: 'user@example.com',
+      isSignedIn: true,
+      isExpiringSoon: false,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+    })
+  }
+
+  it('while isRestoring is true: disables the file input, disables the Google Photos import button, and shows "Restoring your photos…"', () => {
+    signIn()
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: true,
+      storageWarning: null,
+      clearAllPersisted: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({
+      photos: [makeEntry('a.jpg', 0)],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    expect(screen.getByText('Restoring your photos…')).toBeDefined()
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    expect(input.disabled).toBe(true)
+
+    const importButton = screen.getByRole('button', { name: 'Import from Google Photos' }) as HTMLButtonElement
+    expect(importButton.disabled).toBe(true)
+  })
+
+  it('once isRestoring is false: the file input and import button are enabled and the restoring text is gone', () => {
+    signIn()
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: null,
+      clearAllPersisted: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({
+      photos: [],
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+    })
+
+    render(<PhotoUploadPage />)
+
+    expect(screen.queryByText('Restoring your photos…')).toBeNull()
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    expect(input.disabled).toBe(false)
+    const importButton = screen.getByRole('button', { name: 'Import from Google Photos' }) as HTMLButtonElement
+    expect(importButton.disabled).toBe(false)
+  })
+})
+
+describe('PhotoUploadPage — storage warning banner', () => {
+  it('renders the storageWarning text when it is a non-null string', () => {
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: "Some photos couldn't be saved — your browser's storage may be full.",
+      clearAllPersisted: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    expect(
+      screen.getByText("Some photos couldn't be saved — your browser's storage may be full.")
+    ).toBeDefined()
+  })
+
+  it('renders nothing when storageWarning is null', () => {
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: null,
+      clearAllPersisted: vi.fn(),
+    })
+    mockUsePhotos.mockReturnValue({ photos: [], processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    expect(screen.queryByText(/couldn't be saved/)).toBeNull()
+  })
+})
+
+describe('PhotoUploadPage — Clear all (comprehensive reset)', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+      source: 'local' as const,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[], removePhotos = vi.fn()) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos,
+    }
+  }
+
+  it('confirmed: releases every object URL, calls removePhotos with every id, clearAllPersisted, reset, and clears selection', async () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    const removePhotosMock = vi.fn()
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
+
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+
+    const clearAllPersistedMock = vi.fn().mockResolvedValue(undefined)
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: null,
+      clearAllPersisted: clearAllPersistedMock,
+    })
+
+    const resetMock = vi.fn()
+    mockUseGooglePhotosUpload.mockReturnValue({
+      uploadState: 'idle',
+      photoStates: new Map(),
+      startUpload: vi.fn(),
+      retryFailed: vi.fn(),
+      reset: resetMock,
+      seedPhotoStates: vi.fn(),
+      notifyPhotoRemoved: vi.fn(),
+    })
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+
+    // Select a photo first, to prove Clear all also empties selectedIds.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+
+    expect(window.confirm).toHaveBeenCalledWith('Clear all photos? This cannot be undone.')
+
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[1].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[2].file)
+    expect(releaseObjectUrlMock).toHaveBeenCalledTimes(3)
+
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+    expect(new Set(removedIds)).toEqual(new Set(photos.map((p) => p.id)))
+
+    await waitFor(() => expect(clearAllPersistedMock).toHaveBeenCalledOnce())
+    expect(resetMock).toHaveBeenCalledOnce()
+  })
+
+  it('not confirmed: calls none of releaseObjectUrl, removePhotos, clearAllPersisted, or reset', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    const removePhotosMock = vi.fn()
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, removePhotosMock))
+
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+
+    const clearAllPersistedMock = vi.fn().mockResolvedValue(undefined)
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: null,
+      clearAllPersisted: clearAllPersistedMock,
+    })
+
+    const resetMock = vi.fn()
+    mockUseGooglePhotosUpload.mockReturnValue({
+      uploadState: 'idle',
+      photoStates: new Map(),
+      startUpload: vi.fn(),
+      retryFailed: vi.fn(),
+      reset: resetMock,
+      seedPhotoStates: vi.fn(),
+      notifyPhotoRemoved: vi.fn(),
+    })
+
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+
+    expect(window.confirm).toHaveBeenCalledWith('Clear all photos? This cannot be undone.')
+    expect(releaseObjectUrlMock).not.toHaveBeenCalled()
+    expect(removePhotosMock).not.toHaveBeenCalled()
+    expect(clearAllPersistedMock).not.toHaveBeenCalled()
+    expect(resetMock).not.toHaveBeenCalled()
+  })
+
+  it('is disabled while isRestoring is true', () => {
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: true,
+      storageWarning: null,
+      clearAllPersisted: vi.fn(),
+    })
+    const photos = [makeEntry('a.jpg', 0)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    const clearAllButton = screen.getByRole('button', { name: 'Clear all' }) as HTMLButtonElement
+    expect(clearAllButton.disabled).toBe(true)
+  })
+})
+
+describe('PhotoUploadPage — notifyPhotoRemoved wiring on delete', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+      source: 'local' as const,
+    }
+  }
+
+  function basePhotosReturn(photos: ReturnType<typeof makeEntry>[], removePhotos = vi.fn()) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos,
+    }
+  }
+
+  it('deleting a photo releases its object URL (regression) and also calls notifyPhotoRemoved with its id', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    const releaseObjectUrlMock = vi.fn()
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+
+    const notifyPhotoRemovedMock = vi.fn()
+    mockUseGooglePhotosUpload.mockReturnValue({
+      uploadState: 'idle',
+      photoStates: new Map(),
+      startUpload: vi.fn(),
+      retryFailed: vi.fn(),
+      reset: vi.fn(),
+      seedPhotoStates: vi.fn(),
+      notifyPhotoRemoved: notifyPhotoRemovedMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(photos[0].id)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledOnce()
   })
 })
