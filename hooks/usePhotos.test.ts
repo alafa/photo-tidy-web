@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, cleanup } from '@testing-library/react'
 
 afterEach(cleanup)
-import { usePhotos } from './usePhotos'
+import { usePhotos, type PhotoEntry } from './usePhotos'
 import { useObjectUrls } from './useObjectUrls'
 
 // --- Mocks ---
@@ -465,6 +465,87 @@ describe('usePhotos — removePhotos', () => {
     act(() => result.current.removePhotos(['nonexistent-id']))
 
     expect(result.current.photos).toHaveLength(2)
+  })
+})
+
+describe('usePhotos — hydratePhotos', () => {
+  function makeEntry(overrides: Partial<PhotoEntry>): PhotoEntry {
+    return {
+      id: 'id',
+      file: makeFile('placeholder.jpg'),
+      filename: 'placeholder.jpg',
+      capturedAt: null,
+      uploadIndex: 0,
+      source: 'local',
+      ...overrides,
+    }
+  }
+
+  it('sets photos to the given entries, sorted via the same chronological rule', () => {
+    const entries: PhotoEntry[] = [
+      makeEntry({
+        id: '2',
+        file: makeFile('b.jpg'),
+        filename: 'b.jpg',
+        capturedAt: new Date('2025-01-01'),
+        uploadIndex: 1,
+      }),
+      makeEntry({
+        id: '1',
+        file: makeFile('a.jpg'),
+        filename: 'a.jpg',
+        capturedAt: new Date('2024-01-01'),
+        uploadIndex: 0,
+      }),
+    ]
+
+    const { result } = renderHook(() => usePhotos())
+    act(() => result.current.hydratePhotos(entries))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['a.jpg', 'b.jpg'])
+  })
+
+  it('calling hydratePhotos twice with the same entries is a safe no-op (no duplication)', () => {
+    const entries: PhotoEntry[] = [
+      makeEntry({ id: '1', file: makeFile('a.jpg'), filename: 'a.jpg', capturedAt: new Date('2025-01-01') }),
+      makeEntry({ id: '2', file: makeFile('b.jpg'), filename: 'b.jpg', capturedAt: new Date('2025-02-01') }),
+    ]
+
+    const { result } = renderHook(() => usePhotos())
+    act(() => result.current.hydratePhotos(entries))
+    const filenamesAfterFirst = result.current.photos.map((p) => p.filename)
+
+    act(() => result.current.hydratePhotos(entries))
+
+    expect(result.current.photos).toHaveLength(entries.length)
+    expect(result.current.photos.map((p) => p.filename)).toEqual(filenamesAfterFirst)
+  })
+})
+
+describe('usePhotos — setPhotoMediaItemId', () => {
+  it('updates only the targeted photo\'s mediaItemId, leaving other fields and other photos untouched', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    mockGetPhotoDate.mockImplementation(async (file: File) =>
+      file === a ? new Date('2025-01-01') : new Date('2025-02-01')
+    )
+
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList([a, b])))
+
+    const target = result.current.photos[0]
+    const otherBefore = result.current.photos[1]
+
+    act(() => result.current.setPhotoMediaItemId(target.id, 'media-123'))
+
+    const targetAfter = result.current.photos.find((p) => p.id === target.id)!
+    expect(targetAfter.mediaItemId).toBe('media-123')
+    expect(targetAfter.filename).toBe(target.filename)
+    expect(targetAfter.capturedAt).toEqual(target.capturedAt)
+    expect(targetAfter.uploadIndex).toBe(target.uploadIndex)
+    expect(targetAfter.source).toBe(target.source)
+
+    const otherAfter = result.current.photos.find((p) => p.id === otherBefore.id)!
+    expect(otherAfter).toEqual(otherBefore)
   })
 })
 

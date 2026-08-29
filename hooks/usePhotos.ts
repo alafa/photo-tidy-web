@@ -11,6 +11,7 @@ export type PhotoEntry = {
   capturedAt: Date | null
   uploadIndex: number
   source: 'local' | 'google-photos'
+  mediaItemId?: string
 }
 
 /**
@@ -177,6 +178,25 @@ export function usePhotos() {
     setPhotos((prev) => appendWithIndex(prev, entries))
   }, [])
 
+  /**
+   * Replace `photos` wholesale with `entries`, sorted via the same
+   * chronological rule as everything else. For the restore-from-persistence
+   * flow only — unlike `processFiles`/`addPhotos`, it does not append to
+   * whatever is already in state, so calling it more than once with the same
+   * `entries` (e.g. React Strict Mode's double-invoked mount effect) is a
+   * safe no-op rather than duplicating photos.
+   */
+  const hydratePhotos = useCallback((entries: PhotoEntry[]) => {
+    setPhotos(sortPhotos(entries))
+  }, [])
+
+  /** Update one photo's `mediaItemId`, leaving every other field and photo untouched. */
+  const setPhotoMediaItemId = useCallback((id: string, mediaItemId: string) => {
+    setPhotos((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, mediaItemId } : p))
+    )
+  }, [])
+
   return {
     photos,
     processFiles,
@@ -187,5 +207,7 @@ export function usePhotos() {
     batchUpdateNames,
     batchSetTimestamps,
     removePhotos,
+    hydratePhotos,
+    setPhotoMediaItemId,
   }
 }
