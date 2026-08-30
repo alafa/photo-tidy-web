@@ -160,6 +160,42 @@ describe('PhotoLightbox — keyboard guard (KTD4) and commit-before-action (KTD5
   })
 })
 
+describe('PhotoLightbox — keydown listener identity stability (perf regression)', () => {
+  it('typing into the timestamp input does not re-register the document keydown listener', () => {
+    // Regression guard for the fix to useTimestampEdit's `cancel`/`startEdit`
+    // not being memoized: PhotoLightbox's document keydown effect depends on
+    // `cancelTimestamp`, so before the fix, typing a character (which
+    // re-renders PhotoLightbox via the input's onChange) produced a fresh
+    // `cancel` reference every keystroke, tearing down and re-adding the
+    // document listener each time. Spying on add/removeEventListener proves
+    // that no longer happens.
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+    renderLightbox()
+    const input = enterEditMode()
+
+    // Entering edit mode legitimately flips `isEditing` (a real dependency
+    // of the effect), so it's expected to re-run the effect once here --
+    // clear the spies before the part under test.
+    addSpy.mockClear()
+    removeSpy.mockClear()
+
+    fireEvent.change(input, { target: { value: '2025-06-15T10:00' } })
+    fireEvent.change(input, { target: { value: '2025-06-15T10:01' } })
+    fireEvent.change(input, { target: { value: '2025-06-15T10:02' } })
+
+    const keydownAddCalls = addSpy.mock.calls.filter(([type]) => type === 'keydown')
+    const keydownRemoveCalls = removeSpy.mock.calls.filter(([type]) => type === 'keydown')
+
+    expect(keydownAddCalls).toHaveLength(0)
+    expect(keydownRemoveCalls).toHaveLength(0)
+
+    addSpy.mockRestore()
+    removeSpy.mockRestore()
+  })
+})
+
 describe('PhotoLightbox — delete', () => {
   it('renders the delete button with the shared trash icon and correct aria-label', () => {
     renderLightbox()

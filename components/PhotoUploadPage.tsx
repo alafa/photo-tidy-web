@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import {
   DndContext,
   DragOverlay,
@@ -106,31 +106,28 @@ export default function PhotoUploadPage() {
   const activeEntry = activeId ? photos.find((p) => p.id === activeId) : null
 
   // The true flattened visual order `PhotoGrid` last rendered (see
-  // `hooks/useClusteredPhotos.ts`'s `visualOrder` doc) — a ref, not state,
-  // so receiving an update via `handleVisualOrderChange` below doesn't
-  // itself trigger a render; `handleDragEnd` (a plain function, not a hook)
-  // reads `visualOrderRef.current` fresh on every invocation instead.
-  const visualOrderRef = useRef<string[]>([])
-
-  // Reactive mirror of the same order, kept for the lightbox's prev/next
-  // navigation (which needs to re-render when the order changes, unlike
-  // handleDragEnd's synchronous ref read above). Kept in sync with
-  // visualOrderRef.current on every report.
+  // `hooks/useClusteredPhotos.ts`'s `visualOrder` doc) — reactive state, both
+  // for the lightbox's prev/next navigation (which needs to re-render when
+  // the order changes) and for `handleDragEnd` below, which reads it
+  // directly: `handleDragEnd` is a plain function (not a hook, not wrapped
+  // in `useCallback`), redefined fresh on every render, so it always closes
+  // over this state's latest value with no staleness risk.
   const [visualOrder, setVisualOrder] = useState<string[]>([])
 
-  // Stable identity (empty dep array, only touches the ref/setState) so
-  // PhotoGrid's `useEffect([visualOrder, onVisualOrderChange])` fires only
-  // when `visualOrder` itself changes, not on every PhotoUploadPage render.
+  // Stable identity (empty dep array, only touches setState) so PhotoGrid's
+  // `useEffect([visualOrder, onVisualOrderChange])` fires only when
+  // `visualOrder` itself changes, not on every PhotoUploadPage render.
   const handleVisualOrderChange = useCallback((order: string[]) => {
-    visualOrderRef.current = order
-    // Bail out when the reported order is the same ids in the same
-    // sequence as what's already stored -- PhotoGrid recomputes `visualOrder`
-    // from useClusteredPhotos on every render, so a naive unconditional
-    // setState here (with a fresh array reference each time) would re-render
-    // this component every time PhotoGrid renders, which re-triggers
-    // PhotoGrid's effect, which calls this again -- an infinite update loop.
-    // Comparing by content, not reference, breaks that cycle while still
-    // updating state whenever the order actually changes.
+    // `useClusteredPhotos`'s `visualOrder` is useMemo'd and reference-stable
+    // across unrelated re-renders, but recomputes to a fresh-reference
+    // (same-content) array whenever `photos` itself changes identity for ANY
+    // reason -- including a rename or timestamp edit that doesn't actually
+    // change order. Without this guard, a naive unconditional setState here
+    // would cause one unnecessary extra re-render of this component per such
+    // content-preserving `photos` mutation (not an unbounded loop -- the
+    // resulting re-render doesn't itself change `photos`' identity again).
+    // Comparing by content, not reference, avoids that wasted render while
+    // still updating state whenever the order actually changes.
     setVisualOrder((prev) => {
       if (
         prev.length === order.length &&
@@ -158,6 +155,21 @@ export default function PhotoUploadPage() {
   const currentVisualIndex = zoomedPhotoId ? visualOrder.indexOf(zoomedPhotoId) : -1
   const prevZoomedId = currentVisualIndex === -1 ? undefined : visualOrder[currentVisualIndex - 1]
   const nextZoomedId = currentVisualIndex === -1 ? undefined : visualOrder[currentVisualIndex + 1]
+
+  // Memoized so each prop's identity only changes when prevZoomedId/
+  // nextZoomedId actually changes, not on every unrelated PhotoUploadPage
+  // render -- PhotoLightbox's document keydown effect depends on these
+  // props, so a fresh function identity on every render would re-register
+  // that listener on every render while the lightbox is open (same
+  // mechanism as the keystroke-churn fixed in useTimestampEdit).
+  const onNavigatePrev = useMemo(
+    () => (prevZoomedId ? () => setZoomedPhotoId(prevZoomedId) : undefined),
+    [prevZoomedId]
+  )
+  const onNavigateNext = useMemo(
+    () => (nextZoomedId ? () => setZoomedPhotoId(nextZoomedId) : undefined),
+    [nextZoomedId]
+  )
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (isRestoring) return
@@ -207,7 +219,6 @@ export default function PhotoUploadPage() {
     setActiveId(null)
     if (!over || active.id === over.id) return
 
-    const visualOrder = visualOrderRef.current
     const from = visualOrder.indexOf(active.id as string)
     const to = visualOrder.indexOf(over.id as string)
     if (from === -1 || to === -1) return
@@ -575,8 +586,8 @@ export default function PhotoUploadPage() {
           onClose={handleCloseLightbox}
           onDelete={handleLightboxDelete}
           onTimestampChange={(d) => updatePhotoTimestamp(zoomedPhoto.id, d)}
-          onNavigatePrev={prevZoomedId ? () => setZoomedPhotoId(prevZoomedId) : undefined}
-          onNavigateNext={nextZoomedId ? () => setZoomedPhotoId(nextZoomedId) : undefined}
+          onNavigatePrev={onNavigatePrev}
+          onNavigateNext={onNavigateNext}
         />
       )}
     </div>

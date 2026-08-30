@@ -1,22 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTimestampEdit } from '@/hooks/useTimestampEdit'
+import { formatDate } from '@/lib/datetime-local'
 import { ChevronLeftIcon, ChevronRightIcon, TrashIcon } from './icons'
-
-const dateFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-  // exifr builds Date objects via Date.UTC, so EXIF clock times are stored
-  // as UTC values. Format with timeZone: 'UTC' to display as-is.
-  timeZone: 'UTC',
-})
-
-function formatDate(date: Date): string {
-  return dateFormatter.format(date)
-}
 
 type Props = {
   /** Used for the image's alt text. */
@@ -35,6 +20,48 @@ type Props = {
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+const ACTION_BUTTON_POSITION_CLASSNAME = {
+  'top-right': 'top-3 right-3',
+  'top-left': 'top-3 left-3',
+  left: 'left-3 top-1/2 -translate-y-1/2',
+  right: 'right-3 top-1/2 -translate-y-1/2',
+} as const
+
+/**
+ * Local counterpart to PhotoCard's `CardOverlayButton` for the close/delete/
+ * prev/next controls -- not shared cross-file with that component, since the
+ * two have genuinely different positioning schemes (PhotoCard's overlay
+ * buttons are corner-anchored within a single image tile; this lightbox's
+ * are edge-anchored against the whole viewport, four distinct positions).
+ */
+function LightboxActionButton({
+  position,
+  ariaLabel,
+  colorClassName,
+  onClick,
+  buttonRef,
+  children,
+}: {
+  position: keyof typeof ACTION_BUTTON_POSITION_CLASSNAME
+  ariaLabel: string
+  colorClassName: string
+  onClick: (e: React.MouseEvent) => void
+  buttonRef?: React.Ref<HTMLButtonElement>
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      aria-label={ariaLabel}
+      onClick={onClick}
+      className={`absolute ${ACTION_BUTTON_POSITION_CLASSNAME[position]} p-3 flex items-center justify-center rounded-full ${colorClassName}`}
+    >
+      {children}
+    </button>
+  )
+}
 
 /**
  * Full-size photo viewer/editor. No portal, no external dialog library --
@@ -88,9 +115,17 @@ export default function PhotoLightbox({
 
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
 
-  /** If a timestamp edit is in progress, commit it before the actual action runs (KTD5). */
-  function commitPendingEditThen(action: () => void) {
-    return () => {
+  /**
+   * If a timestamp edit is in progress, commit it before the actual action
+   * runs (KTD5). Also folds in `stopPropagation`, since every action-button
+   * call site needs it (keeps the click from also triggering the backdrop's
+   * own onClick) -- `stopPropagation` defaults to true for that reason, with
+   * an opt-out for the backdrop's own handler, which is the outermost
+   * element and must NOT stop propagation.
+   */
+  function commitPendingEditThen(action: () => void, { stopPropagation = true } = {}) {
+    return (e: React.MouseEvent) => {
+      if (stopPropagation) e.stopPropagation()
       if (isEditing) commitTimestamp()
       action()
     }
@@ -178,61 +213,49 @@ export default function PhotoLightbox({
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-      onClick={commitPendingEditThen(onClose)}
+      onClick={commitPendingEditThen(onClose, { stopPropagation: false })}
     >
-      <button
-        ref={closeButtonRef}
-        type="button"
-        aria-label="Close"
-        onClick={(e) => {
-          e.stopPropagation()
-          commitPendingEditThen(onClose)()
-        }}
-        className="absolute top-3 right-3 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
+      <LightboxActionButton
+        buttonRef={closeButtonRef}
+        position="top-right"
+        ariaLabel="Close"
+        colorClassName="text-zinc-100 hover:text-white hover:bg-white/10"
+        onClick={commitPendingEditThen(onClose)}
       >
         <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
         </svg>
-      </button>
+      </LightboxActionButton>
 
-      <button
-        type="button"
-        aria-label="Delete photo"
-        onClick={(e) => {
-          e.stopPropagation()
-          commitPendingEditThen(onDelete)()
-        }}
-        className="absolute top-3 left-3 p-3 flex items-center justify-center rounded-full text-rose-400 hover:text-rose-300 hover:bg-white/10"
+      <LightboxActionButton
+        position="top-left"
+        ariaLabel="Delete photo"
+        colorClassName="text-rose-400 hover:text-rose-300 hover:bg-white/10"
+        onClick={commitPendingEditThen(onDelete)}
       >
         <TrashIcon className="w-5 h-5" />
-      </button>
+      </LightboxActionButton>
 
       {onNavigatePrev && (
-        <button
-          type="button"
-          aria-label="Previous photo"
-          onClick={(e) => {
-            e.stopPropagation()
-            commitPendingEditThen(onNavigatePrev)()
-          }}
-          className="absolute left-3 top-1/2 -translate-y-1/2 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
+        <LightboxActionButton
+          position="left"
+          ariaLabel="Previous photo"
+          colorClassName="text-zinc-100 hover:text-white hover:bg-white/10"
+          onClick={commitPendingEditThen(onNavigatePrev)}
         >
           <ChevronLeftIcon className="w-5 h-5" />
-        </button>
+        </LightboxActionButton>
       )}
 
       {onNavigateNext && (
-        <button
-          type="button"
-          aria-label="Next photo"
-          onClick={(e) => {
-            e.stopPropagation()
-            commitPendingEditThen(onNavigateNext)()
-          }}
-          className="absolute right-3 top-1/2 -translate-y-1/2 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
+        <LightboxActionButton
+          position="right"
+          ariaLabel="Next photo"
+          colorClassName="text-zinc-100 hover:text-white hover:bg-white/10"
+          onClick={commitPendingEditThen(onNavigateNext)}
         >
           <ChevronRightIcon className="w-5 h-5" />
-        </button>
+        </LightboxActionButton>
       )}
 
       {imageFailed ? (

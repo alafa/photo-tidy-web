@@ -1,23 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useTimestampEdit } from '@/hooks/useTimestampEdit'
+import { formatDate } from '@/lib/datetime-local'
 import { TrashIcon } from './icons'
-
-const dateFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-  // exifr builds Date objects via Date.UTC, so EXIF clock times are stored
-  // as UTC values. Format with timeZone: 'UTC' to display as-is.
-  timeZone: 'UTC',
-})
-
-function formatDate(date: Date): string {
-  return dateFormatter.format(date)
-}
 
 /**
  * Shared chrome for the delete/zoom overlay buttons: absolutely positioned

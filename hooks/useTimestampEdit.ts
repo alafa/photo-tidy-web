@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
 
 /** Format a Date as "YYYY-MM-DDTHH:MM" using UTC components for datetime-local input pre-fill. */
@@ -47,12 +47,20 @@ export function useTimestampEdit(
     if (isEditing) inputRef.current?.focus()
   }, [isEditing])
 
-  function startEdit() {
+  // Memoized on their real dependencies only (NOT `tsValue`, since neither
+  // function's logic depends on the current draft value) so callers that put
+  // `cancel`/`startEdit` in a dependency array -- e.g. PhotoLightbox's
+  // document keydown effect -- don't re-run that effect on every keystroke.
+  const startEdit = useCallback(() => {
     if (!onTimestampChange) return
     setTsValue(capturedAt ? toDatetimeLocal(capturedAt) : '')
     setIsEditing(true)
-  }
+  }, [capturedAt, onTimestampChange])
 
+  // Deliberately NOT wrapped in useCallback: commit needs the live `tsValue`
+  // to parse, so its identity legitimately changes per keystroke. Nothing
+  // depends on `commit`'s identity (it isn't in the Lightbox effect's
+  // dependency array), so that churn is harmless.
   function commit() {
     if (tsValue.trim() === '') {
       onTimestampChange?.(null)
@@ -63,10 +71,10 @@ export function useTimestampEdit(
     setIsEditing(false)
   }
 
-  function cancel() {
+  const cancel = useCallback(() => {
     setTsValue(capturedAt ? toDatetimeLocal(capturedAt) : '')
     setIsEditing(false)
-  }
+  }, [capturedAt])
 
   return { isEditing, tsValue, setTsValue, inputRef, startEdit, commit, cancel }
 }
