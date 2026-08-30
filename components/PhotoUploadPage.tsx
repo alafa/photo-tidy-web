@@ -112,11 +112,34 @@ export default function PhotoUploadPage() {
   // reads `visualOrderRef.current` fresh on every invocation instead.
   const visualOrderRef = useRef<string[]>([])
 
-  // Stable identity (empty dep array, only touches the ref) so PhotoGrid's
-  // `useEffect([visualOrder, onVisualOrderChange])` fires only when
-  // `visualOrder` itself changes, not on every PhotoUploadPage render.
+  // Reactive mirror of the same order, kept for the lightbox's prev/next
+  // navigation (which needs to re-render when the order changes, unlike
+  // handleDragEnd's synchronous ref read above). Kept in sync with
+  // visualOrderRef.current on every report.
+  const [visualOrder, setVisualOrder] = useState<string[]>([])
+
+  // Stable identity (empty dep array, only touches the ref/setState) so
+  // PhotoGrid's `useEffect([visualOrder, onVisualOrderChange])` fires only
+  // when `visualOrder` itself changes, not on every PhotoUploadPage render.
   const handleVisualOrderChange = useCallback((order: string[]) => {
     visualOrderRef.current = order
+    // Bail out when the reported order is the same ids in the same
+    // sequence as what's already stored -- PhotoGrid recomputes `visualOrder`
+    // from useClusteredPhotos on every render, so a naive unconditional
+    // setState here (with a fresh array reference each time) would re-render
+    // this component every time PhotoGrid renders, which re-triggers
+    // PhotoGrid's effect, which calls this again -- an infinite update loop.
+    // Comparing by content, not reference, breaks that cycle while still
+    // updating state whenever the order actually changes.
+    setVisualOrder((prev) => {
+      if (
+        prev.length === order.length &&
+        prev.every((id, i) => id === order[i])
+      ) {
+        return prev
+      }
+      return order
+    })
   }, [])
 
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
@@ -125,6 +148,16 @@ export default function PhotoUploadPage() {
   // this component looks up a photo's object URL -- via getObjectUrl
   // (hooks/useObjectUrls.ts), keyed off photosById.
   const zoomedPhoto = zoomedPhotoId ? photosById.get(zoomedPhotoId) ?? null : null
+
+  // The zoomed photo's previous/next neighbors in the TRUE visual order
+  // (not the flat, purely-chronological `photos` array -- see
+  // `handleDragEnd`'s doc above for why those two orderings can diverge).
+  // `indexOf` naturally yields `undefined` at either edge of `visualOrder`
+  // via out-of-bounds array access, so no extra edge-case branching is
+  // needed beyond guarding the "lightbox isn't open" (-1) case.
+  const currentVisualIndex = zoomedPhotoId ? visualOrder.indexOf(zoomedPhotoId) : -1
+  const prevZoomedId = currentVisualIndex === -1 ? undefined : visualOrder[currentVisualIndex - 1]
+  const nextZoomedId = currentVisualIndex === -1 ? undefined : visualOrder[currentVisualIndex + 1]
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     if (isRestoring) return
@@ -261,6 +294,25 @@ export default function PhotoUploadPage() {
 
   const handleDeletePhoto = useCallback((id: string) => handleBatchDelete([id]), [handleBatchDelete])
   const handleCloseLightbox = useCallback(() => setZoomedPhotoId(null), [])
+
+  // Deletes the currently-zoomed photo and advances the lightbox to its
+  // visual neighbor (next preferred, falling back to prev), or closes it if
+  // none remain. `prevZoomedId`/`nextZoomedId` are captured from THIS
+  // render's pre-delete `visualOrder` state before anything else runs here,
+  // per the same visual-order reasoning as `handleDragEnd` above. The
+  // `visualOrder` state mirror is spliced immediately (a filter, not
+  // mutated in place) so it doesn't wait on the next async recluster
+  // round-trip -- `handleDeletePhoto` below still does the real work
+  // (object URL release, notifyPhotoRemoved, removePhotos, selectedIds
+  // pruning) via the existing, unmodified handleBatchDelete wrapper.
+  const handleLightboxDelete = useCallback(() => {
+    if (!zoomedPhotoId) return
+    const neighbor = nextZoomedId ?? prevZoomedId
+    const idToDelete = zoomedPhotoId
+    setVisualOrder((prev) => prev.filter((id) => id !== idToDelete))
+    handleDeletePhoto(idToDelete)
+    setZoomedPhotoId(neighbor ?? null)
+  }, [zoomedPhotoId, nextZoomedId, prevZoomedId, handleDeletePhoto])
 
   // Comprehensive reset (KTD9's "Clear all"): a deliberately much larger
   // blast radius than a single-photo delete, so it's gated behind a native
@@ -519,7 +571,12 @@ export default function PhotoUploadPage() {
         <PhotoLightbox
           filename={zoomedPhoto.filename}
           objectUrl={getObjectUrl(zoomedPhoto.file)}
+          capturedAt={zoomedPhoto.capturedAt}
           onClose={handleCloseLightbox}
+          onDelete={handleLightboxDelete}
+          onTimestampChange={(d) => updatePhotoTimestamp(zoomedPhoto.id, d)}
+          onNavigatePrev={prevZoomedId ? () => setZoomedPhotoId(prevZoomedId) : undefined}
+          onNavigateNext={nextZoomedId ? () => setZoomedPhotoId(nextZoomedId) : undefined}
         />
       )}
     </div>

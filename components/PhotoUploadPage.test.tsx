@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
@@ -1717,5 +1717,232 @@ describe('PhotoUploadPage — notifyPhotoRemoved wiring on delete', () => {
     expect(releaseObjectUrlMock).toHaveBeenCalledWith(photos[0].file)
     expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(photos[0].id)
     expect(notifyPhotoRemovedMock).toHaveBeenCalledOnce()
+  })
+})
+
+// KTD-lightbox-nav-delete: PhotoUploadPage now derives the zoomed photo's
+// prev/next neighbors from the TRUE visual order (`visualOrder` state, kept
+// in sync with `visualOrderRef` via PhotoGrid's `onVisualOrderChange`), not
+// the flat, purely-chronological `photos` array -- the exact same
+// visual-order-vs-flat-array risk shape as `handleDragEnd`'s existing P0 fix
+// (see docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-
+// divergence.md). PhotoLightbox itself is real (not mocked) in this file, so
+// these interact with its actual "Previous photo"/"Next photo"/"Delete
+// photo" controls, which only render when the corresponding prop is defined.
+describe('PhotoUploadPage — lightbox navigation and delete-and-advance', () => {
+  function makeDatedEntry(name: string, index: number, capturedAt: string) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(capturedAt),
+      uploadIndex: index,
+    }
+  }
+
+  function basePhotosReturn(
+    photos: ReturnType<typeof makeDatedEntry>[],
+    overrides: Record<string, unknown> = {}
+  ) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos: vi.fn(),
+      ...overrides,
+    }
+  }
+
+  /** Clicks the zoom icon on the card whose <img alt> is `name` -- robust to DOM order, unlike indexing getAllByRole. */
+  function zoomOn(name: string) {
+    const img = screen.getByAltText(name)
+    const cardImageContainer = img.parentElement as HTMLElement
+    fireEvent.click(within(cardImageContainer).getByRole('button', { name: 'Zoom photo' }))
+  }
+
+  /** The lightbox's own root -- the Close button's parent -- scoped so queries don't also match the (inert) grid underneath. */
+  function lightboxOverlay(): HTMLElement {
+    return screen.getByRole('button', { name: 'Close' }).parentElement as HTMLElement
+  }
+
+  function lightboxImgAlt(): string | null {
+    return within(lightboxOverlay()).getByRole('img').getAttribute('alt')
+  }
+
+  it('REGRESSION: resolves prev/next neighbors from the true visual order, not flat-array indexOf, when the two diverge', () => {
+    // Flat `photos` array order: A, B, C. But the mocked useClusteredPhotos
+    // below reports a visualOrder of B, A, C -- simulating a cluster/render
+    // reordering, exactly the divergence class documented in
+    // docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md.
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[b.id], [a.id], [c.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    // Open on a.jpg, which sits at flat-array index 0 (no prev, next = b)
+    // but at visualOrder index 1 (prev = b, next = c).
+    zoomOn('a.jpg')
+
+    // Positive: the true visual prev (b) is reachable, proving prevId isn't
+    // the flat-array-derived `undefined` a flat-array-indexOf computation
+    // would have produced for index 0.
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Previous photo' }))
+    expect(lightboxImgAlt()).toBe('b.jpg')
+
+    // Close, reopen on a.jpg, and check Next this time.
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Close' }))
+    zoomOn('a.jpg')
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Next photo' }))
+
+    // Positive: true visual next is c.
+    expect(lightboxImgAlt()).toBe('c.jpg')
+    // Negative: NOT b -- the flat-array-indexOf answer (photos[0 + 1] = b)
+    // that the pre-fix bug class would have produced. Asserting the negative
+    // is what turns this into a real regression guard per the documented
+    // solution's recommended test shape.
+    expect(lightboxImgAlt()).not.toBe('b.jpg')
+  })
+
+  it('opening on the first/last photo in visualOrder (not the flat array) yields only one defined neighbor', () => {
+    // Same B, A, C divergent visualOrder as the regression test above.
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[b.id], [a.id], [c.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    // b.jpg is first in visualOrder [B, A, C] -- even though it's NOT first
+    // in the flat array (that's a) -- so Previous must be absent, Next present.
+    zoomOn('b.jpg')
+    expect(within(lightboxOverlay()).queryByRole('button', { name: 'Previous photo' })).toBeNull()
+    expect(within(lightboxOverlay()).getByRole('button', { name: 'Next photo' })).toBeDefined()
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Close' }))
+
+    // c.jpg is last in visualOrder (and also last in the flat array here) --
+    // Next must be absent, Previous present.
+    zoomOn('c.jpg')
+    expect(within(lightboxOverlay()).queryByRole('button', { name: 'Next photo' })).toBeNull()
+    expect(within(lightboxOverlay()).getByRole('button', { name: 'Previous photo' })).toBeDefined()
+  })
+
+  it('deleting the current photo with a next neighbor advances the lightbox to it, and still reuses handleDeletePhoto\'s existing side effects (object URL release, notifyPhotoRemoved, selectedIds pruning)', () => {
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+    const removePhotosMock = vi.fn()
+    const notifyPhotoRemovedMock = vi.fn()
+    const releaseObjectUrlMock = vi.fn()
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos, { removePhotos: removePhotosMock }))
+    mockUseObjectUrls.mockReturnValue({
+      getObjectUrl: (file: File) => `blob:${file.name}`,
+      releaseObjectUrl: releaseObjectUrlMock,
+    })
+    mockUseGooglePhotosUpload.mockReturnValue({
+      uploadState: 'idle',
+      photoStates: new Map(),
+      startUpload: vi.fn(),
+      retryFailed: vi.fn(),
+      reset: vi.fn(),
+      seedPhotoStates: vi.fn(),
+      notifyPhotoRemoved: notifyPhotoRemovedMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    // Select b first, to prove the delete-through-lightbox path prunes
+    // selectedIds exactly like the existing per-card/batch delete paths do.
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    zoomOn('b.jpg') // middle photo in flat/visual order here -- next = c
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Delete photo' }))
+
+    // Existing handleDeletePhoto -> handleBatchDelete side effects, reused unchanged.
+    expect(removePhotosMock).toHaveBeenCalledWith([b.id])
+    expect(releaseObjectUrlMock).toHaveBeenCalledWith(b.file)
+    expect(notifyPhotoRemovedMock).toHaveBeenCalledWith(b.id)
+    expect(screen.queryByText(/photo selected/)).toBeNull()
+
+    // Lightbox stayed open, advanced to c (the next neighbor).
+    expect(lightboxImgAlt()).toBe('c.jpg')
+  })
+
+  it('deleting the last-in-visualOrder photo (only a prev neighbor) advances the lightbox to prev', () => {
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeDatedEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    zoomOn('c.jpg') // last in visual order -- no next, prev = b
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Delete photo' }))
+
+    expect(lightboxImgAlt()).toBe('b.jpg')
+  })
+
+  it('deleting the only remaining photo in visualOrder closes the lightbox', () => {
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const photos = [a]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    zoomOn('a.jpg')
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDefined()
+
+    fireEvent.click(within(lightboxOverlay()).getByRole('button', { name: 'Delete photo' }))
+
+    // zoomedPhotoId became null -- zoomedPhoto resolves to null, so the
+    // lightbox no longer renders at all.
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull()
+  })
+
+  it("the lightbox's onTimestampChange calls updatePhotoTimestamp with the zoomed photo's id", () => {
+    const a = makeDatedEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeDatedEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const photos = [a, b]
+    const updatePhotoTimestampMock = vi.fn()
+
+    mockUsePhotos.mockReturnValue(
+      basePhotosReturn(photos, { updatePhotoTimestamp: updatePhotoTimestampMock })
+    )
+
+    render(<PhotoUploadPage />)
+
+    zoomOn('b.jpg')
+
+    fireEvent.click(within(lightboxOverlay()).getByTitle('Click to edit date'))
+    const input = within(lightboxOverlay()).getByDisplayValue('2025-01-02T00:00')
+    fireEvent.change(input, { target: { value: '2025-06-15T12:30' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(b.id, expect.any(Date))
+    const calledId = updatePhotoTimestampMock.mock.calls[0][0]
+    expect(calledId).toBe(b.id)
   })
 })
