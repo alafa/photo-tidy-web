@@ -13,3 +13,19 @@ export function TrashIcon({ className }: { className?: string }) {
     </svg>
   )
 }
+
+export function ChevronLeftIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 2.5L3 6l4.5 3.5" />
+    </svg>
+  )
+}
+
+export function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 2.5L9 6l-4.5 3.5" />
+    </svg>
+  )
+}

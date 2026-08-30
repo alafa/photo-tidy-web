@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
-import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
+import { useTimestampEdit } from '@/hooks/useTimestampEdit'
 import { TrashIcon } from './icons'
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
@@ -17,16 +17,6 @@ const dateFormatter = new Intl.DateTimeFormat('en-US', {
 
 function formatDate(date: Date): string {
   return dateFormatter.format(date)
-}
-
-/** Format a Date as "YYYY-MM-DDTHH:MM" using UTC components for datetime-local input pre-fill. */
-function toDatetimeLocal(date: Date): string {
-  const y = date.getUTCFullYear()
-  const mo = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const d = String(date.getUTCDate()).padStart(2, '0')
-  const h = String(date.getUTCHours()).padStart(2, '0')
-  const mi = String(date.getUTCMinutes()).padStart(2, '0')
-  return `${y}-${mo}-${d}T${h}:${mi}`
 }
 
 /**
@@ -103,12 +93,19 @@ export default function PhotoCard({
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
 
   const [isEditingName, setIsEditingName] = useState(false)
-  const [isEditingTimestamp, setIsEditingTimestamp] = useState(false)
   const [nameValue, setNameValue] = useState(filename)
-  const [tsValue, setTsValue] = useState(capturedAt ? toDatetimeLocal(capturedAt) : '')
 
   const nameInputRef = useRef<HTMLInputElement>(null)
-  const tsInputRef = useRef<HTMLInputElement>(null)
+
+  const {
+    isEditing: isEditingTimestamp,
+    tsValue,
+    setTsValue,
+    inputRef: tsInputRef,
+    startEdit: startEditTimestampBase,
+    commit: commitTimestamp,
+    cancel: cancelTimestamp,
+  } = useTimestampEdit(capturedAt, onTimestampChange)
 
   // Keep draft values in sync with external prop changes (e.g. batch operations)
   useEffect(() => {
@@ -116,20 +113,12 @@ export default function PhotoCard({
   }, [filename, isEditingName])
 
   useEffect(() => {
-    if (!isEditingTimestamp) setTsValue(capturedAt ? toDatetimeLocal(capturedAt) : '')
-  }, [capturedAt, isEditingTimestamp])
-
-  useEffect(() => {
     if (isEditingName) nameInputRef.current?.focus()
   }, [isEditingName])
 
-  useEffect(() => {
-    if (isEditingTimestamp) tsInputRef.current?.focus()
-  }, [isEditingTimestamp])
-
   function startEditName() {
     if (!onNameChange) return
-    setIsEditingTimestamp(false)
+    cancelTimestamp()
     setNameValue(filename)
     setIsEditingName(true)
   }
@@ -150,25 +139,8 @@ export default function PhotoCard({
   }
 
   function startEditTimestamp() {
-    if (!onTimestampChange) return
     setIsEditingName(false)
-    setTsValue(capturedAt ? toDatetimeLocal(capturedAt) : '')
-    setIsEditingTimestamp(true)
-  }
-
-  function commitTimestamp() {
-    if (tsValue.trim() === '') {
-      onTimestampChange!(null)
-    } else {
-      const parsed = parseDatetimeLocalAsUTC(tsValue)
-      if (parsed) onTimestampChange!(parsed)
-    }
-    setIsEditingTimestamp(false)
-  }
-
-  function cancelTimestamp() {
-    setTsValue(capturedAt ? toDatetimeLocal(capturedAt) : '')
-    setIsEditingTimestamp(false)
+    startEditTimestampBase()
   }
 
   return (

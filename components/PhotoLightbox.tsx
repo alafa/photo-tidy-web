@@ -1,35 +1,100 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTimestampEdit } from '@/hooks/useTimestampEdit'
+import { ChevronLeftIcon, ChevronRightIcon, TrashIcon } from './icons'
+
+const dateFormatter = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+  // exifr builds Date objects via Date.UTC, so EXIF clock times are stored
+  // as UTC values. Format with timeZone: 'UTC' to display as-is.
+  timeZone: 'UTC',
+})
+
+function formatDate(date: Date): string {
+  return dateFormatter.format(date)
+}
 
 type Props = {
-  /** Used only for the image's alt text -- this component knows nothing else
-   * about the photo (no id, no metadata) and nothing about the rest of the
-   * batch, per R3's view-only scope. */
+  /** Used for the image's alt text. */
   filename: string
   objectUrl: string
+  /** Currently-recorded capture timestamp, editable inline (see below). */
+  capturedAt: Date | null
   onClose: () => void
+  /** Pre-bound by the caller -- a zero-arg trigger, mirroring PhotoCard's onDelete. */
+  onDelete: () => void
+  onTimestampChange: (newDate: Date | null) => void
+  /** Presence of each of these gates whether its nav control renders at all. */
+  onNavigatePrev?: () => void
+  onNavigateNext?: () => void
 }
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 /**
- * Standalone, view-only full-size photo viewer. No portal, no external
- * dialog library -- there is no existing modal precedent in this codebase
- * (confirmed via repo research), so focus management is implemented here
- * from first principles:
+ * Full-size photo viewer/editor. No portal, no external dialog library --
+ * there is no existing modal precedent in this codebase (confirmed via repo
+ * research), so focus management is implemented here from first principles:
  *   - on mount, focus moves to the close control
  *   - Tab/Shift+Tab is trapped within the lightbox's own focusable elements
  *   - on unmount (any close path), focus returns to whatever had it before
- *     the lightbox opened
+ *     the lightbox opened, if that element is still attached to the DOM
  *
- * Deliberately has no id/next/prev props -- it must not know anything about
- * the rest of the photo batch.
+ * Beyond viewing, this component now also supports:
+ *   - deleting the current photo (`onDelete`)
+ *   - navigating to the previous/next photo in the batch (`onNavigatePrev`/
+ *     `onNavigateNext`, each optional -- their presence gates whether the
+ *     corresponding nav control renders)
+ *   - editing the photo's captured-at timestamp inline, via the same
+ *     edit/commit/cancel state machine PhotoCard uses (`useTimestampEdit`)
+ *
+ * Because an in-progress timestamp edit shouldn't be silently discarded by
+ * a delete/navigate/close action, every action path (delete button, nav
+ * buttons, close button, backdrop click) commits a pending edit first. The
+ * document-level keydown handler also defers to the active edit: Escape
+ * cancels the edit rather than closing, and ArrowLeft/ArrowRight are left
+ * alone (no navigation, no preventDefault) so the native datetime-local
+ * input can handle them for its own segment navigation.
  */
-export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
+export default function PhotoLightbox({
+  filename,
+  objectUrl,
+  capturedAt,
+  onClose,
+  onDelete,
+  onTimestampChange,
+  onNavigatePrev,
+  onNavigateNext,
+}: Props) {
   const rootRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const previouslyFocusedRef = useRef<HTMLElement | null>(null)
   const [imageFailed, setImageFailed] = useState(false)
+
+  const {
+    isEditing,
+    tsValue,
+    setTsValue,
+    inputRef: tsInputRef,
+    startEdit: startEditTimestamp,
+    commit: commitTimestamp,
+    cancel: cancelTimestamp,
+  } = useTimestampEdit(capturedAt, onTimestampChange)
+
+  const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
+
+  /** If a timestamp edit is in progress, commit it before the actual action runs (KTD5). */
+  function commitPendingEditThen(action: () => void) {
+    return () => {
+      if (isEditing) commitTimestamp()
+      action()
+    }
+  }
 
   // Capture the pre-open focus target before moving focus to the close
   // control, then restore it on unmount. Every close path (close-control
@@ -40,18 +105,42 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
     closeButtonRef.current?.focus()
 
     return () => {
-      previouslyFocusedRef.current?.focus()
+      // Guard against calling .focus() on a detached node -- e.g. the
+      // originally-focused grid card may have been removed while the
+      // lightbox was open (navigating/deleting through several photos).
+      if (previouslyFocusedRef.current?.isConnected) {
+        previouslyFocusedRef.current.focus()
+      }
     }
   }, [])
 
-  // Escape-to-close and the Tab focus trap both need a document-level
-  // keydown listener, since focus may be anywhere within the lightbox (or,
-  // in principle, nowhere) when either key is pressed.
+  // Escape-to-close/cancel, arrow-key navigation, and the Tab focus trap
+  // all need a document-level keydown listener, since focus may be anywhere
+  // within the lightbox (or, in principle, nowhere) when any key is pressed.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        onClose()
-        return
+      if (isEditing) {
+        if (e.key === 'Escape') {
+          cancelTimestamp()
+          return
+        }
+        // Do NOT preventDefault or act on arrow keys while editing -- the
+        // native datetime-local input must still receive them for its own
+        // internal segment navigation (R6).
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') return
+      } else {
+        if (e.key === 'Escape') {
+          onClose()
+          return
+        }
+        if (e.key === 'ArrowLeft') {
+          onNavigatePrev?.()
+          return
+        }
+        if (e.key === 'ArrowRight') {
+          onNavigateNext?.()
+          return
+        }
       }
 
       if (e.key !== 'Tab') return
@@ -81,7 +170,7 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
 
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
+  }, [onClose, onNavigatePrev, onNavigateNext, isEditing, cancelTimestamp])
 
   return (
     <div
@@ -89,7 +178,7 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-      onClick={onClose}
+      onClick={commitPendingEditThen(onClose)}
     >
       <button
         ref={closeButtonRef}
@@ -97,7 +186,7 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
         aria-label="Close"
         onClick={(e) => {
           e.stopPropagation()
-          onClose()
+          commitPendingEditThen(onClose)()
         }}
         className="absolute top-3 right-3 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
       >
@@ -105,6 +194,46 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
         </svg>
       </button>
+
+      <button
+        type="button"
+        aria-label="Delete photo"
+        onClick={(e) => {
+          e.stopPropagation()
+          commitPendingEditThen(onDelete)()
+        }}
+        className="absolute top-3 left-3 p-3 flex items-center justify-center rounded-full text-rose-400 hover:text-rose-300 hover:bg-white/10"
+      >
+        <TrashIcon className="w-5 h-5" />
+      </button>
+
+      {onNavigatePrev && (
+        <button
+          type="button"
+          aria-label="Previous photo"
+          onClick={(e) => {
+            e.stopPropagation()
+            commitPendingEditThen(onNavigatePrev)()
+          }}
+          className="absolute left-3 top-1/2 -translate-y-1/2 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
+        >
+          <ChevronLeftIcon className="w-5 h-5" />
+        </button>
+      )}
+
+      {onNavigateNext && (
+        <button
+          type="button"
+          aria-label="Next photo"
+          onClick={(e) => {
+            e.stopPropagation()
+            commitPendingEditThen(onNavigateNext)()
+          }}
+          className="absolute right-3 top-1/2 -translate-y-1/2 p-3 flex items-center justify-center rounded-full text-zinc-100 hover:text-white hover:bg-white/10"
+        >
+          <ChevronRightIcon className="w-5 h-5" />
+        </button>
+      )}
 
       {imageFailed ? (
         <div
@@ -123,6 +252,34 @@ export default function PhotoLightbox({ filename, objectUrl, onClose }: Props) {
           className="max-w-full max-h-full object-contain rounded-md"
         />
       )}
+
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="absolute bottom-3 left-1/2 -translate-x-1/2"
+      >
+        {isEditing ? (
+          <input
+            ref={tsInputRef}
+            type="datetime-local"
+            value={tsValue}
+            onChange={(e) => setTsValue(e.target.value)}
+            onBlur={commitTimestamp}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); commitTimestamp() }
+              if (e.key === 'Escape') { e.preventDefault(); cancelTimestamp() }
+            }}
+            className="text-xs text-zinc-900 bg-white dark:bg-zinc-900 dark:text-zinc-50 border border-zinc-300 dark:border-zinc-600 rounded px-1"
+          />
+        ) : (
+          <p
+            className="text-xs text-zinc-100 cursor-text hover:text-white"
+            onClick={startEditTimestamp}
+            title="Click to edit date"
+          >
+            {dateLabel}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
