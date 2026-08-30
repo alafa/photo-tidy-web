@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { parseDatetimeLocalAsUTC } from '@/lib/datetime-local'
+import { TrashIcon } from './icons'
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
   month: 'short',
@@ -207,9 +208,7 @@ export default function PhotoCard({
           colorClassName="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
           onActivate={onDelete}
         >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
-          </svg>
+          <TrashIcon className="w-5 h-5" />
         </CardOverlayButton>
         {/* Zoom icon overlay — always visible, bottom-left, symmetric with
             the delete icon's bottom-right placement. Neutral color (zinc)

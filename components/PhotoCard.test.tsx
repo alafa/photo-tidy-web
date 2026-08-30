@@ -153,6 +153,18 @@ describe('PhotoCard', () => {
       expect(svg?.getAttribute('class')).toContain('w-5')
       expect(svg?.getAttribute('class')).toContain('h-5')
     })
+
+    it('renders the shared trash-can icon, not the old X glyph (U1)', () => {
+      const entry = makeEntry()
+      render(<PhotoCard entry={entry} objectUrl="blob:test" onDelete={vi.fn()} />)
+
+      const button = screen.getByRole('button', { name: 'Delete photo' })
+      const path = button.querySelector('svg path')
+      // Old X icon's path data -- must no longer be present.
+      expect(path?.getAttribute('d')).not.toBe('M2 2l8 8M10 2L2 10')
+      // New trash-can icon renders two paths (lid + body).
+      expect(button.querySelectorAll('svg path').length).toBe(2)
+    })
   })
 
   describe('zoom icon overlay (U4)', () => {
