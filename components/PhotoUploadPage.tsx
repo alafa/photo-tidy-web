@@ -200,8 +200,8 @@ export default function PhotoUploadPage() {
     setActiveId(String(event.active.id))
   }
 
-  // Resolves from/to against the TRUE visual order (`visualOrderRef`), not
-  // the flat, purely-chronological `photos` array — dnd-kit's `over.id` is
+  // Resolves from/to against the TRUE visual order (`visualOrder` state),
+  // not the flat, purely-chronological `photos` array — dnd-kit's `over.id` is
   // resolved from actual DOM hit-testing (i.e. visual order), and a
   // cluster's members aren't guaranteed to be array-contiguous in `photos`
   // (clustering is by hash similarity, not time), so `photos.findIndex`

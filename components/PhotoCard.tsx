@@ -124,8 +124,22 @@ export default function PhotoCard({
   }
 
   function startEditTimestamp() {
+    // Mirrors useTimestampEdit's own onTimestampChange-presence guard: only
+    // cancel an in-progress name edit if timestamp editing is actually about
+    // to start. Without this, clicking the date on a card with no
+    // onTimestampChange wired up would silently discard an in-progress name
+    // edit even though timestamp editing never activates.
+    if (!onTimestampChange) return
     setIsEditingName(false)
     startEditTimestampBase()
+  }
+
+  function handleDeleteClick() {
+    // Same commit-before-discard safety PhotoLightbox's delete button
+    // established (KTD5): an in-progress timestamp edit must be committed,
+    // not silently discarded, when the card is deleted mid-edit.
+    if (isEditingTimestamp) commitTimestamp()
+    onDelete?.()
   }
 
   return (
@@ -163,7 +177,7 @@ export default function PhotoCard({
           position="right"
           ariaLabel="Delete photo"
           colorClassName="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
-          onActivate={onDelete}
+          onActivate={handleDeleteClick}
         >
           <TrashIcon className="w-5 h-5" />
         </CardOverlayButton>

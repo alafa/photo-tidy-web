@@ -258,6 +258,53 @@ describe('PhotoCard', () => {
   })
 })
 
+describe('PhotoCard — timestamp click does not discard an in-progress name edit when timestamp editing is unavailable (Fix 3)', () => {
+  it('preserves an in-progress name edit when clicking the date label with no onTimestampChange wired up', () => {
+    const onNameChange = vi.fn()
+    const entry = makeEntry({ filename: 'test.jpg', capturedAt: null })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" onNameChange={onNameChange} />)
+
+    fireEvent.click(screen.getByText('test.jpg'))
+    expect(screen.getByDisplayValue('test.jpg')).toBeDefined()
+
+    fireEvent.click(screen.getByText('No date'))
+
+    // The name edit must still be active -- timestamp editing never
+    // actually activates since onTimestampChange is undefined, so it must
+    // not have cancelled the name edit either.
+    expect(screen.getByDisplayValue('test.jpg')).toBeDefined()
+  })
+})
+
+describe('PhotoCard — delete commits a pending timestamp edit first (Fix 4)', () => {
+  it('commits an in-progress timestamp edit via onTimestampChange before onDelete fires', () => {
+    const onTimestampChange = vi.fn()
+    const onDelete = vi.fn()
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        onTimestampChange={onTimestampChange}
+        onDelete={onDelete}
+      />
+    )
+
+    fireEvent.click(screen.getByText(/Jan 3, 2025/))
+    const input = document.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    fireEvent.change(input, { target: { value: '2025-06-15T10:00' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete photo' }))
+
+    expect(onTimestampChange).toHaveBeenCalledTimes(1)
+    const [calledWith] = onTimestampChange.mock.calls[0]
+    expect(calledWith.toISOString()).toBe(new Date('2025-06-15T10:00:00Z').toISOString())
+    expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
 // A `describe('PhotoGrid', ...)` block used to live here, exercising
 // PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
 // only, no `metrics`). PhotoGrid's contract changed when clustering/debug

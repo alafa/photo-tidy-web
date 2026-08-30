@@ -29,3 +29,11 @@ export function ChevronRightIcon({ className }: { className?: string }) {
     </svg>
   )
 }
+
+export function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
+    </svg>
+  )
+}

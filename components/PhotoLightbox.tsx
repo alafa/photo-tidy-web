@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTimestampEdit } from '@/hooks/useTimestampEdit'
 import { formatDate } from '@/lib/datetime-local'
-import { ChevronLeftIcon, ChevronRightIcon, TrashIcon } from './icons'
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, TrashIcon } from './icons'
 
 type Props = {
   /** Used for the image's alt text. */
@@ -102,6 +102,19 @@ export default function PhotoLightbox({
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const previouslyFocusedRef = useRef<HTMLElement | null>(null)
   const [imageFailed, setImageFailed] = useState(false)
+  // Reset the failed-to-load flag when navigating to a different photo --
+  // this component instance persists across a `zoomedPhotoId` change (no
+  // `key` prop forces a remount), so without this a broken image on one
+  // photo would leave every subsequent, perfectly-loadable photo stuck
+  // behind the "Unable to load this image." fallback. Adjusted during
+  // render (React's documented pattern for resetting state on a prop
+  // change) rather than in a useEffect, since useEffect for a same-render
+  // reset trips this repo's react-hooks/set-state-in-effect lint rule.
+  const [prevObjectUrl, setPrevObjectUrl] = useState(objectUrl)
+  if (objectUrl !== prevObjectUrl) {
+    setPrevObjectUrl(objectUrl)
+    setImageFailed(false)
+  }
 
   const {
     isEditing,
@@ -148,6 +161,20 @@ export default function PhotoLightbox({
       }
     }
   }, [])
+
+  // Defensive focus correction: a nav button that currently holds focus can
+  // unmount out from under it (its onNavigatePrev/onNavigateNext prop goes
+  // from defined to undefined -- e.g. reaching the first/last photo), which
+  // silently drops focus to document.body, outside this dialog, breaking
+  // the Tab focus trap below (nothing inside the dialog has focus for it to
+  // catch). Whenever these two props change, check whether focus has
+  // escaped the dialog and pull it back to the close button, which always
+  // renders and is therefore a stable fallback target.
+  useEffect(() => {
+    if (rootRef.current && !rootRef.current.contains(document.activeElement)) {
+      closeButtonRef.current?.focus()
+    }
+  }, [onNavigatePrev, onNavigateNext])
 
   // Escape-to-close/cancel, arrow-key navigation, and the Tab focus trap
   // all need a document-level keydown listener, since focus may be anywhere
@@ -222,9 +249,7 @@ export default function PhotoLightbox({
         colorClassName="text-zinc-100 hover:text-white hover:bg-white/10"
         onClick={commitPendingEditThen(onClose)}
       >
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M2 2l8 8M10 2L2 10" />
-        </svg>
+        <CloseIcon className="w-5 h-5" />
       </LightboxActionButton>
 
       <LightboxActionButton

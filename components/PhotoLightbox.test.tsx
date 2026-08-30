@@ -442,3 +442,56 @@ describe('PhotoLightbox — pre-existing behavior (unchanged)', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('PhotoLightbox — image error state resets on photo change (Fix 1)', () => {
+  it('resets imageFailed when navigating to a photo with a different objectUrl', () => {
+    const { rerender } = renderLightbox({ filename: 'a.jpg', objectUrl: 'blob:a' })
+
+    const img = screen.getByAltText('a.jpg')
+    fireEvent.error(img)
+    expect(screen.getByText(/unable to load/i)).toBeDefined()
+    expect(screen.queryByAltText('a.jpg')).toBeNull()
+
+    rerender(
+      <PhotoLightbox
+        filename="b.jpg"
+        objectUrl="blob:b"
+        capturedAt={CAPTURED_AT}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+        onTimestampChange={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByText(/unable to load/i)).toBeNull()
+    const newImg = screen.getByAltText('b.jpg')
+    expect(newImg.getAttribute('src')).toBe('blob:b')
+  })
+})
+
+describe('PhotoLightbox — focus escape correction (Fix 2)', () => {
+  it('returns focus to the close button when the focused nav button unmounts (onNavigateNext becomes undefined)', () => {
+    const onNavigateNext = vi.fn()
+    const { rerender } = renderLightbox({ onNavigateNext })
+
+    const nextButton = screen.getByRole('button', { name: 'Next photo' })
+    nextButton.focus()
+    expect(document.activeElement).toBe(nextButton)
+
+    rerender(
+      <PhotoLightbox
+        filename="a.jpg"
+        objectUrl="blob:a"
+        capturedAt={CAPTURED_AT}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+        onTimestampChange={vi.fn()}
+        onNavigateNext={undefined}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Next photo' })).toBeNull()
+    const closeButton = screen.getByRole('button', { name: 'Close' })
+    expect(document.activeElement).toBe(closeButton)
+  })
+})
