@@ -65,6 +65,22 @@ vi.mock('@/hooks/useClusteredPhotos', () => ({
   },
 }))
 
+// U2: `PhotoUploadPage`'s "Download all" handler calls `buildPhotoZipBlob`/
+// `triggerDownload` (lib/download.ts, U1) directly -- mocked here the same
+// closure-capture way `useClusteredPhotos` is mocked above, so individual
+// tests below can control resolution/rejection and inspect exactly what
+// entries were passed.
+const mockBuildPhotoZipBlob =
+  vi.fn<(entries: PhotoEntry[], onProgress?: (done: number, total: number) => void) => Promise<Blob>>()
+const mockTriggerDownload = vi.fn<(blob: Blob, filename: string) => void>()
+vi.mock('@/lib/download', () => ({
+  buildPhotoZipBlob: (
+    entries: PhotoEntry[],
+    onProgress?: (done: number, total: number) => void
+  ) => mockBuildPhotoZipBlob(entries, onProgress),
+  triggerDownload: (blob: Blob, filename: string) => mockTriggerDownload(blob, filename),
+}))
+
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
@@ -1944,5 +1960,279 @@ describe('PhotoUploadPage — lightbox navigation and delete-and-advance', () =>
     expect(updatePhotoTimestampMock).toHaveBeenCalledWith(b.id, expect.any(Date))
     const calledId = updatePhotoTimestampMock.mock.calls[0][0]
     expect(calledId).toBe(b.id)
+  })
+})
+
+// U2: "Download all" now builds a single ZIP client-side via
+// `buildPhotoZipBlob`/`triggerDownload` (lib/download.ts, U1) instead of the
+// old (now-deleted) per-photo `downloadAll` loop. These scenarios cover
+// KTD2/KTD9 (entry order), KTD3 (filename derivation), KTD6 (progress UI/
+// disabled state), KTD7 (failure handling), and KTD10 (no other control gets
+// locked during a build).
+describe('PhotoUploadPage — Download all (ZIP build, U2)', () => {
+  function makeEntry(
+    name: string,
+    index: number,
+    capturedAt: string,
+    overrides: Partial<PhotoEntry> = {}
+  ): PhotoEntry {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(capturedAt),
+      uploadIndex: index,
+      source: 'local',
+      ...overrides,
+    }
+  }
+
+  function basePhotosReturn(photos: PhotoEntry[]) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos: vi.fn(),
+    }
+  }
+
+  function signIn() {
+    mockUseGoogleAuth.mockReturnValue({
+      accessToken: 'token-123',
+      expiresAt: Date.now() + 60_000,
+      accountEmail: 'user@example.com',
+      isSignedIn: true,
+      isExpiringSoon: false,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+    })
+  }
+
+  function downloadAllButton() {
+    return screen.getByRole('button', { name: 'Download all' }) as HTMLButtonElement
+  }
+
+  beforeEach(() => {
+    mockBuildPhotoZipBlob.mockReset()
+    mockTriggerDownload.mockReset()
+    mockBuildPhotoZipBlob.mockResolvedValue(new Blob(['zip']))
+  })
+
+  it('builds the ZIP from visualOrder-ordered entries, not the flat photos array order', async () => {
+    // Same non-contiguous-cluster divergence fixture as the "P0" drag tests
+    // above: flat `photos` is [a, b, c], but a/c cluster together so the
+    // true visual order is [a, c, b].
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[a.id, c.id], [b.id]])
+    )
+
+    render(<PhotoUploadPage />)
+    // Sanity: visual order really is a, c, b (diverging from flat [a, b, c]).
+    const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+    expect(imgs).toEqual(['a.jpg', 'c.jpg', 'b.jpg'])
+
+    fireEvent.click(downloadAllButton())
+
+    await waitFor(() => expect(mockBuildPhotoZipBlob).toHaveBeenCalledOnce())
+    const [entries] = mockBuildPhotoZipBlob.mock.calls[0]
+    expect(entries.map((e) => e.id)).toEqual([a.id, c.id, b.id])
+  })
+
+  it('KTD9: a photo present in photosById but missing from visualOrder (pending re-cluster) is still included, appended in uploadIndex order', async () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z') // simulates a photo added after the last recluster resolved
+    const c = makeEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [a, b, c]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    // useClusteredPhotos' own visualOrder omits b entirely -- b is present in
+    // `photos`/PhotoUploadPage's own photosById map regardless.
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[a.id], [c.id]], { visualOrder: [a.id, c.id] })
+    )
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(downloadAllButton())
+
+    await waitFor(() => expect(mockBuildPhotoZipBlob).toHaveBeenCalledOnce())
+    const [entries] = mockBuildPhotoZipBlob.mock.calls[0]
+    // a, c from visualOrder, then b appended afterward (its only ordering
+    // signal left is uploadIndex, since it isn't in visualOrder at all).
+    expect(entries.map((e) => e.id)).toEqual([a.id, c.id, b.id])
+  })
+
+  it('passes each entry\'s current (edited) filename and capturedAt, not any original value', async () => {
+    // Simulates a photo that's been renamed and had its timestamp edited
+    // since upload -- `photos` (and therefore photosById) already reflects
+    // those edits, exactly as the real usePhotos state would after
+    // updatePhotoName/updatePhotoTimestamp.
+    const edited = makeEntry('original-name.jpg', 0, '2025-01-01T00:00:00Z', {
+      filename: 'renamed-by-user.jpg',
+      capturedAt: new Date('2025-06-15T12:00:00Z'),
+    })
+    const photos = [edited]
+
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(downloadAllButton())
+
+    await waitFor(() => expect(mockBuildPhotoZipBlob).toHaveBeenCalledOnce())
+    const [entries] = mockBuildPhotoZipBlob.mock.calls[0]
+    expect(entries).toHaveLength(1)
+    expect(entries[0].filename).toBe('renamed-by-user.jpg')
+    expect(entries[0].capturedAt).toEqual(new Date('2025-06-15T12:00:00Z'))
+  })
+
+  it('KTD3: uses the trimmed, sanitized albumName as the ZIP filename, replacing filesystem-unsafe characters', async () => {
+    signIn()
+    const photos = [makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.change(screen.getByPlaceholderText('Album name'), {
+      target: { value: '  Trip/2024: Summer  ' },
+    })
+
+    fireEvent.click(downloadAllButton())
+
+    await waitFor(() => expect(mockTriggerDownload).toHaveBeenCalledOnce())
+    const [, filename] = mockTriggerDownload.mock.calls[0]
+    expect(filename).toBe('Trip-2024- Summer.zip')
+  })
+
+  it('KTD3: falls back to photo-tidy-export-<today, YYYY-MM-DD>.zip when albumName is empty or whitespace-only', async () => {
+    signIn()
+    const photos = [makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    // albumName defaults to '' -- leave it untouched, then confirm
+    // whitespace-only is treated the same way.
+    fireEvent.click(downloadAllButton())
+    await waitFor(() => expect(mockTriggerDownload).toHaveBeenCalledOnce())
+
+    const today = new Date().toISOString().slice(0, 10)
+    const [, firstFilename] = mockTriggerDownload.mock.calls[0]
+    expect(firstFilename).toBe(`photo-tidy-export-${today}.zip`)
+
+    fireEvent.change(screen.getByPlaceholderText('Album name'), { target: { value: '   ' } })
+    fireEvent.click(downloadAllButton())
+    await waitFor(() => expect(mockTriggerDownload).toHaveBeenCalledTimes(2))
+    const [, secondFilename] = mockTriggerDownload.mock.calls[1]
+    expect(secondFilename).toBe(`photo-tidy-export-${today}.zip`)
+  })
+
+  it('KTD6: disables the button and shows a progress count while generating, both clearing once the download triggers', async () => {
+    const photos = [
+      makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z'),
+      makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z'),
+    ]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    let resolveBuild: (blob: Blob) => void
+    const pending = new Promise<Blob>((resolve) => {
+      resolveBuild = resolve
+    })
+    mockBuildPhotoZipBlob.mockImplementation((entries, onProgress) => {
+      onProgress?.(1, entries.length)
+      return pending
+    })
+
+    render(<PhotoUploadPage />)
+
+    expect(downloadAllButton().disabled).toBe(false)
+    fireEvent.click(downloadAllButton())
+
+    await waitFor(() => expect(screen.getByText('Zipping 1 of 2…')).toBeDefined())
+    expect(downloadAllButton().disabled).toBe(true)
+
+    await act(async () => {
+      resolveBuild(new Blob(['zip']))
+      await pending
+    })
+
+    await waitFor(() => expect(mockTriggerDownload).toHaveBeenCalledOnce())
+    expect(screen.queryByText(/Zipping/)).toBeNull()
+    expect(downloadAllButton().disabled).toBe(false)
+  })
+
+  it('disables the button while isRestoring is true, matching "Clear all"', () => {
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: true,
+      storageWarning: null,
+      clearAllPersisted: vi.fn(),
+    })
+    const photos = [makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+
+    expect(downloadAllButton().disabled).toBe(true)
+  })
+
+  it('KTD7: a rejected ZIP build (including one entry\'s writeTimestamp throwing mid-batch) shows a dismissible warning and re-enables the button, instead of throwing uncaught or failing silently', async () => {
+    const photos = [makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    mockBuildPhotoZipBlob.mockRejectedValue(new Error('writeTimestamp failed'))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(downloadAllButton())
+    await waitFor(() => expect(screen.getByText("Couldn't build the ZIP — try again.")).toBeDefined())
+
+    // No partial ZIP is ever handed off for download.
+    expect(mockTriggerDownload).not.toHaveBeenCalled()
+    // Button re-enabled, not stuck disabled.
+    expect(downloadAllButton().disabled).toBe(false)
+
+    // Dismissible.
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByText("Couldn't build the ZIP — try again.")).toBeNull()
+  })
+
+  it('KTD10: photo edits (rename, delete, reorder controls) are not locked while a ZIP build is in progress -- only "Download all" itself is disabled', async () => {
+    const photos = [
+      makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z'),
+      makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z'),
+    ]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    let resolveBuild: (blob: Blob) => void
+    const pending = new Promise<Blob>((resolve) => {
+      resolveBuild = resolve
+    })
+    mockBuildPhotoZipBlob.mockImplementation(() => pending)
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(downloadAllButton())
+    await waitFor(() => expect(downloadAllButton().disabled).toBe(true))
+
+    // "Clear all" and per-card delete stay enabled/clickable during the build.
+    const clearAllButton = screen.getByRole('button', { name: 'Clear all' }) as HTMLButtonElement
+    expect(clearAllButton.disabled).toBe(false)
+    expect(screen.getAllByRole('button', { name: 'Delete photo' })).toHaveLength(2)
+
+    await act(async () => {
+      resolveBuild(new Blob(['zip']))
+      await pending
+    })
   })
 })
