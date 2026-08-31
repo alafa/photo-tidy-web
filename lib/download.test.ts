@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { triggerDownload, downloadPhoto, downloadAll } from './download'
+import { triggerDownload, buildPhotoZipBlob } from './download'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 
 vi.mock('./exif-write', () => ({
@@ -8,6 +8,13 @@ vi.mock('./exif-write', () => ({
 
 import { writeTimestamp } from './exif-write'
 const mockWriteTimestamp = vi.mocked(writeTimestamp)
+
+vi.mock('client-zip', () => ({
+  downloadZip: vi.fn(),
+}))
+
+import { downloadZip } from 'client-zip'
+const mockDownloadZip = vi.mocked(downloadZip)
 
 // Stub URL and DOM globals
 const mockCreateObjectURL = vi.fn(() => 'blob:test-url')
@@ -19,16 +26,32 @@ vi.stubGlobal('URL', {
 
 function makeEntry(name: string, type = 'image/jpeg'): PhotoEntry {
   return {
+    id: name,
     file: new File([], name, { type }),
     filename: name,
     capturedAt: new Date('2025-01-01T10:00:00Z'),
     uploadIndex: 0,
+    source: 'local',
   }
 }
+
+type CapturedZipEntry = { name: string; lastModified: Date; input: Blob }
+let capturedZipEntries: CapturedZipEntry[] = []
 
 beforeEach(() => {
   vi.clearAllMocks()
   mockWriteTimestamp.mockImplementation(async (file) => file)
+  capturedZipEntries = []
+  mockDownloadZip.mockImplementation((files) => {
+    return {
+      blob: async () => {
+        for await (const f of files as AsyncIterable<CapturedZipEntry>) {
+          capturedZipEntries.push(f)
+        }
+        return new Blob(['zip'], { type: 'application/zip' })
+      },
+    } as unknown as Response
+  })
 })
 
 describe('triggerDownload', () => {
@@ -73,65 +96,58 @@ describe('triggerDownload', () => {
   })
 })
 
-describe('downloadPhoto', () => {
-  it('calls writeTimestamp with entry file and capturedAt, then triggers download', async () => {
-    const entry = makeEntry('photo.jpg')
-    const modifiedBlob = new Blob(['modified'], { type: 'image/jpeg' })
-    mockWriteTimestamp.mockResolvedValue(modifiedBlob)
-
-    const anchor = document.createElement('a')
-    const clickSpy = vi.spyOn(anchor, 'click')
-    vi.spyOn(document, 'createElement').mockReturnValueOnce(anchor)
-
-    await downloadPhoto(entry)
-
-    expect(mockWriteTimestamp).toHaveBeenCalledWith(entry.file, entry.capturedAt)
-    expect(mockCreateObjectURL).toHaveBeenCalledWith(modifiedBlob)
-    expect(clickSpy).toHaveBeenCalledTimes(1)
-  })
-
-  it('uses new Date() as fallback when capturedAt is null', async () => {
-    const entry = { ...makeEntry('photo.jpg'), capturedAt: null }
-    await downloadPhoto(entry)
-
-    const [, passedDate] = mockWriteTimestamp.mock.calls[0]
-    expect(passedDate).toBeInstanceOf(Date)
-  })
-
-  it('passes PNG file to writeTimestamp (which passes it through unchanged)', async () => {
-    const entry = makeEntry('photo.png', 'image/png')
-    await downloadPhoto(entry)
-
-    expect(mockWriteTimestamp).toHaveBeenCalledWith(entry.file, entry.capturedAt)
-  })
-})
-
-describe('downloadAll', () => {
-  it('calls downloadPhoto for each entry in order', async () => {
-    vi.useFakeTimers()
-
+describe('buildPhotoZipBlob', () => {
+  it('builds a Blob from N entries, calling writeTimestamp in the exact given order', async () => {
     const entries = [makeEntry('a.jpg'), makeEntry('b.jpg'), makeEntry('c.jpg')]
-    const anchors = entries.map(() => {
-      const a = document.createElement('a')
-      vi.spyOn(a, 'click')
-      return a
-    })
 
-    let callCount = 0
-    vi.spyOn(document, 'createElement').mockImplementation((tag) => {
-      if (tag === 'a') return anchors[callCount++]
-      return document.createElement(tag)
-    })
+    const blob = await buildPhotoZipBlob(entries)
 
-    const downloadPromise = downloadAll(entries, 60)
-    await vi.runAllTimersAsync()
-    await downloadPromise
-
+    expect(blob).toBeInstanceOf(Blob)
+    expect(mockDownloadZip).toHaveBeenCalledTimes(1)
     expect(mockWriteTimestamp).toHaveBeenCalledTimes(3)
     expect(mockWriteTimestamp.mock.calls[0][0]).toBe(entries[0].file)
     expect(mockWriteTimestamp.mock.calls[1][0]).toBe(entries[1].file)
     expect(mockWriteTimestamp.mock.calls[2][0]).toBe(entries[2].file)
+  })
 
-    vi.useRealTimers()
+  it('de-duplicates a repeated filename by appending a numeric suffix before the extension', async () => {
+    const entries = [makeEntry('photo.jpg'), makeEntry('photo.jpg')]
+
+    await buildPhotoZipBlob(entries)
+
+    expect(capturedZipEntries[0].name).toBe('photo.jpg')
+    expect(capturedZipEntries[1].name).toBe('photo (2).jpg')
+  })
+
+  it('falls back to new Date() for capturedAt null, used for both writeTimestamp and lastModified', async () => {
+    const entry = { ...makeEntry('photo.jpg'), capturedAt: null }
+
+    await buildPhotoZipBlob([entry])
+
+    const [, passedDate] = mockWriteTimestamp.mock.calls[0]
+    expect(passedDate).toBeInstanceOf(Date)
+    expect(capturedZipEntries[0].lastModified).toBe(passedDate)
+  })
+
+  it('sets the ZIP entry lastModified from capturedAt for a non-JPEG entry even though writeTimestamp passes bytes through unchanged', async () => {
+    const entry = makeEntry('photo.png', 'image/png')
+
+    await buildPhotoZipBlob([entry])
+
+    expect(mockWriteTimestamp).toHaveBeenCalledWith(entry.file, entry.capturedAt)
+    expect(capturedZipEntries[0].lastModified).toBe(entry.capturedAt)
+    expect(capturedZipEntries[0].input).toBe(entry.file)
+  })
+
+  it('calls onProgress once per resolved entry with an increasing done and a constant total', async () => {
+    const entries = [makeEntry('a.jpg'), makeEntry('b.jpg'), makeEntry('c.jpg')]
+    const onProgress = vi.fn()
+
+    await buildPhotoZipBlob(entries, onProgress)
+
+    expect(onProgress).toHaveBeenCalledTimes(3)
+    expect(onProgress).toHaveBeenNthCalledWith(1, 1, 3)
+    expect(onProgress).toHaveBeenNthCalledWith(2, 2, 3)
+    expect(onProgress).toHaveBeenNthCalledWith(3, 3, 3)
   })
 })
