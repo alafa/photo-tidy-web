@@ -70,16 +70,26 @@ vi.mock('@/hooks/useClusteredPhotos', () => ({
 // closure-capture way `useClusteredPhotos` is mocked above, so individual
 // tests below can control resolution/rejection and inspect exactly what
 // entries were passed.
+// `buildOrderedZipEntries`/`buildZipFilename` (Fix 5) are kept real here via
+// importOriginal -- several tests below assert on their actual behavior
+// (visual-order/KTD9 reconciliation, filename sanitization/fallback), so
+// stubbing them out would defeat those assertions. Only `buildPhotoZipBlob`/
+// `triggerDownload` are replaced, same closure-capture technique as
+// `useClusteredPhotos` above.
 const mockBuildPhotoZipBlob =
   vi.fn<(entries: PhotoEntry[], onProgress?: (done: number, total: number) => void) => Promise<Blob>>()
 const mockTriggerDownload = vi.fn<(blob: Blob, filename: string) => void>()
-vi.mock('@/lib/download', () => ({
-  buildPhotoZipBlob: (
-    entries: PhotoEntry[],
-    onProgress?: (done: number, total: number) => void
-  ) => mockBuildPhotoZipBlob(entries, onProgress),
-  triggerDownload: (blob: Blob, filename: string) => mockTriggerDownload(blob, filename),
-}))
+vi.mock('@/lib/download', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/download')>()
+  return {
+    ...actual,
+    buildPhotoZipBlob: (
+      entries: PhotoEntry[],
+      onProgress?: (done: number, total: number) => void
+    ) => mockBuildPhotoZipBlob(entries, onProgress),
+    triggerDownload: (blob: Blob, filename: string) => mockTriggerDownload(blob, filename),
+  }
+})
 
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
@@ -2234,5 +2244,59 @@ describe('PhotoUploadPage — Download all (ZIP build, U2)', () => {
       resolveBuild(new Blob(['zip']))
       await pending
     })
+  })
+
+  // P1 fix (adversarial reviewer): the button-row block (and, independently,
+  // the zipWarning banner itself) must not be hidden by the zero-photos
+  // render gate just because the last photo was deleted -- or "Clear all"
+  // was clicked -- while a build was still in flight. Without that fix, a
+  // build's rejection after photos.length has dropped to 0 would call
+  // setZipWarning into a banner that no longer renders, silently
+  // contradicting handleDownloadAll's own KTD7 "never a silent no-op"
+  // guarantee.
+  it('P1: deleting the last remaining photo (Clear all) while a ZIP build is in flight still shows the warning banner once the build rejects, even though photos.length has dropped to 0', async () => {
+    const photo = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    let currentPhotos: PhotoEntry[] = [photo]
+    const removePhotosMock = vi.fn((ids: string[]) => {
+      const idSet = new Set(ids)
+      currentPhotos = currentPhotos.filter((p) => !idSet.has(p.id))
+    })
+    mockUsePhotos.mockImplementation(() => ({
+      ...basePhotosReturn(currentPhotos),
+      removePhotos: removePhotosMock,
+    }))
+    mockUsePhotoPersistence.mockReturnValue({
+      isRestoring: false,
+      storageWarning: null,
+      clearAllPersisted: vi.fn().mockResolvedValue(undefined),
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    let capturedReject: (err: Error) => void = () => {}
+    const pending = new Promise<Blob>((_resolve, reject) => {
+      capturedReject = reject
+    })
+    mockBuildPhotoZipBlob.mockImplementation(() => pending)
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(downloadAllButton())
+    await waitFor(() => expect(mockBuildPhotoZipBlob).toHaveBeenCalledOnce())
+
+    // Delete the only photo via "Clear all" while the build is still
+    // pending -- photos.length drops to 0 before buildPhotoZipBlob's
+    // promise ever settles.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+    await waitFor(() => expect(screen.queryAllByRole('img')).toHaveLength(0))
+    expect(removePhotosMock).toHaveBeenCalledWith([photo.id])
+
+    // Now let the in-flight build reject.
+    await act(async () => {
+      capturedReject(new Error('boom'))
+      await pending.catch(() => {})
+    })
+
+    // The warning banner still renders, despite photos.length being 0.
+    expect(screen.getByText("Couldn't build the ZIP — try again.")).toBeDefined()
   })
 })

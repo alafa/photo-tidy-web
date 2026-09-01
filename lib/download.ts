@@ -83,3 +83,49 @@ export async function buildPhotoZipBlob(
   const response = downloadZip(generateZipEntries(entries, onProgress))
   return response.blob()
 }
+
+/**
+ * Builds the ordered list of ZIP entries from the TRUE visual order
+ * (`visualOrder` state), reconciled against `photosById` (KTD9): any id in
+ * `visualOrder` for a photo that's since been deleted is skipped, and any
+ * photo present in `photosById` but not yet reflected in `visualOrder` --
+ * e.g. one added while `useClusteredPhotos`' async, debounced re-cluster
+ * call is still in flight -- is appended afterward, ordered by
+ * `uploadIndex`, rather than silently dropped from the export.
+ */
+export function buildOrderedZipEntries(
+  visualOrder: string[],
+  photosById: Map<string, PhotoEntry>
+): PhotoEntry[] {
+  const included = new Set<string>()
+  const ordered: PhotoEntry[] = []
+  for (const id of visualOrder) {
+    const entry = photosById.get(id)
+    if (!entry) continue
+    included.add(id)
+    ordered.push(entry)
+  }
+  const missing = Array.from(photosById.values())
+    .filter((p) => !included.has(p.id))
+    .sort((a, b) => a.uploadIndex - b.uploadIndex)
+  return [...ordered, ...missing]
+}
+
+/** Replaces filesystem-unsafe characters with `-` (KTD3). */
+export function sanitizeZipFilenameBase(name: string): string {
+  return name.replace(/[/\\:*?"<>|]/g, '-')
+}
+
+/**
+ * Derives the ZIP filename from the trimmed, sanitized `albumName`, falling
+ * back to `photo-tidy-export-<YYYY-MM-DD>.zip` when it's empty or
+ * whitespace-only (KTD3).
+ */
+export function buildZipFilename(albumName: string): string {
+  const trimmed = albumName.trim()
+  if (trimmed === '') {
+    const today = new Date().toISOString().slice(0, 10)
+    return `photo-tidy-export-${today}.zip`
+  }
+  return `${sanitizeZipFilenameBase(trimmed)}.zip`
+}

@@ -12,7 +12,6 @@ import {
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
 import { arrayMove } from '@dnd-kit/sortable'
 import { usePhotos } from '@/hooks/usePhotos'
-import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
@@ -24,7 +23,12 @@ import PhotoLightbox from './PhotoLightbox'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
-import { buildPhotoZipBlob, triggerDownload } from '@/lib/download'
+import {
+  buildPhotoZipBlob,
+  buildOrderedZipEntries,
+  buildZipFilename,
+  triggerDownload,
+} from '@/lib/download'
 
 /**
  * Computes the new timestamp for a photo dropped between `prevCapturedAt`
@@ -57,52 +61,6 @@ function computeDroppedTimestamp(
   }
   // Only photo, or all neighbours have null timestamps — keep as-is
   return currentCapturedAt
-}
-
-/**
- * Builds the ordered list of ZIP entries from the TRUE visual order
- * (`visualOrder` state), reconciled against `photosById` (KTD9): any id in
- * `visualOrder` for a photo that's since been deleted is skipped, and any
- * photo present in `photosById` but not yet reflected in `visualOrder` --
- * e.g. one added while `useClusteredPhotos`' async, debounced re-cluster
- * call is still in flight -- is appended afterward, ordered by
- * `uploadIndex`, rather than silently dropped from the export.
- */
-function buildOrderedZipEntries(
-  visualOrder: string[],
-  photosById: Map<string, PhotoEntry>
-): PhotoEntry[] {
-  const included = new Set<string>()
-  const ordered: PhotoEntry[] = []
-  for (const id of visualOrder) {
-    const entry = photosById.get(id)
-    if (!entry) continue
-    included.add(id)
-    ordered.push(entry)
-  }
-  const missing = Array.from(photosById.values())
-    .filter((p) => !included.has(p.id))
-    .sort((a, b) => a.uploadIndex - b.uploadIndex)
-  return [...ordered, ...missing]
-}
-
-/** Replaces filesystem-unsafe characters with `-` (KTD3). */
-function sanitizeZipFilenameBase(name: string): string {
-  return name.replace(/[/\\:*?"<>|]/g, '-')
-}
-
-/**
- * Derives the ZIP filename from the trimmed, sanitized `albumName`, falling
- * back to `photo-tidy-export-<YYYY-MM-DD>.zip` when it's empty or
- * whitespace-only (KTD3).
- */
-function buildZipFilename(albumName: string): string {
-  const trimmed = albumName.trim()
-  if (trimmed === '') {
-    const today = new Date().toISOString().slice(0, 10)
-    return `photo-tidy-export-${today}.zip`
-  }
-  return `${sanitizeZipFilenameBase(trimmed)}.zip`
 }
 
 export default function PhotoUploadPage() {
@@ -417,7 +375,8 @@ export default function PhotoUploadPage() {
     try {
       const blob = await buildPhotoZipBlob(entries, (done) => setZipDoneCount(done))
       triggerDownload(blob, buildZipFilename(albumName))
-    } catch {
+    } catch (err) {
+      console.error('ZIP build failed', err)
       setZipWarning("Couldn't build the ZIP — try again.")
     } finally {
       setIsGeneratingZip(false)
@@ -637,41 +596,51 @@ export default function PhotoUploadPage() {
                 )}
               </DragOverlay>
             </DndContext>
-
-            <div className="mt-6 flex items-center justify-end gap-3">
-              {isGeneratingZip && (
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Zipping {zipDoneCount} of {zipTotal}…
-                </span>
-              )}
-              <button
-                onClick={handleClearAll}
-                disabled={isRestoring}
-                className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Clear all
-              </button>
-              <button
-                onClick={handleDownloadAll}
-                disabled={isRestoring || isGeneratingZip}
-                className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Download all
-              </button>
-            </div>
-
-            {zipWarning && (
-              <div className="bg-red-50 border border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
-                <span>{zipWarning}</span>
-                <button
-                  onClick={() => setZipWarning(null)}
-                  className="text-xs underline shrink-0"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
           </>
+        )}
+
+        {/* Kept mounted whenever a ZIP build is in flight or a warning is
+            pending, even if `photos` has just dropped to zero (e.g. the last
+            photo was deleted, or "Clear all" was clicked, while a build was
+            still running) -- otherwise a build's rejection after the fact
+            would call setZipWarning into an unmounted banner and the
+            failure would be silently invisible, contradicting handleDownloadAll's
+            own KTD7 guarantee ("never an uncaught rejection or a silent
+            no-op"). */}
+        {(photos.length > 0 || isGeneratingZip || zipWarning) && (
+          <div className="mt-6 flex items-center justify-end gap-3">
+            {isGeneratingZip && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Zipping {zipDoneCount} of {zipTotal}…
+              </span>
+            )}
+            <button
+              onClick={handleClearAll}
+              disabled={isRestoring}
+              className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Clear all
+            </button>
+            <button
+              onClick={handleDownloadAll}
+              disabled={isRestoring || isGeneratingZip}
+              className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-700 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Download all
+            </button>
+          </div>
+        )}
+
+        {zipWarning && (
+          <div className="bg-red-50 border border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
+            <span>{zipWarning}</span>
+            <button
+              onClick={() => setZipWarning(null)}
+              className="text-xs underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
         )}
       </div>
 
