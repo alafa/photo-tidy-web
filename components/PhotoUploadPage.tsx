@@ -300,31 +300,40 @@ export default function PhotoUploadPage() {
   // R1: entering copy mode from a card's own copy-timestamp button
   // (rendered by `PhotoCard`/`PhotoGrid` only when that card is the sole
   // selected photo with a non-null `capturedAt` -- see `PhotoGrid.tsx`'s
-  // `isSoleSelected` derivation). This handler trusts that render-time gate
-  // rather than re-deriving it here.
+  // `isSoleSelected` derivation). Toggles off when clicked again on the
+  // photo that's already the copy source, so the clipboard icon doubles as
+  // an entry/exit control and Esc isn't the only way out of copy mode.
   function handleCopyTimestamp(id: string) {
-    setCopySourceId(id)
+    setCopySourceId((prev) => (prev === id ? null : id))
   }
 
-  // Esc-to-exit-copy-mode (R3), scoped narrowly to only attach while copy
-  // mode is actually active so it can never interfere with any other
-  // keyboard handling in the app when inactive. `PhotoCard.tsx`'s own
-  // Escape handlers (name-edit and timestamp-edit inputs) call
-  // `stopPropagation` alongside `preventDefault`, so a card's own
-  // in-progress inline edit never lets its Escape keypress bubble up to
-  // this document-level listener in the first place -- no need to defer to
-  // an edit-in-progress registry here.
+  // Esc resolves the "deepest" active state first, one state per keypress:
+  // exit copy mode if it's active (R3); otherwise, if nothing is left to
+  // exit, clear the selection instead. A second Esc after the first closed
+  // copy mode naturally falls into the clear-selection branch, since
+  // `isCopyModeActive` is false by the time that keypress is handled.
+  // Scoped narrowly to only attach while there's actually something to
+  // clear, so it can never interfere with any other keyboard handling when
+  // both are already empty. `PhotoCard.tsx`'s own Escape handlers (name-edit
+  // and timestamp-edit inputs) call `stopPropagation` alongside
+  // `preventDefault`, so a card's own in-progress inline edit never lets its
+  // Escape keypress bubble up to this document-level listener in the first
+  // place -- no need to defer to an edit-in-progress registry here.
   useEffect(() => {
-    if (!isCopyModeActive) return
+    if (!isCopyModeActive && selectedIds.size === 0) return
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Escape') return
-      setCopySourceId(null)
+      if (isCopyModeActive) {
+        setCopySourceId(null)
+      } else {
+        setSelectedIds(new Set())
+      }
     }
 
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [isCopyModeActive])
+  }, [isCopyModeActive, selectedIds])
 
   // Wired into `PhotoGrid`'s `onPaste`/`onPasteToCluster` props (U4, KTD7)
   // below. Each is a thin wrapper over `setPhotosTimestamp` (U1) using the

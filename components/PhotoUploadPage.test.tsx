@@ -2448,6 +2448,95 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
     expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
   })
 
+  it('clicking the copy-timestamp icon again on the source photo toggles copy mode off', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    // a.jpg is still the sole selection (selecting doesn't touch copy mode,
+    // KTD1), so its copy-timestamp button is still rendered -- click it
+    // again instead of Esc/Done.
+    fireEvent.click(screen.getByRole('button', { name: 'Copy timestamp' }))
+
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+  })
+
+  it('clicking the copy-timestamp icon on a different sole-selected photo retargets copy mode instead of toggling it off', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    let banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+
+    // Switch the selection to b.jpg alone, then click ITS copy-timestamp
+    // button -- this retargets the source rather than toggling off, since
+    // b.jpg (not a.jpg) is the one being clicked.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy timestamp' }))
+
+    banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('b.jpg')
+  })
+
+  it('double-Esc: first Esc exits copy mode, second Esc (now that copy mode is gone) clears the selection', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    // First Esc: exits copy mode, selection untouched.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+
+    // Second Esc: copy mode is already gone, so this one clears the
+    // selection instead.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByText(/photos? selected/)).toBeNull()
+  })
+
+  it('Esc clears the selection directly when copy mode was never entered', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(screen.queryByText(/photos? selected/)).toBeNull()
+  })
+
+  it('Esc does nothing when neither copy mode nor a selection is active', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+
+    render(<PhotoUploadPage />)
+
+    // Should not throw, and nothing observable changes.
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(screen.queryByText(/photos? selected/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+  })
+
   it('R4: deleting the source photo while copy mode is active ends copy mode automatically, with no separate cleanup call', () => {
     const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
     const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
