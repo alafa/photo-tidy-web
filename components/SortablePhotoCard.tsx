@@ -24,6 +24,8 @@ type Props = {
   isCopySource?: boolean
   isCopyModeActive?: boolean
   onPaste?: () => void
+  isSoleSelected?: boolean
+  onCopyTimestamp?: () => void
 }
 
 export default function SortablePhotoCard({
@@ -39,6 +41,8 @@ export default function SortablePhotoCard({
   isCopySource,
   isCopyModeActive,
   onPaste,
+  isSoleSelected,
+  onCopyTimestamp,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -64,6 +68,8 @@ export default function SortablePhotoCard({
         isCopySource={isCopySource}
         isCopyModeActive={isCopyModeActive}
         onPaste={onPaste}
+        isSoleSelected={isSoleSelected}
+        onCopyTimestamp={onCopyTimestamp}
       />
     </div>
   )

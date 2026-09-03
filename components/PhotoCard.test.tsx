@@ -474,6 +474,94 @@ describe('PhotoCard — pasting mid-inline-timestamp-edit cancels the edit inste
   })
 })
 
+// Copy-timestamp overlay button: relocated from a page-level control into
+// PhotoCard's own overlay (bottom-center, between zoom/paste and delete).
+// `isSoleSelected` is derived by the caller (PhotoGrid) from
+// `selectedIds.size === 1 && selectedIds.has(id)` -- PhotoCard itself has no
+// visibility into the rest of the selection, so these tests exercise the
+// prop directly rather than a real multi-photo selection.
+describe('copy-timestamp overlay button', () => {
+  it('renders when isSoleSelected is true and the photo has a non-null capturedAt', () => {
+    const entry = makeEntry({ capturedAt: new Date('2025-01-01T00:00:00Z') })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" isSoleSelected />)
+
+    expect(screen.getByRole('button', { name: 'Copy timestamp' })).toBeDefined()
+  })
+
+  it('does not render when isSoleSelected is false/omitted', () => {
+    const entry = makeEntry({ capturedAt: new Date('2025-01-01T00:00:00Z') })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+  })
+
+  it('does not render when isSoleSelected is true but capturedAt is null -- nothing to copy', () => {
+    const entry = makeEntry({ capturedAt: null })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" isSoleSelected />)
+
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+  })
+
+  it('clicking it calls onCopyTimestamp with stopPropagation (no drag-start, no selection toggle)', () => {
+    const onCopyTimestamp = vi.fn()
+    const onSelect = vi.fn()
+    const entry = makeEntry({ capturedAt: new Date('2025-01-01T00:00:00Z') })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        isSoleSelected
+        onCopyTimestamp={onCopyTimestamp}
+        onSelect={onSelect}
+        checked
+      />
+    )
+
+    const copyButton = screen.getByRole('button', { name: 'Copy timestamp' })
+
+    const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+    const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+    fireEvent(copyButton, pointerDownEvent)
+    expect(pointerDownSpy).toHaveBeenCalled()
+
+    const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+    const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+    fireEvent(copyButton, clickEvent)
+    expect(clickSpy).toHaveBeenCalled()
+
+    expect(onCopyTimestamp).toHaveBeenCalledTimes(1)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('renders alongside the zoom and delete buttons rather than replacing either', () => {
+    const entry = makeEntry({ capturedAt: new Date('2025-01-01T00:00:00Z') })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" isSoleSelected onZoom={vi.fn()} onDelete={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: 'Copy timestamp' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Zoom photo' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Delete photo' })).toBeDefined()
+  })
+
+  it('is independent of copy mode itself -- still renders on the sole-selected card even while a DIFFERENT card is the active copy source', () => {
+    const entry = makeEntry({ capturedAt: new Date('2025-01-01T00:00:00Z') })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        isSoleSelected
+        isCopyModeActive
+        isCopySource={false}
+        onPaste={vi.fn()}
+      />
+    )
+
+    // Non-source card while copy mode is active shows Paste (KTD4) in the
+    // left slot, AND still shows Copy timestamp in the center slot.
+    expect(screen.getByRole('button', { name: 'Paste timestamp' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Copy timestamp' })).toBeDefined()
+  })
+})
+
 // A `describe('PhotoGrid', ...)` block used to live here, exercising
 // PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
 // only, no `metrics`). PhotoGrid's contract changed when clustering/debug

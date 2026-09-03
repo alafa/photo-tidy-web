@@ -23,7 +23,6 @@ import PhotoLightbox from './PhotoLightbox'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
-import { CopyIcon } from './icons'
 import { formatDate } from '@/lib/datetime-local'
 import {
   buildPhotoZipBlob,
@@ -298,18 +297,13 @@ export default function PhotoUploadPage() {
     batchSetTimestamps(Array.from(selectedIds), anchor)
   }
 
-  // R1: "Copy timestamp" is offered only when exactly one photo is selected
-  // and that photo has a non-null capturedAt to copy. Recomputed on every
-  // render like `distinctSelectedTimestamps` below, for the same reason
-  // (this app's photo counts don't warrant memoizing selection-derived
-  // values).
-  const singleSelectedId = selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined
-  const singleSelectedEntry = singleSelectedId ? photosById.get(singleSelectedId) : undefined
-  const canEnterCopyMode = singleSelectedEntry != null && singleSelectedEntry.capturedAt != null
-
-  function handleEnterCopyMode() {
-    if (!canEnterCopyMode || !singleSelectedEntry) return
-    setCopySourceId(singleSelectedEntry.id)
+  // R1: entering copy mode from a card's own copy-timestamp button
+  // (rendered by `PhotoCard`/`PhotoGrid` only when that card is the sole
+  // selected photo with a non-null `capturedAt` -- see `PhotoGrid.tsx`'s
+  // `isSoleSelected` derivation). This handler trusts that render-time gate
+  // rather than re-deriving it here.
+  function handleCopyTimestamp(id: string) {
+    setCopySourceId(id)
   }
 
   // Esc-to-exit-copy-mode (R3), scoped narrowly to only attach while copy
@@ -600,18 +594,6 @@ export default function PhotoUploadPage() {
                   Clear selection
                 </button>
               )}
-              {/* R1/KTD2: page-level control gated on exactly one selected
-                  photo with a non-null timestamp, coexisting with
-                  BatchEditPanel below rather than suppressing/replacing it. */}
-              {canEnterCopyMode && (
-                <button
-                  onClick={handleEnterCopyMode}
-                  className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
-                >
-                  <CopyIcon className="w-3.5 h-3.5" />
-                  Copy timestamp
-                </button>
-              )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
@@ -694,6 +676,7 @@ export default function PhotoUploadPage() {
                 copySourceId={copySourceId}
                 onPaste={handlePaste}
                 onPasteToCluster={handlePasteToCluster}
+                onCopyTimestamp={handleCopyTimestamp}
               />
               <DragOverlay>
                 {activeEntry && (

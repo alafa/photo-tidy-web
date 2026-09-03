@@ -2,16 +2,16 @@ import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useTimestampEdit } from '@/hooks/useTimestampEdit'
 import { formatDate } from '@/lib/datetime-local'
-import { TrashIcon, PasteIcon } from './icons'
+import { TrashIcon, PasteIcon, CopyIcon } from './icons'
 
 /**
- * Shared chrome for the delete/zoom overlay buttons: absolutely positioned
- * in a bottom corner, sized via padding (not the glyph) so the tappable
- * region is a ~44x44px minimum around a visually compact icon.
- * stopPropagation on both pointerdown and click keeps the button isolated
- * from the image wrapper's own handlers -- pointerdown so dnd-kit's
- * PointerSensor never starts a drag from the icon, click so it never
- * toggles the card's selection state.
+ * Shared chrome for the delete/zoom/copy overlay buttons: absolutely
+ * positioned along the bottom edge (a corner, or centered between the two
+ * corners), sized via padding (not the glyph) so the tappable region is a
+ * ~44x44px minimum around a visually compact icon. stopPropagation on both
+ * pointerdown and click keeps the button isolated from the image wrapper's
+ * own handlers -- pointerdown so dnd-kit's PointerSensor never starts a drag
+ * from the icon, click so it never toggles the card's selection state.
  */
 function CardOverlayButton({
   position,
@@ -20,12 +20,14 @@ function CardOverlayButton({
   onActivate,
   children,
 }: {
-  position: 'left' | 'right'
+  position: 'left' | 'center' | 'right'
   ariaLabel: string
   colorClassName: string
   onActivate?: () => void
   children: React.ReactNode
 }) {
+  const positionClassName =
+    position === 'right' ? 'right-0' : position === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
   return (
     <button
       type="button"
@@ -35,7 +37,7 @@ function CardOverlayButton({
         e.stopPropagation()
         onActivate?.()
       }}
-      className={`absolute bottom-0 ${position === 'right' ? 'right-0' : 'left-0'} p-3 flex items-center justify-center ${colorClassName}`}
+      className={`absolute bottom-0 ${positionClassName} p-3 flex items-center justify-center ${colorClassName}`}
     >
       {children}
     </button>
@@ -84,6 +86,21 @@ type Props = {
    * itself, which never renders a paste button on itself.
    */
   onPaste?: () => void
+  /**
+   * Whether this card is the ONLY currently-selected photo (caller derives
+   * this from `selectedIds.size === 1 && selectedIds.has(id)` -- `PhotoCard`
+   * has no visibility into the rest of the selection). Combined with a
+   * non-null `capturedAt` below, this gates the copy-timestamp overlay
+   * button (R1): copying only makes sense from exactly one selected photo
+   * that actually has a timestamp to copy.
+   */
+  isSoleSelected?: boolean
+  /**
+   * Pre-bound by the caller (mirrors `onDelete`/`onZoom`'s zero-arg,
+   * caller-binds-the-id convention) -- fires when this card's copy-timestamp
+   * button is clicked, entering copy mode with this photo as the source.
+   */
+  onCopyTimestamp?: () => void
 }
 
 export default function PhotoCard({
@@ -98,6 +115,8 @@ export default function PhotoCard({
   isCopySource,
   isCopyModeActive,
   onPaste,
+  isSoleSelected,
+  onCopyTimestamp,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -255,6 +274,21 @@ export default function PhotoCard({
               <circle cx="5" cy="5" r="3.5" />
               <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
             </svg>
+          </CardOverlayButton>
+        )}
+        {/* Copy-timestamp overlay -- bottom-center, between zoom/paste
+            (bottom-left) and delete (bottom-right). Shown only when this
+            card is the sole selected photo and has a timestamp to copy
+            (R1); independent of copy mode itself, so it stays available
+            even while a DIFFERENT card is already the active copy source. */}
+        {isSoleSelected && capturedAt != null && (
+          <CardOverlayButton
+            position="center"
+            ariaLabel="Copy timestamp"
+            colorClassName="text-blue-300 hover:text-blue-100"
+            onActivate={onCopyTimestamp}
+          >
+            <CopyIcon className="w-5 h-5" />
           </CardOverlayButton>
         )}
       </div>

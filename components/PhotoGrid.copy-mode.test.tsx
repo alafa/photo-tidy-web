@@ -229,4 +229,43 @@ describe('PhotoGrid — U4: copy-mode prop threading and paste-to-cluster', () =
     fireEvent.click(within(cCard).getByRole('button', { name: 'Paste timestamp' }))
     expect(onPaste).toHaveBeenCalledWith(c.id)
   })
+
+  it('threads isSoleSelected/onCopyTimestamp correctly: only the sole-selected card shows the copy-timestamp button, and clicking it calls onCopyTimestamp with that card\'s id', () => {
+    const onCopyTimestamp = vi.fn()
+
+    // Nobody selected: no card shows the copy-timestamp button.
+    const { rerender } = render(
+      <PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onCopyTimestamp={onCopyTimestamp} />
+    )
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+
+    // Two selected: still hidden everywhere.
+    rerender(
+      <PhotoGrid
+        photos={photos}
+        getObjectUrl={getObjectUrl}
+        selectedIds={new Set([a.id, b.id])}
+        onCopyTimestamp={onCopyTimestamp}
+      />
+    )
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+
+    // Exactly one selected: only that card's button renders.
+    rerender(
+      <PhotoGrid
+        photos={photos}
+        getObjectUrl={getObjectUrl}
+        selectedIds={new Set([b.id])}
+        onCopyTimestamp={onCopyTimestamp}
+      />
+    )
+    const bCard = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1') as HTMLElement
+    expect(within(bCard).getByRole('button', { name: 'Copy timestamp' })).toBeDefined()
+
+    const aCard = screen.getByAltText('a.jpg').closest('.flex.flex-col.gap-1') as HTMLElement
+    expect(within(aCard).queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+
+    fireEvent.click(within(bCard).getByRole('button', { name: 'Copy timestamp' }))
+    expect(onCopyTimestamp).toHaveBeenCalledWith(b.id)
+  })
 })

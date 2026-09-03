@@ -108,6 +108,15 @@ type Props = {
    * below for why (KTD6).
    */
   onPasteToCluster?: (ids: string[]) => void
+  /**
+   * Pre-bound by the caller with a single target id (mirrors `onDelete`/
+   * `onZoom`'s zero-arg, caller-binds-the-id convention) -- fires when a
+   * card's own copy-timestamp button (PhotoCard.tsx) is clicked. Each card
+   * derives whether to show that button from `selectedIds.size === 1 &&
+   * selectedIds.has(id)`, computed here since `PhotoCard` has no visibility
+   * into the rest of the selection.
+   */
+  onCopyTimestamp?: (id: string) => void
 }
 
 export default function PhotoGrid({
@@ -125,6 +134,7 @@ export default function PhotoGrid({
   copySourceId,
   onPaste,
   onPasteToCluster,
+  onCopyTimestamp,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
   const { renderBlocks, photosById, visualOrder, availability, isLoading } = useClusteredPhotos(
@@ -145,6 +155,8 @@ export default function PhotoGrid({
       const entry = photosById.get(id)
       if (!entry) return null
 
+      const isSoleSelected = selectedIds?.size === 1 && selectedIds.has(id)
+
       const card = onReorder ? (
         <SortablePhotoCard
           id={id}
@@ -159,6 +171,8 @@ export default function PhotoGrid({
           isCopySource={id === copySourceId}
           isCopyModeActive={isCopyModeActive}
           onPaste={onPaste ? () => onPaste(id) : undefined}
+          isSoleSelected={isSoleSelected}
+          onCopyTimestamp={onCopyTimestamp ? () => onCopyTimestamp(id) : undefined}
         />
       ) : (
         <PhotoCard
@@ -173,6 +187,8 @@ export default function PhotoGrid({
           isCopySource={id === copySourceId}
           isCopyModeActive={isCopyModeActive}
           onPaste={onPaste ? () => onPaste(id) : undefined}
+          isSoleSelected={isSoleSelected}
+          onCopyTimestamp={onCopyTimestamp ? () => onCopyTimestamp(id) : undefined}
         />
       )
 
@@ -195,6 +211,7 @@ export default function PhotoGrid({
       copySourceId,
       isCopyModeActive,
       onPaste,
+      onCopyTimestamp,
     ]
   )
 
