@@ -6,6 +6,7 @@ import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useClusteredPhotos, clusterKey, earliestCapturedAtMs, type Cluster } from '@/hooks/useClusteredPhotos'
 import PhotoCard from './PhotoCard'
 import SortablePhotoCard from './SortablePhotoCard'
+import { PasteIcon } from './icons'
 
 // Unified default: only exact duplicates (distance 0) are grouped out of
 // the box, so the grid's contents match today's flat timeline unless the
@@ -89,6 +90,34 @@ type Props = {
    * cluster isn't array-contiguous.
    */
   onVisualOrderChange?: (order: string[]) => void
+  /**
+   * Whether copy mode is active at all (U2's `isCopyModeActive`), forwarded
+   * to every rendered `PhotoCard`/`SortablePhotoCard` (KTD7) and used here to
+   * gate the per-cluster "paste to entire cluster" button.
+   */
+  isCopyModeActive?: boolean
+  /**
+   * The copy-mode source photo's id (U2's `copySourceId`), forwarded so each
+   * card can derive its own `isCopySource`, and used here to determine which
+   * cluster (if any) gets the "paste to entire cluster" button.
+   */
+  copySourceId?: string | null
+  /**
+   * Pre-bound by the caller with a single target id (mirrors `onDelete`/
+   * `onZoom`'s zero-arg, caller-binds-the-id convention) -- fires when a
+   * card's own paste button (PhotoCard.tsx, U3) is clicked.
+   */
+  onPaste?: (id: string) => void
+  /**
+   * Fires when a cluster's "paste to entire cluster" button is clicked, with
+   * every member id of that cluster EXCEPT the copy source. Membership is
+   * always sourced from `cluster.members` -- the same list the cluster
+   * `<section>` below already renders from -- never re-derived from the flat
+   * `photos` array (KTD6; see
+   * docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md
+   * for the P0 bug class this guards against).
+   */
+  onPasteToCluster?: (ids: string[]) => void
 }
 
 export default function PhotoGrid({
@@ -103,6 +132,10 @@ export default function PhotoGrid({
   onZoom,
   onEditingChange,
   onVisualOrderChange,
+  isCopyModeActive,
+  copySourceId,
+  onPaste,
+  onPasteToCluster,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
   const { renderBlocks, photosById, visualOrder, availability, isLoading } = useClusteredPhotos(
@@ -135,6 +168,9 @@ export default function PhotoGrid({
           onDelete={onDelete ? () => onDelete(id) : undefined}
           onZoom={onZoom ? () => onZoom(id) : undefined}
           onEditingChange={onEditingChange ? (isEditing) => onEditingChange(id, isEditing) : undefined}
+          isCopySource={id === copySourceId}
+          isCopyModeActive={isCopyModeActive}
+          onPaste={onPaste ? () => onPaste(id) : undefined}
         />
       ) : (
         <PhotoCard
@@ -147,6 +183,9 @@ export default function PhotoGrid({
           onDelete={onDelete ? () => onDelete(id) : undefined}
           onZoom={onZoom ? () => onZoom(id) : undefined}
           onEditingChange={onEditingChange ? (isEditing) => onEditingChange(id, isEditing) : undefined}
+          isCopySource={id === copySourceId}
+          isCopyModeActive={isCopyModeActive}
+          onPaste={onPaste ? () => onPaste(id) : undefined}
         />
       )
 
@@ -167,7 +206,44 @@ export default function PhotoGrid({
       onDelete,
       onZoom,
       onEditingChange,
+      copySourceId,
+      isCopyModeActive,
+      onPaste,
     ]
+  )
+
+  // R7/KTD6: renders "paste to entire cluster" for a given cluster, or
+  // nothing. Kept as its own memoized callback -- referenced, not inlined,
+  // from inside the `blocks` useMemo below -- mirroring `renderCard` above:
+  // that useMemo's body also contains a mutable `let singlesRun` closure, and
+  // reading component props directly inside that same lexical scope trips
+  // the React Compiler eslint plugin's immutability analysis (a false
+  // positive misattributing "cannot be modified" to prop reads near an
+  // unrelated local reassignment). Referencing a separately-scoped, already-
+  // memoized function here avoids that entirely. Membership is always
+  // sourced from `cluster.members` -- the exact same list the cluster
+  // `<section>` renders its cards from -- never re-derived from the flat
+  // `photos` array (KTD6; see
+  // docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md
+  // for the P0 bug class this guards against).
+  const renderPasteToClusterButton = useCallback(
+    (cluster: Cluster) => {
+      if (!isCopyModeActive || copySourceId == null || !cluster.members.includes(copySourceId)) {
+        return null
+      }
+      const sourceId = copySourceId
+      return (
+        <button
+          type="button"
+          onClick={() => onPasteToCluster?.(cluster.members.filter((memberId) => memberId !== sourceId))}
+          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 underline shrink-0"
+        >
+          <PasteIcon className="w-3.5 h-3.5" />
+          Paste to entire cluster
+        </button>
+      )
+    },
+    [isCopyModeActive, copySourceId, onPasteToCluster]
   )
 
   // Flattens renderBlocks into day-anchored units (see DayUnit above), then
@@ -252,9 +328,12 @@ export default function PhotoGrid({
               key={key}
               className="flex flex-col gap-3 rounded-xl border border-zinc-300 dark:border-zinc-600 bg-zinc-100/70 dark:bg-zinc-800/40 p-4"
             >
-              <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-                {cluster.members.length} related photos
-              </h2>
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                  {cluster.members.length} related photos
+                </h2>
+                {renderPasteToClusterButton(cluster)}
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                 {cluster.members.map((id) => renderCard(id))}
               </div>
@@ -274,7 +353,7 @@ export default function PhotoGrid({
           </div>
         )
       }),
-    [dayBuckets, renderCard]
+    [dayBuckets, renderCard, renderPasteToClusterButton]
   )
 
   const blocksContent = <div className="flex flex-col gap-8">{blocks}</div>

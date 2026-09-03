@@ -2506,7 +2506,7 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
     expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
   })
 
-  it('R8: no copy-mode prop or state reaches PhotoLightbox -- opening it for a different photo while copy mode is active renders it exactly as normal', () => {
+  it('R8: no copy-mode prop or state reaches PhotoLightbox -- opening it while copy mode is active renders it exactly as normal', () => {
     const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
     const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
     mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
@@ -2516,15 +2516,18 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
     enterCopyMode('a.jpg')
     expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
 
-    // Zoom a DIFFERENT photo (b.jpg) while copy mode is active.
-    const zoomButtons = screen.getAllByRole('button', { name: 'Zoom photo' })
-    fireEvent.click(zoomButtons[1])
+    // Now that copy mode is fully wired (U4), every non-source card swaps
+    // its zoom slot for a paste button (KTD4 in PhotoCard.tsx) -- the copy
+    // source itself is the only card that keeps a working "Zoom photo"
+    // button while copy mode is active, so it's the only one this test can
+    // use to open the lightbox.
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom photo' }))
 
     const closeButton = screen.getByRole('button', { name: 'Close' })
     const overlay = closeButton.parentElement as HTMLElement
     const lightboxImg = overlay.querySelector('img')
-    expect(lightboxImg?.getAttribute('alt')).toBe('b.jpg')
-    expect(lightboxImg?.getAttribute('src')).toBe('blob:b.jpg')
+    expect(lightboxImg?.getAttribute('alt')).toBe('a.jpg')
+    expect(lightboxImg?.getAttribute('src')).toBe('blob:a.jpg')
 
     // No copy-mode affordance leaks into the lightbox's own subtree.
     expect(within(overlay).queryByText(/copy/i)).toBeNull()
@@ -2554,5 +2557,51 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
       capturedOnBatchDelete?.()
     })
     expect(removePhotosMock).toHaveBeenCalledWith([a.id])
+  })
+
+  // U4: end-to-end wiring -- clicking a paste control rendered by a real
+  // PhotoCard inside the real (unmocked) PhotoGrid actually reaches
+  // `setPhotosTimestamp`, not just that the props exist on PhotoGrid in
+  // isolation (that's covered by PhotoGrid.test.tsx).
+  it('U4: clicking a card\'s paste button calls setPhotosTimestamp with that photo\'s id and the copied date', () => {
+    const a = makeEntry('a.jpg', 0, '2025-06-15T08:30:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-01T00:00:00Z')
+    const setPhotosTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      ...basePhotosReturn([a, b]),
+      setPhotosTimestamp: setPhotosTimestampMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+
+    const bCard = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1') as HTMLElement
+    fireEvent.click(within(bCard).getByRole('button', { name: 'Paste timestamp' }))
+
+    expect(setPhotosTimestampMock).toHaveBeenCalledWith([b.id], a.capturedAt)
+  })
+
+  it('U4: clicking "Paste to entire cluster" calls setPhotosTimestamp with every other cluster member\'s id and the copied date (KTD6: sourced from cluster.members)', () => {
+    const a = makeEntry('a.jpg', 0, '2025-06-15T08:30:00Z')
+    const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-02T00:00:00Z')
+    const setPhotosTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      ...basePhotosReturn([a, p1, p2]),
+      setPhotosTimestamp: setPhotosTimestampMock,
+    })
+    // a (the copy source) is itself a member of this 3-member cluster.
+    mockUseClusteredPhotos.mockImplementation((photos) =>
+      clusteredResult(photos, [[a.id, p1.id, p2.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste to entire cluster' }))
+
+    expect(setPhotosTimestampMock).toHaveBeenCalledWith([p1.id, p2.id], a.capturedAt)
   })
 })

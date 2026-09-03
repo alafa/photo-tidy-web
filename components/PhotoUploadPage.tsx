@@ -362,14 +362,10 @@ export default function PhotoUploadPage() {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isCopyModeActive])
 
-  // Prepared for U4 to wire into `PhotoGrid`/`PhotoCard`'s own paste
-  // controls (KTD7) -- `PhotoGrid` doesn't accept paste props yet, so
-  // nothing calls these two in this unit (hence the disable comments below
-  // -- deliberately unused for now, not dead code left over by mistake).
-  // Each is a thin wrapper over `setPhotosTimestamp` (U1) using the
+  // Wired into `PhotoGrid`'s `onPaste`/`onPasteToCluster` props (U4, KTD7)
+  // below. Each is a thin wrapper over `setPhotosTimestamp` (U1) using the
   // live-derived `copiedDate`, guarded against a null `copiedDate` (e.g.
   // copy mode ended between the paste control rendering and being clicked).
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- wired up by U4
   const handlePaste = useCallback(
     (id: string) => {
       if (!copiedDate) return
@@ -378,7 +374,6 @@ export default function PhotoUploadPage() {
     [copiedDate, setPhotosTimestamp]
   )
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- wired up by U4
   const handlePasteToCluster = useCallback(
     (ids: string[]) => {
       if (!copiedDate) return
@@ -732,6 +727,10 @@ export default function PhotoUploadPage() {
                 onZoom={setZoomedPhotoId}
                 onEditingChange={handleCardEditingChange}
                 onVisualOrderChange={handleVisualOrderChange}
+                isCopyModeActive={isCopyModeActive}
+                copySourceId={copySourceId}
+                onPaste={handlePaste}
+                onPasteToCluster={handlePasteToCluster}
               />
               <DragOverlay>
                 {activeEntry && (
