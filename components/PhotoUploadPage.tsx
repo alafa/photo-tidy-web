@@ -366,14 +366,6 @@ export default function PhotoUploadPage() {
   // below. Each is a thin wrapper over `setPhotosTimestamp` (U1) using the
   // live-derived `copiedDate`, guarded against a null `copiedDate` (e.g.
   // copy mode ended between the paste control rendering and being clicked).
-  const handlePaste = useCallback(
-    (id: string) => {
-      if (!copiedDate) return
-      setPhotosTimestamp([id], copiedDate)
-    },
-    [copiedDate, setPhotosTimestamp]
-  )
-
   const handlePasteToCluster = useCallback(
     (ids: string[]) => {
       if (!copiedDate) return
@@ -381,6 +373,8 @@ export default function PhotoUploadPage() {
     },
     [copiedDate, setPhotosTimestamp]
   )
+
+  const handlePaste = useCallback((id: string) => handlePasteToCluster([id]), [handlePasteToCluster])
 
   // The current selection's distinct existing capturedAt values, deduped
   // by exact millisecond value and sorted ascending — generalized to the

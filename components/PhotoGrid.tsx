@@ -111,11 +111,8 @@ type Props = {
   /**
    * Fires when a cluster's "paste to entire cluster" button is clicked, with
    * every member id of that cluster EXCEPT the copy source. Membership is
-   * always sourced from `cluster.members` -- the same list the cluster
-   * `<section>` below already renders from -- never re-derived from the flat
-   * `photos` array (KTD6; see
-   * docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md
-   * for the P0 bug class this guards against).
+   * always sourced from `cluster.members` -- see `renderPasteToClusterButton`
+   * below for why (KTD6).
    */
   onPasteToCluster?: (ids: string[]) => void
 }

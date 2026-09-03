@@ -150,14 +150,22 @@ export default function PhotoCard({
   } = useTimestampEdit(capturedAt, onTimestampChange)
 
   // Reports the combined editing state to `onEditingChange` (see its doc
-  // above) on every start/stop transition, plus once more on unmount as a
-  // safety net -- e.g. if this card is removed from the grid while an edit
-  // is still in progress -- so the caller's registry never gets stuck
-  // reporting a phantom in-progress edit for an id that no longer renders.
+  // above) on every start/stop transition. Split from the unmount safety
+  // net below into its own effect -- sharing one effect's cleanup with this
+  // dependency array would fire a spurious `(false)` on every transition
+  // (React runs the previous effect's cleanup before re-running it on a dep
+  // change), not just on actual unmount.
   useEffect(() => {
     onEditingChangeRef.current?.(isEditingName || isEditingTimestamp)
-    return () => onEditingChangeRef.current?.(false)
   }, [isEditingName, isEditingTimestamp])
+
+  // Unmount-only safety net -- e.g. if this card is removed from the grid
+  // while an edit is still in progress -- so the caller's registry never
+  // gets stuck reporting a phantom in-progress edit for an id that no
+  // longer renders.
+  useEffect(() => {
+    return () => onEditingChangeRef.current?.(false)
+  }, [])
 
   // Keep draft values in sync with external prop changes (e.g. batch operations)
   useEffect(() => {
