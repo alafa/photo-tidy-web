@@ -149,6 +149,20 @@ export function usePhotos() {
     })
   }, [])
 
+  /**
+   * Set every listed id's `capturedAt` to the identical `date` — no
+   * per-photo offset (unlike `batchSetTimestamps`, which staggers each
+   * target by `rank * 1000ms`). Used for pasting a copied timestamp onto
+   * one or more photos, where every target must land on the exact same
+   * value.
+   */
+  const setPhotosTimestamp = useCallback((ids: string[], date: Date) => {
+    const idSet = new Set(ids)
+    setPhotos((prev) =>
+      sortPhotos(renumberByPosition(prev).map((p) => (idSet.has(p.id) ? { ...p, capturedAt: date } : p)))
+    )
+  }, [])
+
   const removePhotos = useCallback((ids: string[]) => {
     const idSet = new Set(ids)
     setPhotos((prev) => prev.filter((p) => !idSet.has(p.id)))
@@ -206,6 +220,7 @@ export function usePhotos() {
     updatePhotoTimestamp,
     batchUpdateNames,
     batchSetTimestamps,
+    setPhotosTimestamp,
     removePhotos,
     hydratePhotos,
     setPhotoMediaItemId,

@@ -406,6 +406,88 @@ describe('usePhotos — reorderPhotos', () => {
   })
 })
 
+describe('usePhotos — setPhotosTimestamp', () => {
+  async function setupPhotos(files: File[], dates: (Date | null)[]) {
+    mockGetPhotoDate.mockImplementation(async (file: File) => {
+      const i = files.indexOf(file)
+      return dates[i] ?? null
+    })
+    const { result } = renderHook(() => usePhotos())
+    await act(() => result.current.processFiles(makeFileList(files)))
+    return result
+  }
+
+  it('sets the identical date on every id in the given list', async () => {
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    const t1 = new Date('2025-01-01T10:00:00Z')
+    const t2 = new Date('2025-02-01T10:00:00Z')
+    const t3 = new Date('2025-03-01T10:00:00Z')
+    const result = await setupPhotos([a, b, c], [t1, t2, t3])
+
+    const targetDate = new Date('2025-06-01T00:00:00Z')
+    const ids = [
+      result.current.photos.find((p) => p.filename === 'a.jpg')!.id,
+      result.current.photos.find((p) => p.filename === 'c.jpg')!.id,
+    ]
+
+    act(() => result.current.setPhotosTimestamp(ids, targetDate))
+
+    const aAfter = result.current.photos.find((p) => p.filename === 'a.jpg')!
+    const cAfter = result.current.photos.find((p) => p.filename === 'c.jpg')!
+    expect(aAfter.capturedAt!.getTime()).toBe(targetDate.getTime())
+    expect(cAfter.capturedAt!.getTime()).toBe(targetDate.getTime())
+  })
+
+  it('leaves ids not in the list unchanged', async () => {
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    const t1 = new Date('2025-01-01T10:00:00Z')
+    const t2 = new Date('2025-02-01T10:00:00Z')
+    const t3 = new Date('2025-03-01T10:00:00Z')
+    const result = await setupPhotos([a, b, c], [t1, t2, t3])
+
+    const aId = result.current.photos.find((p) => p.filename === 'a.jpg')!.id
+    const targetDate = new Date('2025-06-01T00:00:00Z')
+
+    act(() => result.current.setPhotosTimestamp([aId], targetDate))
+
+    const bAfter = result.current.photos.find((p) => p.filename === 'b.jpg')!
+    const cAfter = result.current.photos.find((p) => p.filename === 'c.jpg')!
+    expect(bAfter.capturedAt!.getTime()).toBe(t2.getTime())
+    expect(cAfter.capturedAt!.getTime()).toBe(t3.getTime())
+  })
+
+  it('is a no-op for an empty id list', async () => {
+    const [a, b] = [makeFile('a.jpg'), makeFile('b.jpg')]
+    const t1 = new Date('2025-01-01T10:00:00Z')
+    const t2 = new Date('2025-02-01T10:00:00Z')
+    const result = await setupPhotos([a, b], [t1, t2])
+    const before = result.current.photos
+
+    act(() => result.current.setPhotosTimestamp([], new Date('2025-06-01T00:00:00Z')))
+
+    expect(result.current.photos.map((p) => ({ id: p.id, capturedAt: p.capturedAt?.getTime() }))).toEqual(
+      before.map((p) => ({ id: p.id, capturedAt: p.capturedAt?.getTime() }))
+    )
+  })
+
+  it('re-sorts the photo list after applying the new timestamp', async () => {
+    const [a, b, c] = [makeFile('a.jpg'), makeFile('b.jpg'), makeFile('c.jpg')]
+    const t1 = new Date('2025-01-01T10:00:00Z')
+    const t2 = new Date('2025-02-01T10:00:00Z')
+    const t3 = new Date('2025-03-01T10:00:00Z')
+    const result = await setupPhotos([a, b, c], [t1, t2, t3])
+
+    // Currently ordered a, b, c. Setting 'a' to a date after c should move
+    // it to the end.
+    const aId = result.current.photos.find((p) => p.filename === 'a.jpg')!.id
+    const afterC = new Date('2025-04-01T00:00:00Z')
+
+    act(() => result.current.setPhotosTimestamp([aId], afterC))
+
+    expect(result.current.photos.map((p) => p.filename)).toEqual(['b.jpg', 'c.jpg', 'a.jpg'])
+  })
+})
+
 describe('usePhotos — removePhotos', () => {
   it('removes the selected photos and keeps the rest, preserving order', async () => {
     const files = [

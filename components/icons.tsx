@@ -37,3 +37,21 @@ export function CloseIcon({ className }: { className?: string }) {
     </svg>
   )
 }
+
+export function CopyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 4.5h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.5 7.5h-1a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v1" />
+    </svg>
+  )
+}
+
+export function PasteIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.25 2h3.5M3.5 2.5h5a.5.5 0 0 1 .5.5v7.5a.5.5 0 0 1-.5.5h-6a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.25 1.75h3.5a.5.5 0 0 1 .5.5v.5a.5.5 0 0 1-.5.5h-3.5a.5.5 0 0 1-.5-.5v-.5a.5.5 0 0 1 .5-.5Z" />
+    </svg>
+  )
+}
