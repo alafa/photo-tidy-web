@@ -62,6 +62,19 @@ type Props = {
    * is a zero-arg trigger rather than an `(id: string) => void` callback.
    */
   onZoom?: () => void
+  /**
+   * Reports whenever this card's own inline name/timestamp editing starts
+   * or stops (`isEditingName || isEditingTimestamp`). `components/PhotoUploadPage.tsx`
+   * (U2) uses this to know whether any card is mid-edit before its
+   * document-level copy-mode Escape listener decides to exit copy mode --
+   * without it, that listener would also fire (and exit copy mode) whenever
+   * this card's own Escape handling below cancels an in-progress edit, since
+   * neither `commitName`'s nor `commitTimestamp`'s Escape path calls
+   * `stopPropagation`. Mirrors `onSelect`/`onNameChange`'s "takes the new
+   * value, pre-bound with id by the caller" convention rather than
+   * `onDelete`/`onZoom`'s zero-arg one.
+   */
+  onEditingChange?: (isEditing: boolean) => void
 }
 
 export default function PhotoCard({
@@ -73,6 +86,7 @@ export default function PhotoCard({
   checked,
   onDelete,
   onZoom,
+  onEditingChange,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -81,6 +95,24 @@ export default function PhotoCard({
   const [nameValue, setNameValue] = useState(filename)
 
   const nameInputRef = useRef<HTMLInputElement>(null)
+
+  // Latest `onEditingChange` kept in a ref (synced via its own effect,
+  // never written during render -- this repo's lint config flags a
+  // during-render ref write) so the editing-state effect below can depend
+  // on only `[isEditingName, isEditingTimestamp]` -- not `onEditingChange`'s
+  // own identity, which is a fresh closure every time `PhotoGrid.renderCard`
+  // recomputes (e.g. on an unrelated `selectedIds` change; see
+  // `PhotoGrid.tsx`'s `onSelect`/`onDelete`/`onZoom` for the same
+  // non-memoized-per-id pattern). Without this indirection, that unrelated
+  // churn would re-fire the editing-state effect on renders where editing
+  // state itself never actually changed -- harmless (the registry update is
+  // idempotent) but the same needless-effect-run class of issue this
+  // codebase already guards against elsewhere (see `onNavigatePrev`/
+  // `onNavigateNext`'s `useMemo` in `PhotoUploadPage.tsx`).
+  const onEditingChangeRef = useRef(onEditingChange)
+  useEffect(() => {
+    onEditingChangeRef.current = onEditingChange
+  }, [onEditingChange])
 
   const {
     isEditing: isEditingTimestamp,
@@ -91,6 +123,16 @@ export default function PhotoCard({
     commit: commitTimestamp,
     cancel: cancelTimestamp,
   } = useTimestampEdit(capturedAt, onTimestampChange)
+
+  // Reports the combined editing state to `onEditingChange` (see its doc
+  // above) on every start/stop transition, plus once more on unmount as a
+  // safety net -- e.g. if this card is removed from the grid while an edit
+  // is still in progress -- so the caller's registry never gets stuck
+  // reporting a phantom in-progress edit for an id that no longer renders.
+  useEffect(() => {
+    onEditingChangeRef.current?.(isEditingName || isEditingTimestamp)
+    return () => onEditingChangeRef.current?.(false)
+  }, [isEditingName, isEditingTimestamp])
 
   // Keep draft values in sync with external prop changes (e.g. batch operations)
   useEffect(() => {

@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testi
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
+import { formatDate } from '@/lib/datetime-local'
 import PhotoUploadPage from './PhotoUploadPage'
 
 afterEach(cleanup)
@@ -2298,5 +2299,260 @@ describe('PhotoUploadPage — Download all (ZIP build, U2)', () => {
 
     // The warning banner still renders, despite photos.length being 0.
     expect(screen.getByText("Couldn't build the ZIP — try again.")).toBeDefined()
+  })
+})
+
+// U2: copy-mode state (`copySourceId`), the "Copy timestamp" entry control,
+// and the always-visible-while-active status banner (highlighted source,
+// copied timestamp, Esc/Done exit). `copySourceId` lives here as an
+// independent sibling of `selectedIds`/`zoomedPhotoId` (KTD1) -- these tests
+// prove that independence directly (selection changes don't touch it), and
+// that `isCopyModeActive`'s live derivation from `photosById` (rather than a
+// snapshotted Date) makes source-deletion cleanup automatic (R4) with no
+// separate invalidation call.
+describe('PhotoUploadPage — copy-mode (U2)', () => {
+  function makeEntry(name: string, index: number, capturedAt: string | null): PhotoEntry {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: capturedAt ? new Date(capturedAt) : null,
+      uploadIndex: index,
+      source: 'local',
+    }
+  }
+
+  function basePhotosReturn(photos: PhotoEntry[]) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      setPhotosTimestamp: vi.fn(),
+      removePhotos: vi.fn(),
+    }
+  }
+
+  /** Mirrors the "batch delete" describe's own helper above -- a mutable
+   * photo list so that removePhotos (driven through the real per-card
+   * delete icon) is reflected on the next render, exactly like the real
+   * hook. */
+  function makeStatefulPhotosMock(initialPhotos: PhotoEntry[]) {
+    let current = initialPhotos
+    const removePhotosMock = vi.fn((ids: string[]) => {
+      const idSet = new Set(ids)
+      current = current.filter((p) => !idSet.has(p.id))
+    })
+    mockUsePhotos.mockImplementation(() => ({ ...basePhotosReturn(current), removePhotos: removePhotosMock }))
+    return removePhotosMock
+  }
+
+  function enterCopyMode(altText: string) {
+    fireEvent.click(screen.getByAltText(altText))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy timestamp' }))
+  }
+
+  it('R1: "Copy timestamp" appears only when exactly one photo with a non-null capturedAt is selected', () => {
+    const dated = makeEntry('a.jpg', 0, '2025-01-01T10:00:00Z')
+    const undated = makeEntry('b.jpg', 1, null)
+    mockUsePhotos.mockReturnValue(basePhotosReturn([dated, undated]))
+
+    render(<PhotoUploadPage />)
+
+    // Zero selected.
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+
+    // One selected, with a timestamp: shown.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(screen.getByRole('button', { name: 'Copy timestamp' })).toBeDefined()
+
+    // Two selected: hidden again.
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+
+    // Deselect the dated one, leaving only the undated photo selected: hidden.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Copy timestamp' })).toBeNull()
+  })
+
+  it('clicking "Copy timestamp" enters copy mode and shows the banner with the source photo\'s filename and timestamp', () => {
+    const a = makeEntry('a.jpg', 0, '2025-06-15T08:30:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+
+    const doneButton = screen.getByRole('button', { name: 'Done' })
+    const banner = doneButton.parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+    expect(banner.textContent).toContain(formatDate(a.capturedAt as Date))
+  })
+
+  it("changing the selection while copy mode is active does not end copy mode -- copySourceId is untouched by selectedIds changes", () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    let banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+
+    // Select a different photo entirely (deselect a, select b) -- the
+    // banner still names a.jpg as the copy source, untouched.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+    banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+
+    // Clear the selection entirely -- copy mode still active.
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(screen.queryByText(/photos? selected/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+  })
+
+  it('pressing Escape while copy mode is active exits it', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+  })
+
+  it('clicking "Done" exits copy mode', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+  })
+
+  it('R4: deleting the source photo while copy mode is active ends copy mode automatically, with no separate cleanup call', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    makeStatefulPhotosMock([a, b])
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    // Delete a.jpg (the copy source) via its own per-card delete icon --
+    // a is chronologically first, so it's the first "Delete photo" button.
+    const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+    fireEvent.click(deleteButtons[0])
+
+    expect(screen.queryByAltText('a.jpg')).toBeNull()
+    // Copy mode ended purely from `photosById.get(copySourceId)` resolving
+    // to `undefined` on the next render (KTD1) -- nothing here explicitly
+    // clears `copySourceId`.
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
+  })
+
+  // Regression test for the code-review-caught bug: a naive "always exit
+  // copy mode on any document-level Escape" implementation would ALSO fire
+  // here, since neither PhotoCard.tsx's `commitName`/`cancelName` nor
+  // `cancelTimestamp` Escape path calls `stopPropagation` (only
+  // `preventDefault`). The fix defers to `editingIdsRef` (populated via
+  // `PhotoGrid`'s `onEditingChange` -> `PhotoCard`'s `onEditingChange`)
+  // before treating Escape as "exit copy mode", mirroring
+  // `PhotoLightbox.tsx`'s own defer-to-active-edit pattern.
+  it('Esc regression: a different card\'s in-progress inline edit wins over copy mode\'s own Escape handling', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    // Start an inline rename edit on b.jpg -- a DIFFERENT card from the
+    // copy source.
+    fireEvent.click(screen.getByText('b.jpg'))
+    const nameInput = screen.getByDisplayValue('b.jpg') as HTMLInputElement
+    fireEvent.change(nameInput, { target: { value: 'renamed.jpg' } })
+
+    // Escape cancels the rename (PhotoCard's own handling) but must NOT
+    // also exit copy mode.
+    fireEvent.keyDown(nameInput, { key: 'Escape' })
+
+    // The rename was cancelled: draft discarded, back to the display <p>.
+    expect(screen.queryByDisplayValue('renamed.jpg')).toBeNull()
+    expect(screen.getByText('b.jpg')).toBeDefined()
+
+    // Copy mode is still active -- the actual regression assertion.
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+  })
+
+  it('R8: no copy-mode prop or state reaches PhotoLightbox -- opening it for a different photo while copy mode is active renders it exactly as normal', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a, b]))
+
+    render(<PhotoUploadPage />)
+
+    enterCopyMode('a.jpg')
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    // Zoom a DIFFERENT photo (b.jpg) while copy mode is active.
+    const zoomButtons = screen.getAllByRole('button', { name: 'Zoom photo' })
+    fireEvent.click(zoomButtons[1])
+
+    const closeButton = screen.getByRole('button', { name: 'Close' })
+    const overlay = closeButton.parentElement as HTMLElement
+    const lightboxImg = overlay.querySelector('img')
+    expect(lightboxImg?.getAttribute('alt')).toBe('b.jpg')
+    expect(lightboxImg?.getAttribute('src')).toBe('blob:b.jpg')
+
+    // No copy-mode affordance leaks into the lightbox's own subtree.
+    expect(within(overlay).queryByText(/copy/i)).toBeNull()
+    expect(within(overlay).queryByText(/paste/i)).toBeNull()
+  })
+
+  it('KTD2: BatchEditPanel still renders (count, quick-pick, working delete) unaffected by copy mode being entered', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const removePhotosMock = vi.fn()
+    mockUsePhotos.mockReturnValue({ ...basePhotosReturn([a]), removePhotos: removePhotosMock })
+
+    render(<PhotoUploadPage />)
+
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDefined()
+
+    // Entering copy mode should not touch BatchEditPanel at all.
+    fireEvent.click(screen.getByRole('button', { name: 'Copy timestamp' }))
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDefined()
+
+    expect(screen.getByText('1 photo selected')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDefined()
+
+    // Its onBatchDelete prop still works exactly as before.
+    act(() => {
+      capturedOnBatchDelete?.()
+    })
+    expect(removePhotosMock).toHaveBeenCalledWith([a.id])
   })
 })

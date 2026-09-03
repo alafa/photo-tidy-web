@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DndContext,
   DragOverlay,
@@ -23,6 +23,8 @@ import PhotoLightbox from './PhotoLightbox'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
+import { CopyIcon } from './icons'
+import { formatDate } from '@/lib/datetime-local'
 import {
   buildPhotoZipBlob,
   buildOrderedZipEntries,
@@ -73,6 +75,7 @@ export default function PhotoUploadPage() {
     updatePhotoTimestamp,
     batchUpdateNames,
     batchSetTimestamps,
+    setPhotosTimestamp,
     removePhotos,
     hydratePhotos,
     setPhotoMediaItemId,
@@ -104,6 +107,26 @@ export default function PhotoUploadPage() {
   // still has focus at the moment this state update causes the lightbox to
   // mount.
   const [zoomedPhotoId, setZoomedPhotoId] = useState<string | null>(null)
+
+  // Copy-mode source id (U2, R2) -- an independent sibling of `selectedIds`
+  // and `zoomedPhotoId` (KTD1), never derived from or coupled to the
+  // selection. The copied timestamp itself is deliberately NOT snapshotted
+  // here or anywhere else; `copiedEntry`/`isCopyModeActive` below re-derive
+  // it live from `photosById` on every render instead (see their doc).
+  const [copySourceId, setCopySourceId] = useState<string | null>(null)
+
+  // Registry of ids currently mid-inline-edit (rename or timestamp) on their
+  // own PhotoCard, kept as a ref (not state) since nothing here needs a
+  // re-render when it changes -- it's read once, synchronously, from inside
+  // the copy-mode Escape handler below. Populated by `handleCardEditingChange`,
+  // wired to `PhotoGrid`'s `onEditingChange` (see that prop's doc) via
+  // `PhotoCard.tsx`'s `onEditingChange`. This is the "lifted signal" the
+  // copy-mode Escape handler needs to defer to an active inline edit instead
+  // of unconditionally exiting copy mode -- mirroring PhotoLightbox.tsx's own
+  // defer-to-active-edit Escape pattern (its `isEditing` check), just lifted
+  // across components since editing here happens per-card rather than in one
+  // local state variable.
+  const editingIdsRef = useRef<Set<string>>(new Set())
 
   // ZIP-build state (U2). Snapshotted once per click (KTD10) -- edits made
   // to photos after a build starts do not affect the in-flight build, and
@@ -153,6 +176,20 @@ export default function PhotoUploadPage() {
   }, [])
 
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
+
+  // Live-derived, never snapshotted (KTD1): recomputed from `photosById`
+  // fresh every render, so if the source photo is deleted while copy mode is
+  // active, `photosById.get` naturally returns `undefined` on the very next
+  // render and `isCopyModeActive` goes false with no separate cleanup path
+  // (R4). `copiedEntry.capturedAt` is still checked defensively at the
+  // render site below (rather than folded into `isCopyModeActive` itself)
+  // in case it's ever cleared to null via an unrelated inline edit while
+  // copy mode is active -- copy mode still counts as "active" per this
+  // derivation (the source photo still exists), it just has nothing to
+  // paste until re-entered.
+  const copiedEntry = copySourceId ? photosById.get(copySourceId) ?? null : null
+  const isCopyModeActive = copiedEntry != null
+  const copiedDate = copiedEntry?.capturedAt ?? null
 
   // Resolves the currently-zoomed photo (if any) the same way the rest of
   // this component looks up a photo's object URL -- via getObjectUrl
@@ -273,6 +310,82 @@ export default function PhotoUploadPage() {
   function handleBatchSetTimestamp(anchor: Date) {
     batchSetTimestamps(Array.from(selectedIds), anchor)
   }
+
+  // R1: "Copy timestamp" is offered only when exactly one photo is selected
+  // and that photo has a non-null capturedAt to copy. Recomputed on every
+  // render like `distinctSelectedTimestamps` below, for the same reason
+  // (this app's photo counts don't warrant memoizing selection-derived
+  // values).
+  const singleSelectedId = selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined
+  const singleSelectedEntry = singleSelectedId ? photosById.get(singleSelectedId) : undefined
+  const canEnterCopyMode = singleSelectedEntry != null && singleSelectedEntry.capturedAt != null
+
+  function handleEnterCopyMode() {
+    if (!canEnterCopyMode || !singleSelectedEntry) return
+    setCopySourceId(singleSelectedEntry.id)
+  }
+
+  // Reports whenever a card starts or stops an inline rename/timestamp edit
+  // -- wired to `PhotoGrid`'s `onEditingChange` (see that prop's doc).
+  // Stable identity (empty dep array) since it only ever mutates the ref,
+  // matching `handleVisualOrderChange`'s reasoning above for why a stable
+  // callback matters when it flows into `PhotoGrid`'s own memoized
+  // `renderCard`.
+  const handleCardEditingChange = useCallback((id: string, isEditing: boolean) => {
+    if (isEditing) editingIdsRef.current.add(id)
+    else editingIdsRef.current.delete(id)
+  }, [])
+
+  // Esc-to-exit-copy-mode (R3), scoped narrowly to only attach while copy
+  // mode is actually active so it can never interfere with any other
+  // keyboard handling in the app when inactive. Before treating Escape as
+  // "exit copy mode," defers to any card currently mid-inline-edit (via
+  // `editingIdsRef`, populated by `handleCardEditingChange` above) --
+  // mirroring `PhotoLightbox.tsx`'s own document-level keydown handler,
+  // which checks its local `isEditing` state before treating Escape as
+  // "close the lightbox," letting the active edit's own Escape handling win
+  // instead. Without this check, this listener would ALSO fire (and exit
+  // copy mode) whenever the user presses Escape to cancel an in-progress
+  // inline edit on any card, since neither `PhotoCard.tsx`'s `commitName`
+  // nor `commitTimestamp` Escape path calls `stopPropagation` -- only
+  // `preventDefault`.
+  useEffect(() => {
+    if (!isCopyModeActive) return
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      if (editingIdsRef.current.size > 0) return
+      setCopySourceId(null)
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [isCopyModeActive])
+
+  // Prepared for U4 to wire into `PhotoGrid`/`PhotoCard`'s own paste
+  // controls (KTD7) -- `PhotoGrid` doesn't accept paste props yet, so
+  // nothing calls these two in this unit (hence the disable comments below
+  // -- deliberately unused for now, not dead code left over by mistake).
+  // Each is a thin wrapper over `setPhotosTimestamp` (U1) using the
+  // live-derived `copiedDate`, guarded against a null `copiedDate` (e.g.
+  // copy mode ended between the paste control rendering and being clicked).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- wired up by U4
+  const handlePaste = useCallback(
+    (id: string) => {
+      if (!copiedDate) return
+      setPhotosTimestamp([id], copiedDate)
+    },
+    [copiedDate, setPhotosTimestamp]
+  )
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- wired up by U4
+  const handlePasteToCluster = useCallback(
+    (ids: string[]) => {
+      if (!copiedDate) return
+      setPhotosTimestamp(ids, copiedDate)
+    },
+    [copiedDate, setPhotosTimestamp]
+  )
 
   // The current selection's distinct existing capturedAt values, deduped
   // by exact millisecond value and sorted ascending — generalized to the
@@ -528,10 +641,42 @@ export default function PhotoUploadPage() {
                   Clear selection
                 </button>
               )}
+              {/* R1/KTD2: page-level control gated on exactly one selected
+                  photo with a non-null timestamp, coexisting with
+                  BatchEditPanel below rather than suppressing/replacing it. */}
+              {canEnterCopyMode && (
+                <button
+                  onClick={handleEnterCopyMode}
+                  className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline"
+                >
+                  <CopyIcon className="w-3.5 h-3.5" />
+                  Copy timestamp
+                </button>
+              )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
             </div>
+
+            {/* Copy-mode status banner (R2/R3) -- always visible for the
+                duration of copy mode, mirroring `zipWarning`'s dismiss-button
+                layout below. `copiedEntry.capturedAt` is checked separately
+                from `isCopyModeActive` (see that derivation's doc) so this
+                never crashes formatting a null date. */}
+            {isCopyModeActive && copiedEntry && (
+              <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mb-4 flex items-center justify-between gap-3">
+                <span>
+                  Copying timestamp from <strong>{copiedEntry.filename}</strong>:{' '}
+                  {copiedEntry.capturedAt ? formatDate(copiedEntry.capturedAt) : 'No date'}
+                </span>
+                <button
+                  onClick={() => setCopySourceId(null)}
+                  className="text-xs underline shrink-0"
+                >
+                  Done
+                </button>
+              </div>
+            )}
 
             {/* Upload panel */}
             {isSignedIn && (
@@ -585,6 +730,7 @@ export default function PhotoUploadPage() {
                 onSelect={toggleSelect}
                 onDelete={handleDeletePhoto}
                 onZoom={setZoomedPhotoId}
+                onEditingChange={handleCardEditingChange}
                 onVisualOrderChange={handleVisualOrderChange}
               />
               <DragOverlay>

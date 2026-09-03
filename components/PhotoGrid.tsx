@@ -73,6 +73,13 @@ type Props = {
   onDelete?: (id: string) => void
   onZoom?: (id: string) => void
   /**
+   * Reports a card's own inline-edit start/stop (see `PhotoCard.tsx`'s
+   * `onEditingChange` doc) up to `PhotoUploadPage.tsx` (U2), which needs to
+   * know whether ANY card is mid-edit before its document-level copy-mode
+   * Escape listener decides to exit copy mode.
+   */
+  onEditingChange?: (id: string, isEditing: boolean) => void
+  /**
    * Reports the true flattened visual order (see `useClusteredPhotos`'s
    * `visualOrder`) up to the parent whenever it changes — `PhotoGrid` has no
    * other channel to expose this internally-computed state, and
@@ -94,6 +101,7 @@ export default function PhotoGrid({
   onSelect,
   onDelete,
   onZoom,
+  onEditingChange,
   onVisualOrderChange,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
@@ -126,6 +134,7 @@ export default function PhotoGrid({
           checked={selectedIds?.has(id)}
           onDelete={onDelete ? () => onDelete(id) : undefined}
           onZoom={onZoom ? () => onZoom(id) : undefined}
+          onEditingChange={onEditingChange ? (isEditing) => onEditingChange(id, isEditing) : undefined}
         />
       ) : (
         <PhotoCard
@@ -137,6 +146,7 @@ export default function PhotoGrid({
           checked={selectedIds?.has(id)}
           onDelete={onDelete ? () => onDelete(id) : undefined}
           onZoom={onZoom ? () => onZoom(id) : undefined}
+          onEditingChange={onEditingChange ? (isEditing) => onEditingChange(id, isEditing) : undefined}
         />
       )
 
@@ -156,6 +166,7 @@ export default function PhotoGrid({
       selectedIds,
       onDelete,
       onZoom,
+      onEditingChange,
     ]
   )
 

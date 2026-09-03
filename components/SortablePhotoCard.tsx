@@ -13,6 +13,7 @@ type Props = {
   checked?: boolean
   onDelete?: () => void
   onZoom?: () => void
+  onEditingChange?: (isEditing: boolean) => void
 }
 
 export default function SortablePhotoCard({
@@ -25,6 +26,7 @@ export default function SortablePhotoCard({
   checked,
   onDelete,
   onZoom,
+  onEditingChange,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -47,6 +49,7 @@ export default function SortablePhotoCard({
         checked={checked}
         onDelete={onDelete}
         onZoom={onZoom}
+        onEditingChange={onEditingChange}
       />
     </div>
   )
