@@ -63,19 +63,6 @@ type Props = {
    */
   onZoom?: () => void
   /**
-   * Reports whenever this card's own inline name/timestamp editing starts
-   * or stops (`isEditingName || isEditingTimestamp`). `components/PhotoUploadPage.tsx`
-   * (U2) uses this to know whether any card is mid-edit before its
-   * document-level copy-mode Escape listener decides to exit copy mode --
-   * without it, that listener would also fire (and exit copy mode) whenever
-   * this card's own Escape handling below cancels an in-progress edit, since
-   * neither `commitName`'s nor `commitTimestamp`'s Escape path calls
-   * `stopPropagation`. Mirrors `onSelect`/`onNameChange`'s "takes the new
-   * value, pre-bound with id by the caller" convention rather than
-   * `onDelete`/`onZoom`'s zero-arg one.
-   */
-  onEditingChange?: (isEditing: boolean) => void
-  /**
    * Whether THIS card is the copy-mode source (U2's `copySourceId`).
    * Renders a distinct highlight (R2) so the source stays visually
    * unambiguous even when it's also currently selected -- see the ring's
@@ -108,7 +95,6 @@ export default function PhotoCard({
   checked,
   onDelete,
   onZoom,
-  onEditingChange,
   isCopySource,
   isCopyModeActive,
   onPaste,
@@ -121,24 +107,6 @@ export default function PhotoCard({
 
   const nameInputRef = useRef<HTMLInputElement>(null)
 
-  // Latest `onEditingChange` kept in a ref (synced via its own effect,
-  // never written during render -- this repo's lint config flags a
-  // during-render ref write) so the editing-state effect below can depend
-  // on only `[isEditingName, isEditingTimestamp]` -- not `onEditingChange`'s
-  // own identity, which is a fresh closure every time `PhotoGrid.renderCard`
-  // recomputes (e.g. on an unrelated `selectedIds` change; see
-  // `PhotoGrid.tsx`'s `onSelect`/`onDelete`/`onZoom` for the same
-  // non-memoized-per-id pattern). Without this indirection, that unrelated
-  // churn would re-fire the editing-state effect on renders where editing
-  // state itself never actually changed -- harmless (the registry update is
-  // idempotent) but the same needless-effect-run class of issue this
-  // codebase already guards against elsewhere (see `onNavigatePrev`/
-  // `onNavigateNext`'s `useMemo` in `PhotoUploadPage.tsx`).
-  const onEditingChangeRef = useRef(onEditingChange)
-  useEffect(() => {
-    onEditingChangeRef.current = onEditingChange
-  }, [onEditingChange])
-
   const {
     isEditing: isEditingTimestamp,
     tsValue,
@@ -148,24 +116,6 @@ export default function PhotoCard({
     commit: commitTimestamp,
     cancel: cancelTimestamp,
   } = useTimestampEdit(capturedAt, onTimestampChange)
-
-  // Reports the combined editing state to `onEditingChange` (see its doc
-  // above) on every start/stop transition. Split from the unmount safety
-  // net below into its own effect -- sharing one effect's cleanup with this
-  // dependency array would fire a spurious `(false)` on every transition
-  // (React runs the previous effect's cleanup before re-running it on a dep
-  // change), not just on actual unmount.
-  useEffect(() => {
-    onEditingChangeRef.current?.(isEditingName || isEditingTimestamp)
-  }, [isEditingName, isEditingTimestamp])
-
-  // Unmount-only safety net -- e.g. if this card is removed from the grid
-  // while an edit is still in progress -- so the caller's registry never
-  // gets stuck reporting a phantom in-progress edit for an id that no
-  // longer renders.
-  useEffect(() => {
-    return () => onEditingChangeRef.current?.(false)
-  }, [])
 
   // Keep draft values in sync with external prop changes (e.g. batch operations)
   useEffect(() => {
@@ -215,6 +165,18 @@ export default function PhotoCard({
     // not silently discarded, when the card is deleted mid-edit.
     if (isEditingTimestamp) commitTimestamp()
     onDelete?.()
+  }
+
+  function handlePasteClick() {
+    // Mirrors handleDeleteClick's mid-edit guard above, but CANCELS rather
+    // than commits: the pasted value should win over an uncommitted manual
+    // draft. Without this, useTimestampEdit's prop-sync effect (which only
+    // refreshes its draft when `!isEditing`) leaves a stale draft in place
+    // through the paste, and committing that draft later silently
+    // overwrites the just-pasted value back to ~the pre-paste timestamp.
+    if (isEditingTimestamp) cancelTimestamp()
+    if (isEditingName) cancelName()
+    onPaste?.()
   }
 
   return (
@@ -278,7 +240,7 @@ export default function PhotoCard({
             position="left"
             ariaLabel="Paste timestamp"
             colorClassName="text-zinc-100 hover:text-white"
-            onActivate={onPaste}
+            onActivate={handlePasteClick}
           >
             <PasteIcon className="w-5 h-5" />
           </CardOverlayButton>
@@ -307,7 +269,7 @@ export default function PhotoCard({
           onBlur={commitName}
           onKeyDown={(e) => {
             if (e.key === 'Enter') { e.preventDefault(); commitName() }
-            if (e.key === 'Escape') { e.preventDefault(); cancelName() }
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelName() }
           }}
           onPointerDown={(e) => e.stopPropagation()}
           className="text-sm font-medium text-zinc-900 bg-white dark:bg-zinc-900 dark:text-zinc-50 border border-zinc-300 dark:border-zinc-600 rounded px-1 w-full"
@@ -332,7 +294,7 @@ export default function PhotoCard({
           onBlur={commitTimestamp}
           onKeyDown={(e) => {
             if (e.key === 'Enter') { e.preventDefault(); commitTimestamp() }
-            if (e.key === 'Escape') { e.preventDefault(); cancelTimestamp() }
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelTimestamp() }
           }}
           onPointerDown={(e) => e.stopPropagation()}
           className="text-xs text-zinc-500 bg-white dark:bg-zinc-900 dark:text-zinc-400 border border-zinc-300 dark:border-zinc-600 rounded px-1 w-full"

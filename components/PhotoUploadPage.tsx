@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   DndContext,
   DragOverlay,
@@ -114,19 +114,6 @@ export default function PhotoUploadPage() {
   // here or anywhere else; `copiedEntry`/`isCopyModeActive` below re-derive
   // it live from `photosById` on every render instead (see their doc).
   const [copySourceId, setCopySourceId] = useState<string | null>(null)
-
-  // Registry of ids currently mid-inline-edit (rename or timestamp) on their
-  // own PhotoCard, kept as a ref (not state) since nothing here needs a
-  // re-render when it changes -- it's read once, synchronously, from inside
-  // the copy-mode Escape handler below. Populated by `handleCardEditingChange`,
-  // wired to `PhotoGrid`'s `onEditingChange` (see that prop's doc) via
-  // `PhotoCard.tsx`'s `onEditingChange`. This is the "lifted signal" the
-  // copy-mode Escape handler needs to defer to an active inline edit instead
-  // of unconditionally exiting copy mode -- mirroring PhotoLightbox.tsx's own
-  // defer-to-active-edit Escape pattern (its `isEditing` check), just lifted
-  // across components since editing here happens per-card rather than in one
-  // local state variable.
-  const editingIdsRef = useRef<Set<string>>(new Set())
 
   // ZIP-build state (U2). Snapshotted once per click (KTD10) -- edits made
   // to photos after a build starts do not affect the in-flight build, and
@@ -325,36 +312,19 @@ export default function PhotoUploadPage() {
     setCopySourceId(singleSelectedEntry.id)
   }
 
-  // Reports whenever a card starts or stops an inline rename/timestamp edit
-  // -- wired to `PhotoGrid`'s `onEditingChange` (see that prop's doc).
-  // Stable identity (empty dep array) since it only ever mutates the ref,
-  // matching `handleVisualOrderChange`'s reasoning above for why a stable
-  // callback matters when it flows into `PhotoGrid`'s own memoized
-  // `renderCard`.
-  const handleCardEditingChange = useCallback((id: string, isEditing: boolean) => {
-    if (isEditing) editingIdsRef.current.add(id)
-    else editingIdsRef.current.delete(id)
-  }, [])
-
   // Esc-to-exit-copy-mode (R3), scoped narrowly to only attach while copy
   // mode is actually active so it can never interfere with any other
-  // keyboard handling in the app when inactive. Before treating Escape as
-  // "exit copy mode," defers to any card currently mid-inline-edit (via
-  // `editingIdsRef`, populated by `handleCardEditingChange` above) --
-  // mirroring `PhotoLightbox.tsx`'s own document-level keydown handler,
-  // which checks its local `isEditing` state before treating Escape as
-  // "close the lightbox," letting the active edit's own Escape handling win
-  // instead. Without this check, this listener would ALSO fire (and exit
-  // copy mode) whenever the user presses Escape to cancel an in-progress
-  // inline edit on any card, since neither `PhotoCard.tsx`'s `commitName`
-  // nor `commitTimestamp` Escape path calls `stopPropagation` -- only
-  // `preventDefault`.
+  // keyboard handling in the app when inactive. `PhotoCard.tsx`'s own
+  // Escape handlers (name-edit and timestamp-edit inputs) call
+  // `stopPropagation` alongside `preventDefault`, so a card's own
+  // in-progress inline edit never lets its Escape keypress bubble up to
+  // this document-level listener in the first place -- no need to defer to
+  // an edit-in-progress registry here.
   useEffect(() => {
     if (!isCopyModeActive) return
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Escape') return
-      if (editingIdsRef.current.size > 0) return
       setCopySourceId(null)
     }
 
@@ -719,7 +689,6 @@ export default function PhotoUploadPage() {
                 onSelect={toggleSelect}
                 onDelete={handleDeletePhoto}
                 onZoom={setZoomedPhotoId}
-                onEditingChange={handleCardEditingChange}
                 onVisualOrderChange={handleVisualOrderChange}
                 isCopyModeActive={isCopyModeActive}
                 copySourceId={copySourceId}

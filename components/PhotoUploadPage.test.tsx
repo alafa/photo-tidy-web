@@ -2472,12 +2472,10 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
 
   // Regression test for the code-review-caught bug: a naive "always exit
   // copy mode on any document-level Escape" implementation would ALSO fire
-  // here, since neither PhotoCard.tsx's `commitName`/`cancelName` nor
-  // `cancelTimestamp` Escape path calls `stopPropagation` (only
-  // `preventDefault`). The fix defers to `editingIdsRef` (populated via
-  // `PhotoGrid`'s `onEditingChange` -> `PhotoCard`'s `onEditingChange`)
-  // before treating Escape as "exit copy mode", mirroring
-  // `PhotoLightbox.tsx`'s own defer-to-active-edit pattern.
+  // here if PhotoCard.tsx's `cancelName`/`cancelTimestamp` Escape path only
+  // called `preventDefault`. The fix has PhotoCard.tsx's Escape handlers
+  // call `stopPropagation` too, so the keydown never bubbles past the input
+  // to this component's document-level copy-mode Escape listener at all.
   it('Esc regression: a different card\'s in-progress inline edit wins over copy mode\'s own Escape handling', () => {
     const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
     const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')

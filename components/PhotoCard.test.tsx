@@ -433,6 +433,47 @@ describe('copy mode (U3)', () => {
   })
 })
 
+describe('PhotoCard — pasting mid-inline-timestamp-edit cancels the edit instead of letting it later silently overwrite the paste (Fix 5)', () => {
+  it('cancels the in-progress timestamp edit (not commits it) when the paste button is clicked, and onPaste still fires', () => {
+    const onTimestampChange = vi.fn()
+    const onPaste = vi.fn()
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        onTimestampChange={onTimestampChange}
+        isCopyModeActive
+        isCopySource={false}
+        onPaste={onPaste}
+      />
+    )
+
+    // Start an inline timestamp edit and change the draft, but never commit
+    // it (no Enter/blur) -- this card is mid-edit when the paste happens.
+    fireEvent.click(screen.getByText(/Jan 3, 2025/))
+    const input = document.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    fireEvent.change(input, { target: { value: '2025-06-15T10:00' } })
+
+    // Paste onto this same card while that edit is still in progress.
+    fireEvent.click(screen.getByRole('button', { name: 'Paste timestamp' }))
+
+    // The paste itself still fires.
+    expect(onPaste).toHaveBeenCalledTimes(1)
+
+    // The edit was CANCELLED, not committed: onTimestampChange is never
+    // called with the stale manual draft, and the card drops back out of
+    // edit mode (a committed edit would also leave edit mode, so the
+    // onTimestampChange assertion is what actually distinguishes cancel
+    // from commit here).
+    expect(onTimestampChange).not.toHaveBeenCalled()
+    expect(document.querySelector('input[type="datetime-local"]')).toBeNull()
+    expect(screen.getByText(/Jan 3, 2025/)).toBeDefined()
+  })
+})
+
 // A `describe('PhotoGrid', ...)` block used to live here, exercising
 // PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
 // only, no `metrics`). PhotoGrid's contract changed when clustering/debug

@@ -13,7 +13,6 @@ type Props = {
   checked?: boolean
   onDelete?: () => void
   onZoom?: () => void
-  onEditingChange?: (isEditing: boolean) => void
   /**
    * Threaded straight through to `PhotoCard` (U3's copy-mode props) --
    * `PhotoGrid.tsx` always renders `SortablePhotoCard` when `onReorder` is
@@ -37,7 +36,6 @@ export default function SortablePhotoCard({
   checked,
   onDelete,
   onZoom,
-  onEditingChange,
   isCopySource,
   isCopyModeActive,
   onPaste,
@@ -63,7 +61,6 @@ export default function SortablePhotoCard({
         checked={checked}
         onDelete={onDelete}
         onZoom={onZoom}
-        onEditingChange={onEditingChange}
         isCopySource={isCopySource}
         isCopyModeActive={isCopyModeActive}
         onPaste={onPaste}
