@@ -305,6 +305,134 @@ describe('PhotoCard — delete commits a pending timestamp edit first (Fix 4)', 
   })
 })
 
+describe('copy mode (U3)', () => {
+  it('renders a distinct highlight (outline) when isCopySource is true', () => {
+    const entry = makeEntry()
+    const { container } = render(
+      <PhotoCard entry={entry} objectUrl="blob:test" isCopySource />
+    )
+
+    const highlighted = container.querySelector('.outline-blue-500')
+    expect(highlighted).not.toBeNull()
+  })
+
+  it('does not render the copy-source highlight when isCopySource is false/omitted', () => {
+    const entry = makeEntry()
+    const { container } = render(<PhotoCard entry={entry} objectUrl="blob:test" />)
+
+    expect(container.querySelector('.outline-blue-500')).toBeNull()
+  })
+
+  it('still shows the copy-source highlight alongside the selection ring when both isCopySource and checked are true (R2)', () => {
+    const entry = makeEntry()
+    const { container } = render(
+      <PhotoCard entry={entry} objectUrl="blob:test" isCopySource checked onSelect={vi.fn()} />
+    )
+
+    const wrapper = container.querySelector('.outline-blue-500')
+    expect(wrapper).not.toBeNull()
+    // Selection ring classes must still be present too -- "selected AND
+    // copy source" must be legible as both, not one replacing the other.
+    expect(wrapper?.className).toContain('ring-zinc-900')
+  })
+
+  it('renders a paste button (not zoom) in the bottom-left slot on a non-source card while copy mode is active, and clicking it calls onPaste with stopPropagation (KTD4)', () => {
+    const onPaste = vi.fn()
+    const onZoom = vi.fn()
+    const entry = makeEntry()
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        isCopyModeActive
+        isCopySource={false}
+        onPaste={onPaste}
+        onZoom={onZoom}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Zoom photo' })).toBeNull()
+    const pasteButton = screen.getByRole('button', { name: 'Paste timestamp' })
+
+    const pointerDownEvent = new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+    const pointerDownSpy = vi.spyOn(pointerDownEvent, 'stopPropagation')
+    fireEvent(pasteButton, pointerDownEvent)
+    expect(pointerDownSpy).toHaveBeenCalled()
+
+    const clickEvent = new window.MouseEvent('click', { bubbles: true, cancelable: true })
+    const clickSpy = vi.spyOn(clickEvent, 'stopPropagation')
+    fireEvent(pasteButton, clickEvent)
+    expect(clickSpy).toHaveBeenCalled()
+
+    expect(onPaste).toHaveBeenCalledTimes(1)
+    expect(onPaste).toHaveBeenCalledWith()
+    expect(onZoom).not.toHaveBeenCalled()
+  })
+
+  it('clicking the paste button does not toggle the card\'s checked/selection state', () => {
+    const onPaste = vi.fn()
+    const onSelect = vi.fn()
+    const entry = makeEntry()
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        isCopyModeActive
+        onPaste={onPaste}
+        onSelect={onSelect}
+        checked={false}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste timestamp' }))
+
+    expect(onPaste).toHaveBeenCalledTimes(1)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('the source card itself does not render a paste button on itself even while copy mode is active -- it keeps the zoom button in that slot', () => {
+    const onZoom = vi.fn()
+    const entry = makeEntry()
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        isCopyModeActive
+        isCopySource
+        onZoom={onZoom}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Paste timestamp' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Zoom photo' })).toBeDefined()
+  })
+
+  it('renders zoom (not paste) in that slot when isCopyModeActive is false, even if the props are omitted entirely -- no behavior change outside copy mode', () => {
+    const entry = makeEntry()
+    render(<PhotoCard entry={entry} objectUrl="blob:test" onZoom={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: 'Zoom photo' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: 'Paste timestamp' })).toBeNull()
+  })
+
+  it('the delete button remains present and clickable regardless of isCopyModeActive/isCopySource', () => {
+    const onDelete = vi.fn()
+    const entry = makeEntry()
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        onDelete={onDelete}
+        isCopyModeActive
+        isCopySource
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete photo' }))
+    expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
 // A `describe('PhotoGrid', ...)` block used to live here, exercising
 // PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
 // only, no `metrics`). PhotoGrid's contract changed when clustering/debug

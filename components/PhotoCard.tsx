@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useTimestampEdit } from '@/hooks/useTimestampEdit'
 import { formatDate } from '@/lib/datetime-local'
-import { TrashIcon } from './icons'
+import { TrashIcon, PasteIcon } from './icons'
 
 /**
  * Shared chrome for the delete/zoom overlay buttons: absolutely positioned
@@ -75,6 +75,28 @@ type Props = {
    * `onDelete`/`onZoom`'s zero-arg one.
    */
   onEditingChange?: (isEditing: boolean) => void
+  /**
+   * Whether THIS card is the copy-mode source (U2's `copySourceId`).
+   * Renders a distinct highlight (R2) so the source stays visually
+   * unambiguous even when it's also currently selected -- see the ring's
+   * own comment below for why it's an outline layered on top of, rather
+   * than replacing, the existing selection ring.
+   */
+  isCopySource?: boolean
+  /**
+   * Whether copy mode is active at all (U2's `isCopyModeActive`),
+   * independent of whether THIS card is the source. Drives KTD4: every
+   * non-source card swaps its bottom-left zoom slot for a paste button
+   * while this is true.
+   */
+  isCopyModeActive?: boolean
+  /**
+   * Pre-bound by the caller (mirrors `onDelete`/`onZoom`'s zero-arg,
+   * caller-binds-the-id convention) -- fires when this card's paste button
+   * (rendered per KTD4 below) is clicked. Not called on the source card
+   * itself, which never renders a paste button on itself.
+   */
+  onPaste?: () => void
 }
 
 export default function PhotoCard({
@@ -87,6 +109,9 @@ export default function PhotoCard({
   onDelete,
   onZoom,
   onEditingChange,
+  isCopySource,
+  isCopyModeActive,
+  onPaste,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -186,9 +211,16 @@ export default function PhotoCard({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* Image — click to toggle selection when selectable */}
+      {/* Image — click to toggle selection when selectable. The copy-source
+          highlight (isCopySource, R2) uses `outline` rather than a second
+          `ring-*` utility: Tailwind's `ring-*` classes all compile to the
+          same box-shadow custom property, so a second ring color would
+          silently clobber (not layer with) the selection ring's zinc color
+          rather than coexisting with it. `outline` is a separate CSS box
+          entirely, so "selected AND copy source" stays legible as both at
+          once, matching the copy-mode banner's own blue. */}
       <div
-        className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''}`}
+        className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''} ${isCopySource ? 'outline outline-2 outline-offset-2 outline-blue-500 dark:outline-blue-400' : ''}`}
         onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(!checked) } : undefined}
       >
         {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
@@ -223,22 +255,38 @@ export default function PhotoCard({
         >
           <TrashIcon className="w-5 h-5" />
         </CardOverlayButton>
-        {/* Zoom icon overlay — always visible, bottom-left, symmetric with
-            the delete icon's bottom-right placement. Neutral color (zinc)
-            rather than the delete icon's warning tone, so the two read as
-            visually distinct at a glance despite matching size and
-            always-visible treatment. */}
-        <CardOverlayButton
-          position="left"
-          ariaLabel="Zoom photo"
-          colorClassName="text-zinc-100 hover:text-white"
-          onActivate={onZoom}
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
-            <circle cx="5" cy="5" r="3.5" />
-            <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
-          </svg>
-        </CardOverlayButton>
+        {/* Bottom-left slot — zoom icon, or (KTD4) a paste button on every
+            non-source card while copy mode is active. All four corners of
+            the card are already visually claimed (this slot, delete's
+            bottom-right, the selection checkmark, and the origin badge), so
+            copy mode reuses this slot rather than adding a fifth. Zoom is
+            never needed mid-copy-mode: copy mode is grid-only and the
+            lightbox is unreachable while it's active regardless. The
+            source card itself is excluded (`!isCopySource`) and keeps
+            showing zoom in this slot even while copy mode is active
+            elsewhere on the grid. */}
+        {isCopyModeActive && !isCopySource ? (
+          <CardOverlayButton
+            position="left"
+            ariaLabel="Paste timestamp"
+            colorClassName="text-zinc-100 hover:text-white"
+            onActivate={onPaste}
+          >
+            <PasteIcon className="w-5 h-5" />
+          </CardOverlayButton>
+        ) : (
+          <CardOverlayButton
+            position="left"
+            ariaLabel="Zoom photo"
+            colorClassName="text-zinc-100 hover:text-white"
+            onActivate={onZoom}
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+              <circle cx="5" cy="5" r="3.5" />
+              <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
+            </svg>
+          </CardOverlayButton>
+        )}
       </div>
 
       {/* Filename */}
