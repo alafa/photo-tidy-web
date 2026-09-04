@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DndContext,
   DragOverlay,
@@ -17,6 +17,7 @@ import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
+import { getPhotoDimensions, pickBestPhoto } from '@/lib/photo-quality'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import PhotoLightbox from './PhotoLightbox'
@@ -62,6 +63,41 @@ function computeDroppedTimestamp(
   }
   // Only photo, or all neighbours have null timestamps — keep as-is
   return currentCapturedAt
+}
+
+// U2 (Keep best): a small fixed concurrency bound for decoding selected
+// photos' dimensions, mirroring `UPLOAD_CONCURRENCY` in
+// `hooks/useGooglePhotosUpload.ts` (KTD7) — not an unbounded `Promise.all`.
+const KEEP_BEST_DECODE_CONCURRENCY = 5
+
+/**
+ * Decodes `getPhotoDimensions` for each id in `ids`, in fixed-size batches
+ * (mirrors `uploadWithConcurrency` in `hooks/useGooglePhotosUpload.ts`).
+ * `getFile` is called fresh for each id at the moment its batch runs, so a
+ * photo removed mid-decode simply yields no entry for that id rather than
+ * throwing — callers re-validate `ids` against the live photo map after
+ * this resolves (KTD6) and don't need this to fail loudly.
+ */
+async function decodeDimensionsWithConcurrency(
+  ids: string[],
+  getFile: (id: string) => File | undefined
+): Promise<Map<string, { width: number; height: number }>> {
+  const result = new Map<string, { width: number; height: number }>()
+  for (let i = 0; i < ids.length; i += KEEP_BEST_DECODE_CONCURRENCY) {
+    const batch = ids.slice(i, i + KEEP_BEST_DECODE_CONCURRENCY)
+    const decoded = await Promise.all(
+      batch.map(async (id) => {
+        const file = getFile(id)
+        if (!file) return null
+        const dims = await getPhotoDimensions(file)
+        return { id, dims }
+      })
+    )
+    for (const entry of decoded) {
+      if (entry) result.set(entry.id, entry.dims)
+    }
+  }
+  return result
 }
 
 export default function PhotoUploadPage() {
@@ -122,6 +158,16 @@ export default function PhotoUploadPage() {
   const [zipTotal, setZipTotal] = useState(0)
   const [zipWarning, setZipWarning] = useState<string | null>(null)
 
+  // Keep-best state (U2). `keepBestResult` is an independent, own-gated
+  // sibling banner (KTD5) — never nested inside a `photos.length > 0`-style
+  // conditional, so it stays visible even if this action reduces
+  // `photos.length` to its minimum (1, the sole survivor). The same slot
+  // carries both the completion message and the KTD6
+  // selection-changed-mid-decode abort message; the two never overlap in
+  // time, so one field is enough.
+  const [isComparingBest, setIsComparingBest] = useState(false)
+  const [keepBestResult, setKeepBestResult] = useState<string | null>(null)
+
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
 
@@ -162,6 +208,16 @@ export default function PhotoUploadPage() {
   }, [])
 
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos])
+
+  // Live-read mirror of `photosById`, kept current every render (assigned
+  // directly during render, not in a `useEffect` — an effect would still
+  // lag one tick behind a synchronous read). `handleKeepBest` below is
+  // async and needs to re-check the selection against photos as they
+  // actually are at the moment its decode phase resolves, not whatever
+  // `photosById` closure it captured back at click time (KTD6). Mirrors
+  // `removedPhotoIdsRef` in `hooks/useGooglePhotosUpload.ts`.
+  const photosByIdRef = useRef(photosById)
+  photosByIdRef.current = photosById
 
   // Live-derived, never snapshotted (KTD1): recomputed from `photosById`
   // fresh every render, so if the source photo is deleted while copy mode is
@@ -433,6 +489,68 @@ export default function PhotoUploadPage() {
     setSelectedIds(new Set())
   }
 
+  // Keep-best action (U2): compares every currently selected photo by pixel
+  // resolution (R3), with file size (R4) then upload order (R5) as
+  // tiebreakers, and deletes every loser via the existing `handleBatchDelete`
+  // plumbing unchanged (KTD4). `ids` is snapshotted at click time; dimension
+  // decoding then runs at bounded concurrency (KTD7). Immediately after
+  // decode, `ids` is re-validated against the live `photosByIdRef` (KTD6) --
+  // this is the only re-check needed, since `window.confirm` below blocks
+  // synchronously and nothing between building the comparison and showing it
+  // yields to the event loop. Cluster membership plays no role anywhere in
+  // this flow (KTD10) -- `selectedIds`/`photosById` are already flat.
+  async function handleKeepBest() {
+    const ids = Array.from(selectedIds)
+    setIsComparingBest(true)
+
+    const dimensionsById = await decodeDimensionsWithConcurrency(
+      ids,
+      (id) => photosByIdRef.current.get(id)?.file
+    )
+
+    const validIds = ids.filter((id) => photosByIdRef.current.has(id))
+    if (validIds.length < 2) {
+      setIsComparingBest(false)
+      setKeepBestResult('Selection changed — try again.')
+      return
+    }
+
+    const candidates = validIds.map((id) => {
+      const photo = photosByIdRef.current.get(id)!
+      const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
+      return {
+        id,
+        width: dims.width,
+        height: dims.height,
+        size: photo.file.size,
+        uploadIndex: photo.uploadIndex,
+      }
+    })
+
+    const { winnerId, loserIds } = pickBestPhoto(candidates)
+    const winnerPhoto = photosByIdRef.current.get(winnerId)!
+    const winnerDims = dimensionsById.get(winnerId) ?? { width: 0, height: 0 }
+    // KTD8: a {0, 0} winner means its decode failed -- omit the resolution
+    // clause entirely rather than showing "0×0".
+    const hasResolution = winnerDims.width !== 0 || winnerDims.height !== 0
+    const resolutionClause = hasResolution ? ` (${winnerDims.width}×${winnerDims.height})` : ''
+
+    setIsComparingBest(false)
+
+    // KTD3: gated behind window.confirm(), naming the winner and loss
+    // count -- same native-confirm convention as handleClearAll.
+    const confirmed = window.confirm(
+      `Keep "${winnerPhoto.filename}"${resolutionClause}? This will delete ${loserIds.length} other selected photo(s).`
+    )
+    if (!confirmed) return
+
+    // KTD4: reuse handleBatchDelete unchanged. KTD9: the winner's id is
+    // deliberately left in selectedIds -- handleBatchDelete only prunes the
+    // ids it actually deletes.
+    handleBatchDelete(loserIds)
+    setKeepBestResult(`Kept "${winnerPhoto.filename}"${resolutionClause}. Removed ${loserIds.length} photo(s).`)
+  }
+
   // Builds a single ZIP of every currently-loaded photo (R1), ordered by the
   // TRUE visual order (KTD2, KTD9) rather than the flat `photos` array, and
   // triggers its download. The entry list is snapshotted once here -- see
@@ -606,6 +724,29 @@ export default function PhotoUploadPage() {
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
+              {/* Keep best (R1) -- shown only at 2+ selected, regardless of
+                  cluster membership (KTD10). Positioned apart from the
+                  non-destructive Select all/Clear selection controls above,
+                  since this is an unrecoverable delete once confirmed.
+                  Disabled + "Comparing…" while isComparingBest mirrors
+                  isGeneratingZip's "Zipping N of M…" in-progress pattern
+                  below. */}
+              {selectedIds.size >= 2 && (
+                <div className="flex items-center gap-2">
+                  {isComparingBest && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Comparing…
+                    </span>
+                  )}
+                  <button
+                    onClick={handleKeepBest}
+                    disabled={isComparingBest}
+                    className="px-3 py-1.5 text-xs font-medium bg-white dark:bg-zinc-800 border border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Keep best
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Copy-mode status banner (R2/R3) -- always visible for the
@@ -736,6 +877,26 @@ export default function PhotoUploadPage() {
             <span>{zipWarning}</span>
             <button
               onClick={() => setZipWarning(null)}
+              className="text-xs underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Keep-best result banner (R8, U2) -- an independent, own-gated
+            sibling (KTD5), deliberately NOT nested inside the
+            `photos.length > 0` block above: this action can reduce
+            `photos.length` down to 1 (the minimum possible survivor count),
+            and a prior banner in this exact file was nested inside a
+            data-presence gate and silently stopped rendering once that gate
+            went false mid-operation. Same slot carries both the completion
+            message and the KTD6 "selection changed" abort message. */}
+        {keepBestResult && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
+            <span>{keepBestResult}</span>
+            <button
+              onClick={() => setKeepBestResult(null)}
               className="text-xs underline shrink-0"
             >
               Dismiss
