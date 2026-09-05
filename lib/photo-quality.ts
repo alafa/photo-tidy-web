@@ -14,7 +14,8 @@ import { withTimeout, DECODE_TIMEOUT_MS } from './generate-thumbnail'
  * Never throws: any decode failure or timeout degrades to
  * `{ width: 0, height: 0 }` so a single bad photo doesn't block comparing
  * the rest of the selected batch (the photo itself is still included in the
- * comparison — see KTD1 in the plan for why exclusion would be wrong here).
+ * comparison, unlike `generateThumbnail`'s own contract, where callers
+ * exclude a failed decode from the request entirely).
  */
 export async function getPhotoDimensions(file: File): Promise<{ width: number; height: number }> {
   let bitmap: ImageBitmap

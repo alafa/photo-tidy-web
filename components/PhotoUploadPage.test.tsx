@@ -2716,7 +2716,7 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
 // `getPhotoDimensions` is mocked (see top of file); `pickBestPhoto` is kept
 // real, so these tests exercise the actual comparator wired into the
 // component end to end.
-describe('PhotoUploadPage — Keep best (U2)', () => {
+describe('PhotoUploadPage — Keep best', () => {
   function makeFileWithSize(name: string, size: number): File {
     return new File([new Uint8Array(size)], name, { type: 'image/jpeg' })
   }
@@ -2777,7 +2777,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     fireEvent.click(screen.getByAltText(name))
   }
 
-  it('R1: hidden at 0 and 1 selected, shown at 2+', () => {
+  it('hidden at 0 and 1 selected, shown at 2+', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
 
@@ -2795,7 +2795,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(keepBestButton()).not.toBeNull()
   })
 
-  it('R2: no "Keep best" affordance or state reaches PhotoLightbox -- opening it with 2+ selected renders the lightbox exactly as normal', () => {
+  it('no "Keep best" affordance or state reaches PhotoLightbox -- opening it with 2+ selected renders the lightbox exactly as normal', () => {
     // 3 photos so the middle one (b.jpg) has both a prev and a next
     // neighbor, proving the lightbox's nav props are unaffected too.
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
@@ -2822,7 +2822,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(within(overlay).getByRole('button', { name: 'Next photo' })).toBeDefined()
   })
 
-  it('R3/R6/R7: two selected, different resolutions -- confirming deletes exactly the lower-resolution photo via handleBatchDelete', async () => {
+  it('two selected, different resolutions -- confirming deletes exactly the lower-resolution photo via handleBatchDelete', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     const removePhotosMock = makeStatefulPhotosMock([a, b])
@@ -2842,7 +2842,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(removePhotosMock).toHaveBeenCalledWith([a.id])
   })
 
-  it('R4: equal resolution -- the larger-file-size photo is kept', async () => {
+  it('equal resolution -- the larger-file-size photo is kept', async () => {
     const a = makeEntry('a.jpg', 0, { file: makeFileWithSize('a.jpg', 100) })
     const b = makeEntry('b.jpg', 1, { file: makeFileWithSize('b.jpg', 500) })
     const removePhotosMock = makeStatefulPhotosMock([a, b])
@@ -2862,7 +2862,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(removePhotosMock).toHaveBeenCalledWith([a.id])
   })
 
-  it('R5: equal resolution and size -- the earlier-uploadIndex (earlier-added) photo is kept', async () => {
+  it('equal resolution and size -- the earlier-uploadIndex (earlier-added) photo is kept', async () => {
     const a = makeEntry('a.jpg', 3, { file: makeFileWithSize('a.jpg', 300) })
     const b = makeEntry('b.jpg', 1, { file: makeFileWithSize('b.jpg', 300) })
     const removePhotosMock = makeStatefulPhotosMock([a, b])
@@ -2905,7 +2905,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(screen.getByText('2 photos selected')).toBeDefined()
   })
 
-  it('R8: after confirming, the result banner names the kept photo\'s filename, its resolution, and the correct removed count', async () => {
+  it('after confirming, the result banner names the kept photo\'s filename, its resolution, and the correct removed count', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     makeStatefulPhotosMock([a, b])
@@ -2925,7 +2925,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     )
   })
 
-  it('KTD10: a selection spanning two different clusters resolves and deletes correctly, with no cluster-aware branching', async () => {
+  it('a selection spanning two different clusters resolves and deletes correctly, with no cluster-aware branching', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     const c = makeEntry('c.jpg', 2)
@@ -2951,7 +2951,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(removePhotosMock).toHaveBeenCalledWith([a.id])
   })
 
-  it('KTD6: if one of exactly 2 selected photos is deleted via its own per-card delete while dimensions are still decoding, the action aborts with no confirm dialog and keepBestResult reads "Selection changed — try again."', async () => {
+  it('if one of exactly 2 selected photos is deleted via its own per-card delete while dimensions are still decoding, the action aborts with no confirm dialog and keepBestResult reads "Selection changed — try again."', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     const removePhotosMock = makeStatefulPhotosMock([a, b])
@@ -2980,7 +2980,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
 
     // Delete b via its own per-card delete icon (not the batch button)
     // while the decode is still pending -- controls stay fully interactive
-    // during the decode window (KTD6).
+    // during the decode window.
     const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
     fireEvent.click(deleteButtons[1])
     expect(removePhotosMock).toHaveBeenCalledWith([b.id])
@@ -3015,7 +3015,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     // Decline the confirm -- nothing gets deleted, so the selection (and
     // therefore the button itself) stays visible afterward, letting this
     // test observe its cleared/re-enabled state directly instead of the
-    // button unmounting because the selection shrank below 2 (KTD9).
+    // button unmounting because the selection shrank below 2.
     vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     render(<PhotoUploadPage />)
@@ -3064,7 +3064,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     )
   })
 
-  it('KTD8: when the winning photo\'s dimensions decode to {0, 0}, the confirm and result text omit the resolution clause -- "0 x 0"/"0×0" never appears', async () => {
+  it('when the winning photo\'s dimensions decode to {0, 0}, the confirm and result text omit the resolution clause -- "0 x 0"/"0×0" never appears', async () => {
     const a = makeEntry('a.jpg', 0, { file: makeFileWithSize('a.jpg', 50) })
     const b = makeEntry('b.jpg', 1, { file: makeFileWithSize('b.jpg', 900) })
     makeStatefulPhotosMock([a, b])
@@ -3091,7 +3091,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(screen.queryByText(/0\s*[x×]\s*0/i)).toBeNull()
   })
 
-  it('KTD9: after a completed action, the winner\'s id is still present in selectedIds', async () => {
+  it('after a completed action, the winner\'s id is still present in selectedIds', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     makeStatefulPhotosMock([a, b])
@@ -3115,7 +3115,7 @@ describe('PhotoUploadPage — Keep best (U2)', () => {
     expect(screen.getByText('1 photo selected')).toBeDefined()
   })
 
-  it('KTD5: the result banner is reachable even when the action reduces photos.length to 1, the minimum possible after keeping exactly one survivor', async () => {
+  it('the result banner is reachable even when the action reduces photos.length to 1, the minimum possible after keeping exactly one survivor', async () => {
     const a = makeEntry('a.jpg', 0)
     const b = makeEntry('b.jpg', 1)
     makeStatefulPhotosMock([a, b])

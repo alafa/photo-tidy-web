@@ -17,6 +17,7 @@ import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
+import { chunkArray } from '@/lib/chunk-array'
 import { getPhotoDimensions, pickBestPhoto } from '@/lib/photo-quality'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
@@ -65,9 +66,9 @@ function computeDroppedTimestamp(
   return currentCapturedAt
 }
 
-// U2 (Keep best): a small fixed concurrency bound for decoding selected
-// photos' dimensions, mirroring `UPLOAD_CONCURRENCY` in
-// `hooks/useGooglePhotosUpload.ts` (KTD7) — not an unbounded `Promise.all`.
+// A small fixed concurrency bound for decoding selected photos' dimensions,
+// mirroring `UPLOAD_CONCURRENCY` in `hooks/useGooglePhotosUpload.ts` — not an
+// unbounded `Promise.all`.
 const KEEP_BEST_DECODE_CONCURRENCY = 5
 
 /**
@@ -76,15 +77,14 @@ const KEEP_BEST_DECODE_CONCURRENCY = 5
  * `getFile` is called fresh for each id at the moment its batch runs, so a
  * photo removed mid-decode simply yields no entry for that id rather than
  * throwing — callers re-validate `ids` against the live photo map after
- * this resolves (KTD6) and don't need this to fail loudly.
+ * this resolves and don't need this to fail loudly.
  */
 async function decodeDimensionsWithConcurrency(
   ids: string[],
   getFile: (id: string) => File | undefined
 ): Promise<Map<string, { width: number; height: number }>> {
   const result = new Map<string, { width: number; height: number }>()
-  for (let i = 0; i < ids.length; i += KEEP_BEST_DECODE_CONCURRENCY) {
-    const batch = ids.slice(i, i + KEEP_BEST_DECODE_CONCURRENCY)
+  for (const batch of chunkArray(ids, KEEP_BEST_DECODE_CONCURRENCY)) {
     const decoded = await Promise.all(
       batch.map(async (id) => {
         const file = getFile(id)
@@ -158,13 +158,12 @@ export default function PhotoUploadPage() {
   const [zipTotal, setZipTotal] = useState(0)
   const [zipWarning, setZipWarning] = useState<string | null>(null)
 
-  // Keep-best state (U2). `keepBestResult` is an independent, own-gated
-  // sibling banner (KTD5) — never nested inside a `photos.length > 0`-style
-  // conditional, so it stays visible even if this action reduces
-  // `photos.length` to its minimum (1, the sole survivor). The same slot
-  // carries both the completion message and the KTD6
-  // selection-changed-mid-decode abort message; the two never overlap in
-  // time, so one field is enough.
+  // Keep-best state. `keepBestResult` is an independent, own-gated sibling
+  // banner — never nested inside a `photos.length > 0`-style conditional, so
+  // it stays visible even if this action reduces `photos.length` to its
+  // minimum (1, the sole survivor). The same slot carries both the
+  // completion message and the selection-changed-mid-decode abort message;
+  // the two never overlap in time, so one field is enough.
   const [isComparingBest, setIsComparingBest] = useState(false)
   const [keepBestResult, setKeepBestResult] = useState<string | null>(null)
 
@@ -214,7 +213,7 @@ export default function PhotoUploadPage() {
   // lag one tick behind a synchronous read). `handleKeepBest` below is
   // async and needs to re-check the selection against photos as they
   // actually are at the moment its decode phase resolves, not whatever
-  // `photosById` closure it captured back at click time (KTD6). Mirrors
+  // `photosById` closure it captured back at click time. Mirrors
   // `removedPhotoIdsRef` in `hooks/useGooglePhotosUpload.ts`.
   const photosByIdRef = useRef(photosById)
   photosByIdRef.current = photosById
@@ -489,16 +488,16 @@ export default function PhotoUploadPage() {
     setSelectedIds(new Set())
   }
 
-  // Keep-best action (U2): compares every currently selected photo by pixel
-  // resolution (R3), with file size (R4) then upload order (R5) as
-  // tiebreakers, and deletes every loser via the existing `handleBatchDelete`
-  // plumbing unchanged (KTD4). `ids` is snapshotted at click time; dimension
-  // decoding then runs at bounded concurrency (KTD7). Immediately after
-  // decode, `ids` is re-validated against the live `photosByIdRef` (KTD6) --
-  // this is the only re-check needed, since `window.confirm` below blocks
-  // synchronously and nothing between building the comparison and showing it
-  // yields to the event loop. Cluster membership plays no role anywhere in
-  // this flow (KTD10) -- `selectedIds`/`photosById` are already flat.
+  // Keep-best action: compares every currently selected photo by pixel
+  // resolution, with file size then upload order as tiebreakers, and
+  // deletes every loser via the existing `handleBatchDelete` plumbing
+  // unchanged. `ids` is snapshotted at click time; dimension decoding then
+  // runs at bounded concurrency. Immediately after decode, `ids` is
+  // re-validated against the live `photosByIdRef` -- this is the only
+  // re-check needed, since `window.confirm` below blocks synchronously and
+  // nothing between building the comparison and showing it yields to the
+  // event loop. Cluster membership plays no role anywhere in this flow --
+  // `selectedIds`/`photosById` are already flat.
   async function handleKeepBest() {
     const ids = Array.from(selectedIds)
     setIsComparingBest(true)
@@ -530,23 +529,23 @@ export default function PhotoUploadPage() {
     const { winnerId, loserIds } = pickBestPhoto(candidates)
     const winnerPhoto = photosByIdRef.current.get(winnerId)!
     const winnerDims = dimensionsById.get(winnerId) ?? { width: 0, height: 0 }
-    // KTD8: a {0, 0} winner means its decode failed -- omit the resolution
+    // A {0, 0} winner means its decode failed -- omit the resolution
     // clause entirely rather than showing "0×0".
     const hasResolution = winnerDims.width !== 0 || winnerDims.height !== 0
     const resolutionClause = hasResolution ? ` (${winnerDims.width}×${winnerDims.height})` : ''
 
     setIsComparingBest(false)
 
-    // KTD3: gated behind window.confirm(), naming the winner and loss
-    // count -- same native-confirm convention as handleClearAll.
+    // Gated behind window.confirm(), naming the winner and loss count --
+    // same native-confirm convention as handleClearAll.
     const confirmed = window.confirm(
       `Keep "${winnerPhoto.filename}"${resolutionClause}? This will delete ${loserIds.length} other selected photo(s).`
     )
     if (!confirmed) return
 
-    // KTD4: reuse handleBatchDelete unchanged. KTD9: the winner's id is
-    // deliberately left in selectedIds -- handleBatchDelete only prunes the
-    // ids it actually deletes.
+    // Reuse handleBatchDelete unchanged. The winner's id is deliberately
+    // left in selectedIds -- handleBatchDelete only prunes the ids it
+    // actually deletes.
     handleBatchDelete(loserIds)
     setKeepBestResult(`Kept "${winnerPhoto.filename}"${resolutionClause}. Removed ${loserIds.length} photo(s).`)
   }
@@ -724,8 +723,8 @@ export default function PhotoUploadPage() {
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
-              {/* Keep best (R1) -- shown only at 2+ selected, regardless of
-                  cluster membership (KTD10). Positioned apart from the
+              {/* Keep best -- shown only at 2+ selected, regardless of
+                  cluster membership. Positioned apart from the
                   non-destructive Select all/Clear selection controls above,
                   since this is an unrecoverable delete once confirmed.
                   Disabled + "Comparing…" while isComparingBest mirrors
@@ -884,14 +883,14 @@ export default function PhotoUploadPage() {
           </div>
         )}
 
-        {/* Keep-best result banner (R8, U2) -- an independent, own-gated
-            sibling (KTD5), deliberately NOT nested inside the
-            `photos.length > 0` block above: this action can reduce
-            `photos.length` down to 1 (the minimum possible survivor count),
-            and a prior banner in this exact file was nested inside a
-            data-presence gate and silently stopped rendering once that gate
-            went false mid-operation. Same slot carries both the completion
-            message and the KTD6 "selection changed" abort message. */}
+        {/* Keep-best result banner -- an independent, own-gated sibling,
+            deliberately NOT nested inside the `photos.length > 0` block
+            above: this action can reduce `photos.length` down to 1 (the
+            minimum possible survivor count), and a prior banner in this
+            exact file was nested inside a data-presence gate and silently
+            stopped rendering once that gate went false mid-operation. Same
+            slot carries both the completion message and the
+            "selection changed" abort message. */}
         {keepBestResult && (
           <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
             <span>{keepBestResult}</span>
