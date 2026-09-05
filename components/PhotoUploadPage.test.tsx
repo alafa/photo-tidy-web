@@ -2777,6 +2777,16 @@ describe('PhotoUploadPage — Keep best', () => {
     fireEvent.click(screen.getByAltText(name))
   }
 
+  // The floating button is rendered as the sibling immediately after the
+  // image-wrapper div inside PhotoCard's outer sizing wrapper -- this reads
+  // that structure directly to identify which card's photo it's anchored to.
+  function keepBestAnchorFilename(): string | null {
+    const button = keepBestButton()
+    const imgWrapper = button?.previousElementSibling ?? null
+    const img = imgWrapper?.querySelector('img') ?? null
+    return img?.getAttribute('alt') ?? null
+  }
+
   it('hidden at 0 and 1 selected, shown at 2+', () => {
     const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
     mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
@@ -3240,5 +3250,75 @@ describe('PhotoUploadPage — Keep best', () => {
     expect(screen.queryByText('Comparing…')).toBeNull()
 
     consoleErrorSpy.mockRestore()
+  })
+
+  it('floats on the card of whichever photo was most recently selected, moving as the selection order changes', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+
+    render(<PhotoUploadPage />)
+    select('a.jpg')
+    select('b.jpg')
+    expect(keepBestAnchorFilename()).toBe('b.jpg')
+
+    select('c.jpg')
+    expect(keepBestAnchorFilename()).toBe('c.jpg')
+
+    // Deselecting the current anchor falls back to whichever remaining
+    // selected photo was selected next-most-recently.
+    select('c.jpg')
+    expect(keepBestAnchorFilename()).toBe('b.jpg')
+
+    // Deselecting then reselecting a photo moves it back to the front --
+    // the button disappears in between (only b is left selected).
+    select('a.jpg')
+    expect(keepBestButton()).toBeNull()
+    select('a.jpg')
+    expect(keepBestAnchorFilename()).toBe('a.jpg')
+  })
+
+  it('stays anchored to the card that was most recently selected at click time, even if a different photo is selected before decode finishes', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    makeStatefulPhotosMock([a, b, c])
+
+    let resolveA: (dims: { width: number; height: number }) => void = () => {}
+    const pendingA = new Promise<{ width: number; height: number }>((resolve) => {
+      resolveA = resolve
+    })
+    mockGetPhotoDimensions.mockImplementation(async (file: File) => {
+      if (file === a.file) return pendingA
+      return { width: 100, height: 100 }
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<PhotoUploadPage />)
+    select('a.jpg')
+    select('b.jpg')
+    expect(keepBestAnchorFilename()).toBe('b.jpg')
+    fireEvent.click(keepBestButton()!)
+
+    await waitFor(() => expect(screen.getByText('Comparing…')).toBeDefined())
+
+    // Selecting a third photo mid-decode would move the live anchor to c,
+    // but the in-flight comparison stays anchored to b (frozen at click
+    // time), matching what the confirm dialog will actually describe.
+    select('c.jpg')
+    expect(keepBestAnchorFilename()).toBe('b.jpg')
+
+    await act(async () => {
+      resolveA({ width: 100, height: 100 })
+      await pendingA
+    })
+
+    // The selection changed (c was added), so the operation aborts rather
+    // than confirming against a selection it no longer matches.
+    await waitFor(() =>
+      expect(screen.getByText('Selection changed — try again.')).toBeDefined()
+    )
+    // Once the operation ends, the anchor is live again -- c is now the
+    // most recently selected of the three.
+    expect(keepBestAnchorFilename()).toBe('c.jpg')
   })
 })

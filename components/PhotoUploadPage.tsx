@@ -166,6 +166,13 @@ export default function PhotoUploadPage() {
   // the two never overlap in time, so one field is enough.
   const [isComparingBest, setIsComparingBest] = useState(false)
   const [keepBestResult, setKeepBestResult] = useState<string | null>(null)
+  // The card the floating "Keep best" trigger renders on while a comparison
+  // is in flight, frozen at click time -- kept distinct from the live
+  // "last-selected" derivation below so the button stays anchored to the
+  // same photo for the whole operation even if the selection changes mid
+  // decode (that change itself is what the operation's own re-validation
+  // later aborts on), rather than jumping to a different card or vanishing.
+  const [comparingAnchorId, setComparingAnchorId] = useState<string | null>(null)
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -226,6 +233,16 @@ export default function PhotoUploadPage() {
   // by comparing its click-time snapshot against the CURRENT selection.
   const selectedIdsRef = useRef(selectedIds)
   selectedIdsRef.current = selectedIds
+
+  // Which card the floating "Keep best" trigger renders on. `selectedIds` is
+  // a `Set`, and `Set` preserves insertion order -- re-adding a previously
+  // removed id moves it to the end -- so its last element is already
+  // "whichever photo was most recently selected" with no extra bookkeeping.
+  // While a comparison is in flight, `comparingAnchorId` (frozen at click
+  // time) wins instead, so the button doesn't jump to a different card or
+  // disappear if the live selection changes before the operation resolves.
+  const liveAnchorId = selectedIds.size >= 2 ? Array.from(selectedIds).at(-1)! : null
+  const keepBestAnchorId = isComparingBest ? comparingAnchorId : liveAnchorId
 
   // Live-derived, never snapshotted (KTD1): recomputed from `photosById`
   // fresh every render, so if the source photo is deleted while copy mode is
@@ -516,6 +533,10 @@ export default function PhotoUploadPage() {
   async function handleKeepBest() {
     const ids = Array.from(selectedIds)
     setIsComparingBest(true)
+    // Freeze the anchor card at click time (see `keepBestAnchorId`'s doc
+    // above) -- `ids.at(-1)` is the same last-selected id `liveAnchorId`
+    // would have computed from `selectedIds` at this exact moment.
+    setComparingAnchorId(ids.at(-1) ?? null)
 
     try {
       const dimensionsById = await decodeDimensionsWithConcurrency(
@@ -568,6 +589,7 @@ export default function PhotoUploadPage() {
       setKeepBestResult("Couldn't compare photos — try again.")
     } finally {
       setIsComparingBest(false)
+      setComparingAnchorId(null)
     }
   }
 
@@ -744,33 +766,6 @@ export default function PhotoUploadPage() {
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
-              {/* Keep best -- shown at 2+ selected, regardless of cluster
-                  membership, and kept visible for the rest of an
-                  already-started comparison even if the selection later
-                  drops below 2 (isComparingBest) -- otherwise the button and
-                  its "Comparing…" indicator would vanish mid-decode and the
-                  eventual window.confirm() would appear with no visible
-                  lead-in. Positioned apart from the non-destructive Select
-                  all/Clear selection controls above, since this is an
-                  unrecoverable delete once confirmed. Disabled +
-                  "Comparing…" while isComparingBest mirrors isGeneratingZip's
-                  "Zipping N of M…" in-progress pattern below. */}
-              {(selectedIds.size >= 2 || isComparingBest) && (
-                <div className="flex items-center gap-2">
-                  {isComparingBest && (
-                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Comparing…
-                    </span>
-                  )}
-                  <button
-                    onClick={handleKeepBest}
-                    disabled={isComparingBest}
-                    className="px-3 py-1.5 text-xs font-medium bg-white dark:bg-zinc-800 border border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Keep best
-                  </button>
-                </div>
-              )}
             </div>
 
             {/* Copy-mode status banner (R2/R3) -- always visible for the
@@ -851,6 +846,9 @@ export default function PhotoUploadPage() {
                 onPaste={handlePaste}
                 onPasteToCluster={handlePasteToCluster}
                 onCopyTimestamp={handleCopyTimestamp}
+                anchorSelectedId={keepBestAnchorId}
+                isComparingBest={isComparingBest}
+                onKeepBest={handleKeepBest}
               />
               <DragOverlay>
                 {activeEntry && (
