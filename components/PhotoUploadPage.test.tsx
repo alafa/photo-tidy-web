@@ -3140,4 +3140,105 @@ describe('PhotoUploadPage — Keep best', () => {
     expect(screen.queryAllByRole('img')).toHaveLength(1)
     expect(screen.getByText('Kept "b.jpg" (400×300). Removed 1 photo(s).')).toBeDefined()
   })
+
+  it('deselecting one of the two selected photos during decode aborts with "Selection changed — try again.", even though neither photo was deleted', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    makeStatefulPhotosMock([a, b])
+
+    let resolveA: (dims: { width: number; height: number }) => void = () => {}
+    const pendingA = new Promise<{ width: number; height: number }>((resolve) => {
+      resolveA = resolve
+    })
+    mockGetPhotoDimensions.mockImplementation(async (file: File) => {
+      if (file === a.file) return pendingA
+      return { width: 100, height: 100 }
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    select('a.jpg')
+    select('b.jpg')
+    fireEvent.click(keepBestButton()!)
+
+    await waitFor(() => expect(screen.getByText('Comparing…')).toBeDefined())
+
+    // Deselect b while decode is still pending -- both photos still exist
+    // (an existence-only re-check would let this proceed unchanged).
+    select('b.jpg')
+
+    await act(async () => {
+      resolveA({ width: 100, height: 100 })
+      await pendingA
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText('Selection changed — try again.')).toBeDefined()
+    )
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('the button and "Comparing…" indicator stay visible if the selection drops below 2 mid-decode (e.g. via Clear selection), instead of vanishing before the eventual outcome is shown', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    makeStatefulPhotosMock([a, b])
+
+    let resolveA: (dims: { width: number; height: number }) => void = () => {}
+    const pendingA = new Promise<{ width: number; height: number }>((resolve) => {
+      resolveA = resolve
+    })
+    mockGetPhotoDimensions.mockImplementation(async (file: File) => {
+      if (file === a.file) return pendingA
+      return { width: 100, height: 100 }
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    select('a.jpg')
+    select('b.jpg')
+    fireEvent.click(keepBestButton()!)
+
+    await waitFor(() => expect(screen.getByText('Comparing…')).toBeDefined())
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Clear selection' })[0])
+
+    // selectedIds.size is now 0, but the button and indicator stay visible
+    // for the rest of the already-started comparison.
+    expect(keepBestButton()).not.toBeNull()
+    expect(screen.getByText('Comparing…')).toBeDefined()
+
+    await act(async () => {
+      resolveA({ width: 100, height: 100 })
+      await pendingA
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText('Selection changed — try again.')).toBeDefined()
+    )
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(keepBestButton()).toBeNull()
+  })
+
+  it('an unexpected rejection during decode is caught, clears isComparingBest, and shows a failure message instead of leaving the button stuck disabled', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    makeStatefulPhotosMock([a, b])
+    mockGetPhotoDimensions.mockRejectedValue(new Error('boom'))
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    render(<PhotoUploadPage />)
+    select('a.jpg')
+    select('b.jpg')
+    fireEvent.click(keepBestButton()!)
+
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't compare photos — try again.")).toBeDefined()
+    )
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(keepBestButton()!.disabled).toBe(false)
+    expect(screen.queryByText('Comparing…')).toBeNull()
+
+    consoleErrorSpy.mockRestore()
+  })
 })

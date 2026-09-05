@@ -213,10 +213,19 @@ export default function PhotoUploadPage() {
   // lag one tick behind a synchronous read). `handleKeepBest` below is
   // async and needs to re-check the selection against photos as they
   // actually are at the moment its decode phase resolves, not whatever
-  // `photosById` closure it captured back at click time. Mirrors
-  // `removedPhotoIdsRef` in `hooks/useGooglePhotosUpload.ts`.
+  // `photosById` closure it captured back at click time. Same "live ref
+  // read from inside an async callback" idiom as `removedPhotoIdsRef` in
+  // `hooks/useGooglePhotosUpload.ts`, though that ref tracks removed ids
+  // additively rather than mirroring a full snapshot every render.
   const photosByIdRef = useRef(photosById)
   photosByIdRef.current = photosById
+
+  // Same live-read purpose as `photosByIdRef` above, for `selectedIds`:
+  // `handleKeepBest` needs to detect not just a deleted photo but any
+  // selection change (deselect, reselect, clear) during its decode phase,
+  // by comparing its click-time snapshot against the CURRENT selection.
+  const selectedIdsRef = useRef(selectedIds)
+  selectedIdsRef.current = selectedIds
 
   // Live-derived, never snapshotted (KTD1): recomputed from `photosById`
   // fresh every render, so if the source photo is deleted while copy mode is
@@ -492,62 +501,74 @@ export default function PhotoUploadPage() {
   // resolution, with file size then upload order as tiebreakers, and
   // deletes every loser via the existing `handleBatchDelete` plumbing
   // unchanged. `ids` is snapshotted at click time; dimension decoding then
-  // runs at bounded concurrency. Immediately after decode, `ids` is
-  // re-validated against the live `photosByIdRef` -- this is the only
-  // re-check needed, since `window.confirm` below blocks synchronously and
-  // nothing between building the comparison and showing it yields to the
-  // event loop. Cluster membership plays no role anywhere in this flow --
-  // `selectedIds`/`photosById` are already flat.
+  // runs at bounded concurrency. Immediately after decode, the snapshot is
+  // re-validated against the live `selectedIdsRef` -- not just that each
+  // photo still exists, but that the selection itself hasn't changed
+  // (deselect, reselect, or clear all count as a change, same as a
+  // deletion) -- this is the only re-check needed, since `window.confirm`
+  // below blocks synchronously and nothing between building the comparison
+  // and showing it yields to the event loop. The whole flow is wrapped in
+  // try/finally so an unexpected rejection during decode can't leave
+  // `isComparingBest` stuck true with no way to retry, matching
+  // `handleDownloadAll`'s try/catch/finally shape for the same reason.
+  // Cluster membership plays no role anywhere in this flow -- `selectedIds`/
+  // `photosById` are already flat.
   async function handleKeepBest() {
     const ids = Array.from(selectedIds)
     setIsComparingBest(true)
 
-    const dimensionsById = await decodeDimensionsWithConcurrency(
-      ids,
-      (id) => photosByIdRef.current.get(id)?.file
-    )
+    try {
+      const dimensionsById = await decodeDimensionsWithConcurrency(
+        ids,
+        (id) => photosByIdRef.current.get(id)?.file
+      )
 
-    const validIds = ids.filter((id) => photosByIdRef.current.has(id))
-    if (validIds.length < 2) {
-      setIsComparingBest(false)
-      setKeepBestResult('Selection changed — try again.')
-      return
-    }
-
-    const candidates = validIds.map((id) => {
-      const photo = photosByIdRef.current.get(id)!
-      const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
-      return {
-        id,
-        width: dims.width,
-        height: dims.height,
-        size: photo.file.size,
-        uploadIndex: photo.uploadIndex,
+      const selectionUnchanged =
+        ids.length === selectedIdsRef.current.size &&
+        ids.every((id) => selectedIdsRef.current.has(id))
+      if (!selectionUnchanged) {
+        setKeepBestResult('Selection changed — try again.')
+        return
       }
-    })
 
-    const { winnerId, loserIds } = pickBestPhoto(candidates)
-    const winnerPhoto = photosByIdRef.current.get(winnerId)!
-    const winnerDims = dimensionsById.get(winnerId) ?? { width: 0, height: 0 }
-    // A {0, 0} winner means its decode failed -- omit the resolution
-    // clause entirely rather than showing "0×0".
-    const hasResolution = winnerDims.width !== 0 || winnerDims.height !== 0
-    const resolutionClause = hasResolution ? ` (${winnerDims.width}×${winnerDims.height})` : ''
+      const candidates = ids.map((id) => {
+        const photo = photosByIdRef.current.get(id)!
+        const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
+        return {
+          id,
+          width: dims.width,
+          height: dims.height,
+          size: photo.file.size,
+          uploadIndex: photo.uploadIndex,
+        }
+      })
 
-    setIsComparingBest(false)
+      const { winnerId, loserIds } = pickBestPhoto(candidates)
+      const winnerPhoto = photosByIdRef.current.get(winnerId)!
+      const winnerDims = dimensionsById.get(winnerId) ?? { width: 0, height: 0 }
+      // A {0, 0} winner means its decode failed -- omit the resolution
+      // clause entirely rather than showing "0×0".
+      const hasResolution = winnerDims.width !== 0 || winnerDims.height !== 0
+      const resolutionClause = hasResolution ? ` (${winnerDims.width}×${winnerDims.height})` : ''
 
-    // Gated behind window.confirm(), naming the winner and loss count --
-    // same native-confirm convention as handleClearAll.
-    const confirmed = window.confirm(
-      `Keep "${winnerPhoto.filename}"${resolutionClause}? This will delete ${loserIds.length} other selected photo(s).`
-    )
-    if (!confirmed) return
+      // Gated behind window.confirm(), naming the winner and loss count --
+      // same native-confirm convention as handleClearAll.
+      const confirmed = window.confirm(
+        `Keep "${winnerPhoto.filename}"${resolutionClause}? This will delete ${loserIds.length} other selected photo(s).`
+      )
+      if (!confirmed) return
 
-    // Reuse handleBatchDelete unchanged. The winner's id is deliberately
-    // left in selectedIds -- handleBatchDelete only prunes the ids it
-    // actually deletes.
-    handleBatchDelete(loserIds)
-    setKeepBestResult(`Kept "${winnerPhoto.filename}"${resolutionClause}. Removed ${loserIds.length} photo(s).`)
+      // Reuse handleBatchDelete unchanged. The winner's id is deliberately
+      // left in selectedIds -- handleBatchDelete only prunes the ids it
+      // actually deletes.
+      handleBatchDelete(loserIds)
+      setKeepBestResult(`Kept "${winnerPhoto.filename}"${resolutionClause}. Removed ${loserIds.length} photo(s).`)
+    } catch (err) {
+      console.error('Keep best comparison failed', err)
+      setKeepBestResult("Couldn't compare photos — try again.")
+    } finally {
+      setIsComparingBest(false)
+    }
   }
 
   // Builds a single ZIP of every currently-loaded photo (R1), ordered by the
@@ -723,14 +744,18 @@ export default function PhotoUploadPage() {
               <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
                 Click image to select · click name or date to edit
               </span>
-              {/* Keep best -- shown only at 2+ selected, regardless of
-                  cluster membership. Positioned apart from the
-                  non-destructive Select all/Clear selection controls above,
-                  since this is an unrecoverable delete once confirmed.
-                  Disabled + "Comparing…" while isComparingBest mirrors
-                  isGeneratingZip's "Zipping N of M…" in-progress pattern
-                  below. */}
-              {selectedIds.size >= 2 && (
+              {/* Keep best -- shown at 2+ selected, regardless of cluster
+                  membership, and kept visible for the rest of an
+                  already-started comparison even if the selection later
+                  drops below 2 (isComparingBest) -- otherwise the button and
+                  its "Comparing…" indicator would vanish mid-decode and the
+                  eventual window.confirm() would appear with no visible
+                  lead-in. Positioned apart from the non-destructive Select
+                  all/Clear selection controls above, since this is an
+                  unrecoverable delete once confirmed. Disabled +
+                  "Comparing…" while isComparingBest mirrors isGeneratingZip's
+                  "Zipping N of M…" in-progress pattern below. */}
+              {(selectedIds.size >= 2 || isComparingBest) && (
                 <div className="flex items-center gap-2">
                   {isComparingBest && (
                     <span className="text-xs text-zinc-500 dark:text-zinc-400">
