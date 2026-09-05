@@ -29,3 +29,8 @@ A Cluster's position in the grid is chronological — determined by the earliest
 Because a Cluster renders as one grid block anchored at its earliest member's position, its members are not guaranteed to sit next to the same photos they would if the whole batch were laid out purely by timestamp — an unrelated photo whose own timestamp falls between two Cluster members still renders after the whole Cluster block, not between them. Drag-to-reorder must resolve a dropped photo's new timestamp from what's actually rendered next to it, not from a plain chronological lookup into the underlying photo list, or a drop near a Cluster can silently compute the wrong timestamp. A Cluster also renders with a visually distinct bordered/shaded container so it's immediately clear which photos are grouped versus standing alone.
 
 The user manually selects which member(s) of a Cluster to delete; nothing is ever removed automatically. (An earlier iteration auto-resolved "identical" photos without confirmation — removed after it proved confusing that removed photos weren't visible. Smart auto-suggestions may return once grouping itself is trustworthy.)
+
+## Timestamp Copying
+
+### Copy Mode
+An interaction mode for copying one photo's captured timestamp onto other photos with a single click each, or onto an entire Cluster at once. Entered by selecting exactly one photo with a captured timestamp and activating its copy control; once entered, stays active independent of the current selection, so selecting or deselecting photos afterward does not end it. Ends when the user activates the same copy control again on the source photo, uses an explicit exit control, presses Escape, or the source photo is deleted.
