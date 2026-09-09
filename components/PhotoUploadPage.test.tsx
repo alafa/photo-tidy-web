@@ -4,7 +4,7 @@ import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
 import { formatDate } from '@/lib/datetime-local'
-import PhotoUploadPage from './PhotoUploadPage'
+import PhotoUploadPage, { computeDragGroupIds } from './PhotoUploadPage'
 
 afterEach(cleanup)
 
@@ -663,6 +663,180 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
       // next, landing in the "keep as-is" branch -- d3's timestamp
       // unchanged -- instead of properly slotting it after d1.
       expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(d3.id, d3.capturedAt)
+    })
+  })
+})
+
+// U1: `handleDragStart` now freezes the drag group at drag-start time
+// (KTD1). `dragGroupIds` itself is internal state with no observable render
+// effect yet -- it's only read by `handleDragEnd`/`DragOverlay` starting in
+// U2/U4 -- so the ordering computation is tested directly as the extracted
+// pure function `computeDragGroupIds`, and the component-level tests below
+// cover the parts of the wiring that ARE observable now (that starting a
+// drag never mutates `selectedIds`, and that a selection change after the
+// freeze doesn't throw or otherwise disrupt the component).
+describe('PhotoUploadPage — U1: freeze drag-group membership at drag start', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  describe('computeDragGroupIds (pure function)', () => {
+    it('R1/R5: dragging a selected photo when 3 are selected freezes all 3 ids, ordered chronologically (not click/selection order)', () => {
+      const a = makeEntry('a.jpg', 0) // earliest
+      const b = makeEntry('b.jpg', 1)
+      const c = makeEntry('c.jpg', 2) // latest
+      const photos = [a, b, c]
+      // Selected in a scrambled, non-chronological click order: c, then a,
+      // then b -- a Set's iteration order (c, a, b) is exactly what R5 says
+      // the result must NOT follow.
+      const selectedIds = new Set([c.id, a.id, b.id])
+
+      const result = computeDragGroupIds(b.id, selectedIds, photos)
+
+      expect(result).toEqual([a.id, b.id, c.id])
+    })
+
+    it('R3: dragging while only 1 photo is selected freezes just that one id', () => {
+      const a = makeEntry('a.jpg', 0)
+      const b = makeEntry('b.jpg', 1)
+      const photos = [a, b]
+      const selectedIds = new Set([a.id])
+
+      const result = computeDragGroupIds(a.id, selectedIds, photos)
+
+      expect(result).toEqual([a.id])
+    })
+
+    it('R3: dragging with nothing selected freezes just the dragged id', () => {
+      const a = makeEntry('a.jpg', 0)
+      const b = makeEntry('b.jpg', 1)
+      const photos = [a, b]
+      const selectedIds = new Set<string>()
+
+      const result = computeDragGroupIds(a.id, selectedIds, photos)
+
+      expect(result).toEqual([a.id])
+    })
+
+    it('R2: dragging a photo NOT in selectedIds, while other photos are selected, freezes just the dragged id', () => {
+      const a = makeEntry('a.jpg', 0)
+      const b = makeEntry('b.jpg', 1)
+      const c = makeEntry('c.jpg', 2)
+      const photos = [a, b, c]
+      const selectedIds = new Set([b.id, c.id]) // a (the dragged photo) is not selected
+
+      const result = computeDragGroupIds(a.id, selectedIds, photos)
+
+      expect(result).toEqual([a.id])
+    })
+
+    it('freeze semantics: mutating the selectedIds Set after computing does not change the already-returned group', () => {
+      const a = makeEntry('a.jpg', 0)
+      const b = makeEntry('b.jpg', 1)
+      const c = makeEntry('c.jpg', 2)
+      const photos = [a, b, c]
+      const selectedIds = new Set([a.id, b.id, c.id])
+
+      const result = computeDragGroupIds(a.id, selectedIds, photos)
+      expect(result).toEqual([a.id, b.id, c.id])
+
+      // Selection changes after the freeze (deselect b, then clear
+      // entirely) -- the array already returned is unaffected, proving the
+      // function doesn't hand back a live view over the Set.
+      selectedIds.delete(b.id)
+      selectedIds.clear()
+
+      expect(result).toEqual([a.id, b.id, c.id])
+    })
+  })
+
+  describe('handleDragStart wiring (component-level)', () => {
+    it('R2: starting a drag on a photo NOT in the current selection leaves selectedIds untouched', () => {
+      const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: vi.fn(),
+      })
+
+      render(<PhotoUploadPage />)
+
+      // Select b and c; leave a unselected.
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      fireEvent.click(screen.getByAltText('c.jpg'))
+      expect(screen.getByText('2 photos selected')).toBeDefined()
+
+      // Drag a -- not part of the current 2-photo selection.
+      act(() => {
+        capturedOnDragStart?.({ active: { id: photos[0].id } })
+      })
+
+      // The existing selection (b, c) is left untouched by the drag start.
+      expect(screen.getByText('2 photos selected')).toBeDefined()
+    })
+
+    it('a selection change (deselect) after a drag-start freeze does not throw or otherwise disrupt the component', () => {
+      const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: vi.fn(),
+      })
+
+      render(<PhotoUploadPage />)
+
+      fireEvent.click(screen.getByAltText('a.jpg'))
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      fireEvent.click(screen.getByAltText('c.jpg'))
+      expect(screen.getByText('3 photos selected')).toBeDefined()
+
+      // Freeze the drag group on b, part of the 3-photo selection.
+      expect(() => {
+        act(() => {
+          capturedOnDragStart?.({ active: { id: photos[1].id } })
+        })
+      }).not.toThrow()
+
+      // Deselecting c after the freeze still works normally -- the frozen
+      // dragGroupIds this set up (a, b, c, per computeDragGroupIds' own
+      // freeze-semantics test above) has no live dependency on selectedIds
+      // that this could disrupt.
+      fireEvent.click(screen.getByAltText('c.jpg'))
+      expect(screen.getByText('2 photos selected')).toBeDefined()
+    })
+
+    it('an Esc-clear after a drag-start freeze does not throw or otherwise disrupt the component', () => {
+      const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+      mockUsePhotos.mockReturnValue({
+        photos,
+        processFiles: vi.fn(),
+        reorderPhotos: vi.fn(),
+        updatePhotoTimestamp: vi.fn(),
+      })
+
+      render(<PhotoUploadPage />)
+
+      fireEvent.click(screen.getByAltText('a.jpg'))
+      fireEvent.click(screen.getByAltText('b.jpg'))
+      fireEvent.click(screen.getByAltText('c.jpg'))
+      expect(screen.getByText('3 photos selected')).toBeDefined()
+
+      act(() => {
+        capturedOnDragStart?.({ active: { id: photos[1].id } })
+      })
+
+      fireEvent.keyDown(document, { key: 'Escape' })
+
+      expect(screen.queryByText(/photos? selected/)).toBeNull()
     })
   })
 })

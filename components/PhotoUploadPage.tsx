@@ -11,7 +11,8 @@ import {
 } from '@dnd-kit/core'
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
 import { arrayMove } from '@dnd-kit/sortable'
-import { usePhotos } from '@/hooks/usePhotos'
+import { usePhotos, compareByCapturedAt } from '@/hooks/usePhotos'
+import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
@@ -64,6 +65,40 @@ function computeDroppedTimestamp(
   }
   // Only photo, or all neighbours have null timestamps — keep as-is
   return currentCapturedAt
+}
+
+/**
+ * Computes the frozen drag-group membership for a drag that just started
+ * (U1, KTD1). Called exactly once, synchronously, from `handleDragStart`, and
+ * its result is stored in `dragGroupIds` state rather than re-derived later —
+ * so a selection change mid-drag (Esc, deselect) can't retroactively change
+ * which photos move (R1/R2/R3).
+ *
+ * - If the dragged photo is itself part of a >=2-member selection (R1), the
+ *   WHOLE selection moves together, ordered by current chronological order
+ *   (`compareByCapturedAt`, `hooks/usePhotos.ts`) -- deliberately NOT `Set`
+ *   iteration order, which is click/selection order and is exactly what R5
+ *   says the post-drop relative order must NOT follow.
+ * - Otherwise (dragging a photo outside the selection, R2; or 0/1 photos
+ *   selected, R3) -- today's single-photo drag: only the dragged photo
+ *   moves.
+ *
+ * Pure and side-effect-free: mutating the `selectedIds` Set passed in after
+ * this returns has no effect on the array already returned (arrays are
+ * returned by value, not as a live view over the Set).
+ */
+export function computeDragGroupIds(
+  activeId: string,
+  selectedIds: Set<string>,
+  photos: PhotoEntry[]
+): string[] {
+  if (selectedIds.has(activeId) && selectedIds.size >= 2) {
+    return photos
+      .filter((p) => selectedIds.has(p.id))
+      .sort(compareByCapturedAt)
+      .map((p) => p.id)
+  }
+  return [activeId]
 }
 
 // A small fixed concurrency bound for decoding selected photos' dimensions,
@@ -132,6 +167,10 @@ export default function PhotoUploadPage() {
   )
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // The drag group frozen at drag-start (U1, KTD1) -- see
+  // `computeDragGroupIds`'s doc above. Read by `DragOverlay`/`handleDragEnd`
+  // in later units; never re-derived from `selectedIds` at drop time.
+  const [dragGroupIds, setDragGroupIds] = useState<string[]>([])
   const [albumName, setAlbumName] = useState('')
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false)
   const [namePromptValue, setNamePromptValue] = useState('')
@@ -314,7 +353,11 @@ export default function PhotoUploadPage() {
   }
 
   function handleDragStart(event: DragStartEvent) {
-    setActiveId(String(event.active.id))
+    const id = String(event.active.id)
+    setActiveId(id)
+    // Freeze the drag group now, once, per KTD1 -- see
+    // `computeDragGroupIds`'s doc above.
+    setDragGroupIds(computeDragGroupIds(id, selectedIds, photos))
   }
 
   // Resolves from/to against the TRUE visual order (`visualOrder` state),
