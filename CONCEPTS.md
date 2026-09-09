@@ -30,6 +30,9 @@ Because a Cluster renders as one grid block anchored at its earliest member's po
 
 The user manually selects which member(s) of a Cluster to delete; nothing is ever removed automatically. (An earlier iteration auto-resolved "identical" photos without confirmation — removed after it proved confusing that removed photos weren't visible. Smart auto-suggestions may return once grouping itself is trustworthy.)
 
+### Keep Best
+An action available whenever 2 or more photos are selected, anywhere in the grid (within or across Clusters) — it is not limited to a single Cluster's members. It compares the selected photos and keeps exactly one, deleting the rest: candidates are ranked by resolution first, then file size, then upload order (earliest-added wins), and the user must confirm the winner and the loss count before any deletion happens. Same manual-confirmation convention as Cluster deletion — nothing is ever removed automatically.
+
 ## Timestamp Copying
 
 ### Copy Mode
