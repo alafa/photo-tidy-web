@@ -667,6 +667,291 @@ describe('PhotoUploadPage — drag and drop reorder', () => {
   })
 })
 
+// U2: `handleDragEnd` now resolves boundary neighbors and reorders
+// `visualOrder` for the WHOLE frozen `dragGroupIds` (U1), not just the
+// single actively-grabbed photo. U3 (not yet landed) will replace the
+// single `updatePhotoTimestamp` write these tests observe with a real
+// N-item interpolation across the whole group -- these tests can only
+// assert on the *boundary resolution* (the correct prevTs/nextTs pair),
+// which is this unit's actual job, via the one write handleDragEnd still
+// makes for the actively-grabbed photo using the existing single-item
+// `computeDroppedTimestamp` as a stand-in for that eventual multi-item call.
+describe('PhotoUploadPage — U2: generalize drop resolution to N-item groups', () => {
+  function makeEntry(name: string, index: number, capturedAt?: string) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(capturedAt ?? `2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function select(name: string) {
+    fireEvent.click(screen.getByAltText(name))
+  }
+
+  it('dragging 3 contiguous selected photos to a new position resolves the correct prev/next boundary neighbors', () => {
+    // a, b, c, d, e, f -- no clustering (flatResult), so visualOrder equals
+    // the flat chronological array. Select c, d, e (contiguous), drag from
+    // d (the middle member), drop onto b -- moving the whole 3-photo block
+    // backward past b. The group's true final neighbors are a (prev) and b
+    // (next): withoutGroup = [a, b, f]; dragging backward (active originally
+    // after over) inserts the block immediately BEFORE b, landing it between
+    // a and b.
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const d = makeEntry('d.jpg', 3)
+    const e = makeEntry('e.jpg', 4)
+    const f = makeEntry('f.jpg', 5)
+    const photos = [a, b, c, d, e, f]
+    const updatePhotoTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    select('c.jpg')
+    select('d.jpg')
+    select('e.jpg')
+    expect(screen.getByText('3 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: d.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: d.id }, over: { id: b.id } })
+    })
+
+    const expectedTimestamp = new Date(
+      Math.round((a.capturedAt.getTime() + b.capturedAt.getTime()) / 2)
+    )
+    // Only the actively-grabbed photo (d) is written by this unit (U3 lands
+    // the real N-item interpolation across c/d/e) -- but the neighbors fed
+    // into that write are the whole group's true boundary (a, b), not d's
+    // own immediate flat/visual neighbors.
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(d.id, expectedTimestamp)
+    expect(updatePhotoTimestampMock).toHaveBeenCalledOnce()
+  })
+
+  it('a scattered (non-contiguous) selection dropped at one point resolves true boundary neighbors that skip every dragged id, not just the physically-grabbed one', () => {
+    // a..g, no clustering. Select b, d, f (scattered -- not contiguous with
+    // each other), drag from d, drop onto e. The group's true boundary
+    // neighbors are e (prev) and g (next) -- skipping b, d, AND f. A buggy
+    // implementation that only excluded the physically-grabbed id (d) from
+    // neighbor resolution, leaving b/f in place, would instead resolve f as
+    // the next neighbor (landing between e and f) -- this test's negative
+    // assertion catches exactly that.
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const d = makeEntry('d.jpg', 3)
+    const e = makeEntry('e.jpg', 4)
+    const f = makeEntry('f.jpg', 5)
+    const g = makeEntry('g.jpg', 6)
+    const photos = [a, b, c, d, e, f, g]
+    const updatePhotoTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    select('b.jpg')
+    select('d.jpg')
+    select('f.jpg')
+    expect(screen.getByText('3 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: d.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: d.id }, over: { id: e.id } })
+    })
+
+    const expectedTimestamp = new Date(
+      Math.round((e.capturedAt.getTime() + g.capturedAt.getTime()) / 2)
+    )
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(d.id, expectedTimestamp)
+
+    // Prove the fix: a buggy resolution that only skipped `d` (the
+    // physically-grabbed id) and left b/f in the candidate neighbor set
+    // would instead land the block between e and f.
+    const buggyOnlySkipActiveTimestamp = new Date(
+      Math.round((e.capturedAt.getTime() + f.capturedAt.getTime()) / 2)
+    )
+    expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(d.id, buggyOnlySkipActiveTimestamp)
+  })
+
+  it('visual-order-divergence hazard, generalized to a group: dragging a group across a non-array-contiguous cluster resolves neighbors matching visualOrder, not the flat-array-based (wrong) resolution', () => {
+    // a and c are reported as a cluster by the mocked useClusteredPhotos
+    // below; b and d are not. b's capturedAt sits strictly between a's and
+    // c's. The flat, purely-chronological `photos` array is [a, b, c, d],
+    // but the cluster (anchored to a, its earliest member) renders visually
+    // as [a, c, b, d] -- the cluster section first, then b/d's singleton
+    // run. Selecting {a, d} (both outside the b/c relative-order flip) and
+    // dropping onto c exercises exactly the axis that flips between the two
+    // orderings.
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const d = makeEntry('d.jpg', 3, '2025-01-04T00:00:00Z')
+    const photos = [a, b, c, d] // pre-sorted chronologically, as usePhotos would produce
+
+    const updatePhotoTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
+    })
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[a.id, c.id], [b.id], [d.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    // Confirm the visual order really is a, c, b, d, diverging from the
+    // flat [a, b, c, d].
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+    const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+    expect(imgs).toEqual(['a.jpg', 'c.jpg', 'b.jpg', 'd.jpg'])
+
+    select('a.jpg')
+    select('d.jpg')
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: a.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: a.id }, over: { id: c.id } })
+    })
+
+    // Visual-order-correct: extracting {a, d} from [a, c, b, d] and
+    // reinserting right after c (a was originally before c) lands the group
+    // between c and b -- true neighbors c (prev), b (next).
+    const expectedTimestamp = new Date(
+      Math.round((c.capturedAt.getTime() + b.capturedAt.getTime()) / 2)
+    )
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(a.id, expectedTimestamp)
+
+    // Prove the fix: resolving from the flat [a, b, c, d] instead would
+    // extract {a, d} leaving [b, c], insert the group after c (still index
+    // 2 in the flat array), landing it at the very end with no next
+    // neighbor -- c's timestamp + 1s.
+    const buggyFlatTimestamp = new Date(c.capturedAt.getTime() + 1000)
+    expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(a.id, buggyFlatTimestamp)
+  })
+
+  it("visual-order-divergence hazard, generalized to a group: dragging a group across a cluster with a null-timestamp member resolves neighbors matching visualOrder, not the flat-array-based (wrong) resolution", () => {
+    // d1 (dated) and n1 (null capturedAt) are reported as a cluster by the
+    // mocked useClusteredPhotos below -- same fixture as the standalone P0
+    // regression test above. d2 is dated earlier than d1; d3 is dated later.
+    // Flat order: [d2, d1, d3, n1] (nulls sort last). Visual order:
+    // [d2, d1, n1, d3] (cluster renders mid-grid, anchored at d1). Selecting
+    // {d2, d1} (both outside the d3/n1 relative-order flip) and dropping
+    // onto n1 exercises exactly that flip.
+    const d2 = makeEntry('d2.jpg', 0, '2025-01-01T00:00:00Z')
+    const d1 = makeEntry('d1.jpg', 1, '2025-01-02T00:00:00Z')
+    const d3 = makeEntry('d3.jpg', 2, '2025-01-03T00:00:00Z')
+    const n1 = { ...makeEntry('n1.jpg', 3, '2025-01-04T00:00:00Z'), capturedAt: null }
+    const photos = [d2, d1, d3, n1] // pre-sorted per sortPhotos' null-last convention
+
+    const updatePhotoTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
+    })
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[d2.id], [d1.id, n1.id], [d3.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    expect(document.querySelectorAll('section')).toHaveLength(1)
+    const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+    expect(imgs).toEqual(['d2.jpg', 'd1.jpg', 'n1.jpg', 'd3.jpg'])
+
+    select('d2.jpg')
+    select('d1.jpg')
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: d1.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: d1.id }, over: { id: n1.id } })
+    })
+
+    // Visual-order-correct: extracting {d2, d1} from [d2, d1, n1, d3] and
+    // reinserting right after n1 (d1 was originally before n1) lands the
+    // group between n1 and d3 -- true neighbors: n1 (null, so no usable
+    // prev) and d3 (next) -> edge-offset rule gives d3's timestamp - 1s.
+    const expectedTimestamp = new Date(d3.capturedAt.getTime() - 1000)
+    expect(updatePhotoTimestampMock).toHaveBeenCalledWith(d1.id, expectedTimestamp)
+
+    // Prove the fix: resolving from the flat [d2, d1, d3, n1] instead would
+    // extract {d2, d1} leaving [d3, n1], insert the group after n1 (still
+    // the last element), landing at the very end with both neighbors
+    // unusable (n1 prev is null, no next at all) -- the "keep as-is"
+    // fallback, i.e. d1's own timestamp left unchanged.
+    expect(updatePhotoTimestampMock).not.toHaveBeenCalledWith(d1.id, d1.capturedAt)
+  })
+
+  it('dropping onto another selected (dimmed) card that is part of the same dragGroupIds is a no-op, matching the existing "drop on yourself" no-op behavior', () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const photos = [a, b, c]
+    const updatePhotoTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamp: updatePhotoTimestampMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    // Select a and b together, then start the drag from a -- dragGroupIds
+    // freezes to [a, b].
+    select('a.jpg')
+    select('b.jpg')
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: a.id } })
+    })
+    // Drop onto b -- a different, dimmed member of the SAME frozen group,
+    // not the actively-grabbed id (a) itself.
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: a.id }, over: { id: b.id } })
+    })
+
+    expect(updatePhotoTimestampMock).not.toHaveBeenCalled()
+  })
+
+  // Regression guard (group size 1): the entire pre-existing single-drag
+  // test suite above (`describe('PhotoUploadPage — drag and drop reorder', ...)`
+  // and its nested cluster/P0 blocks) exercises `handleDragEnd` without any
+  // corresponding `dragGroupIds` freeze, so `effectiveGroupIds` always falls
+  // back to `[active.id]` there -- exactly reducing this unit's N-item
+  // algorithm to byte-identical single-item behavior. Those tests stayed
+  // green, unmodified, through this unit's change (see verification run).
+})
+
 // U1: `handleDragStart` now freezes the drag group at drag-start time
 // (KTD1). `dragGroupIds` itself is internal state with no observable render
 // effect yet -- it's only read by `handleDragEnd`/`DragOverlay` starting in

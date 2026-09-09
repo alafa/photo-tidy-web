@@ -10,7 +10,6 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
-import { arrayMove } from '@dnd-kit/sortable'
 import { usePhotos, compareByCapturedAt } from '@/hooks/usePhotos'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
@@ -374,26 +373,78 @@ export default function PhotoUploadPage() {
   // the true final visual neighbors are resolved locally and the same
   // midpoint/edge-offset algorithm (`computeDroppedTimestamp`, ported from
   // `slotTimestamp`) is applied directly via `updatePhotoTimestamp`.
+  //
+  // U2 (KTD2): generalized from a single dragged photo to the whole frozen
+  // `dragGroupIds` (U1). "Extract every group member out of `visualOrder`,
+  // reinsert them as one contiguous block at the drop position, then walk
+  // outward from that block to find the nearest non-group id on each side"
+  // -- the N-item version of the old single-item `arrayMove` + immediate-
+  // neighbor read. `effectiveGroupIds` falls back to just `[active.id]`
+  // whenever `dragGroupIds` doesn't actually contain the actively-grabbed
+  // id (e.g. a stale/empty freeze, or a test driving `onDragEnd` without
+  // first going through `onDragStart`), so this always behaves as *at
+  // least* a single-item drag -- never crashes or silently drops the
+  // active photo out of the resolved order.
+  //
+  // Direction (insert the block right after `over.id` vs. right before it)
+  // is decided from where the actively-grabbed card itself (`active.id`,
+  // not just any group member) sat relative to `over.id` in the ORIGINAL
+  // visual order -- exactly mirroring `arrayMove(visualOrder, from, to)`'s
+  // own behavior (it lands the moved item immediately after `over.id`'s
+  // post-removal position when `from < to`, immediately before it when
+  // `from > to`). Because of that, this reduces to byte-identical
+  // single-item behavior whenever the group has exactly one member (the
+  // existing single-drag regression suite covers this).
+  //
+  // U3 (not yet landed) will replace the single `updatePhotoTimestamp`
+  // write below with an N-item interpolation across the whole group; for
+  // now only the actively-grabbed photo's own timestamp is written, fed
+  // the group's TRUE boundary neighbors resolved here -- no other photo,
+  // in or out of the group, has its timestamp touched by this function
+  // (R8).
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     setActiveId(null)
-    if (!over || active.id === over.id) return
+    if (!over) return
 
-    const from = visualOrder.indexOf(active.id as string)
-    const to = visualOrder.indexOf(over.id as string)
-    if (from === -1 || to === -1) return
+    const activeId = active.id as string
+    const overId = over.id as string
+    const effectiveGroupIds = dragGroupIds.includes(activeId) ? dragGroupIds : [activeId]
+    const groupIdSet = new Set(effectiveGroupIds)
 
-    const reordered = arrayMove(visualOrder, from, to)
-    const prevEntry = photosById.get(reordered[to - 1])
-    const nextEntry = photosById.get(reordered[to + 1])
-    const currentEntry = photosById.get(active.id as string)
+    // Extended no-op guard (adversarial-reviewer fix, plan review): dnd-kit's
+    // `over.id` can resolve to ANY member of the frozen drag group -- not
+    // just `active.id` -- since a different selected-but-dimmed card is
+    // still a valid drop target as far as DOM hit-testing is concerned.
+    // Dropping on any of them is a no-op, exactly like dropping on yourself
+    // (the old `active.id === over.id` check, now subsumed by this -- every
+    // group always contains `active.id`) already was.
+    if (groupIdSet.has(overId)) return
+
+    const activeIndex = visualOrder.indexOf(activeId)
+    const overIndex = visualOrder.indexOf(overId)
+    if (activeIndex === -1 || overIndex === -1) return
+
+    const withoutGroup = visualOrder.filter((id) => !groupIdSet.has(id))
+    const overIndexInRest = withoutGroup.indexOf(overId)
+    const insertAt = activeIndex < overIndex ? overIndexInRest + 1 : overIndexInRest
+
+    const reordered = [
+      ...withoutGroup.slice(0, insertAt),
+      ...effectiveGroupIds,
+      ...withoutGroup.slice(insertAt),
+    ]
+    const blockEnd = insertAt + effectiveGroupIds.length - 1
+    const prevEntry = photosById.get(reordered[insertAt - 1])
+    const nextEntry = photosById.get(reordered[blockEnd + 1])
+    const currentEntry = photosById.get(activeId)
 
     const newTimestamp = computeDroppedTimestamp(
       prevEntry?.capturedAt ?? null,
       nextEntry?.capturedAt ?? null,
       currentEntry?.capturedAt ?? null
     )
-    updatePhotoTimestamp(active.id as string, newTimestamp)
+    updatePhotoTimestamp(activeId, newTimestamp)
   }
 
   function toggleSelect(id: string, checked: boolean) {
