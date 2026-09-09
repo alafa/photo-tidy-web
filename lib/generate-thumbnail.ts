@@ -12,11 +12,11 @@ const JPEG_QUALITY = 0.8
 // pathological/corrupt file can make it hang -- neither resolve nor reject
 // -- rather than fail cleanly. This guard ensures a single stuck decode
 // can't stall an entire batch of thumbnail generation.
-const DECODE_TIMEOUT_MS = 10_000
+export const DECODE_TIMEOUT_MS = 10_000
 
 /** Races `promise` against a timer; a timeout rejects the same way a real
  * decode failure would, so callers handle both identically. */
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms)
     promise.then(

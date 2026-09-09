@@ -101,6 +101,25 @@ type Props = {
    * button is clicked, entering copy mode with this photo as the source.
    */
   onCopyTimestamp?: () => void
+  /**
+   * Whether THIS card is the current anchor for the "Keep best" action --
+   * the caller (`PhotoGrid`) derives this from whichever photo was most
+   * recently added to the selection, so the trigger stays contextual and
+   * close to whatever the user just touched, the same way the copy-timestamp
+   * button anchors to the sole-selected card. Unlike copy-timestamp,
+   * "Keep best" acts on the whole selection, not just this one card, so it
+   * renders as a floating button beside the image rather than an overlay
+   * inside it -- see the button's own comment below for why.
+   */
+  showKeepBest?: boolean
+  /** Whether a "Keep best" comparison is currently in flight (any card). */
+  isComparingBest?: boolean
+  /**
+   * Pre-bound by the caller with no id argument (unlike `onDelete`/`onZoom`)
+   * -- "Keep best" acts on the current selection as a whole, not on this
+   * specific card, so there's no per-card id to bind.
+   */
+  onKeepBest?: () => void
 }
 
 export default function PhotoCard({
@@ -117,6 +136,9 @@ export default function PhotoCard({
   onPaste,
   isSoleSelected,
   onCopyTimestamp,
+  showKeepBest,
+  isComparingBest,
+  onKeepBest,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -208,88 +230,124 @@ export default function PhotoCard({
           rather than coexisting with it. `outline` is a separate CSS box
           entirely, so "selected AND copy source" stays legible as both at
           once, matching the copy-mode banner's own blue. */}
-      <div
-        className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''} ${isCopySource ? 'outline outline-2 outline-offset-2 outline-blue-500 dark:outline-blue-400' : ''}`}
-        onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(!checked) } : undefined}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
-        <img
-          src={objectUrl}
-          alt={filename}
-          loading="lazy"
-          className="w-full aspect-square object-cover bg-zinc-100"
-        />
-        {/* Google Photos origin badge */}
-        {entry.source === 'google-photos' && (
-          <div className="absolute top-1.5 left-1.5 bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full leading-none">
-            G
-          </div>
-        )}
-        {/* Selected checkmark overlay */}
-        {checked && (
-          <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center">
-            <svg className="w-3 h-3 text-white dark:text-zinc-900" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
-            </svg>
-          </div>
-        )}
-        {/* Delete icon overlay — always visible, bottom-right. Distinct
-            warning tone (rose) so it reads apart from the neutral zoom icon
-            on the opposite corner. */}
-        <CardOverlayButton
-          position="right"
-          ariaLabel="Delete photo"
-          colorClassName="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
-          onActivate={handleDeleteClick}
+      {/* Outer sizing wrapper -- deliberately separate from the
+          `overflow-hidden` image wrapper below. It has no size of its own
+          (the image is its only child until the floating "Keep best" button
+          joins it), so it exactly matches the image's own box, letting that
+          button position and vertically center itself against the photo
+          without being clipped by the image wrapper's rounded-corner mask. */}
+      <div className="relative">
+        <div
+          className={`relative rounded-md overflow-hidden ${onSelect ? 'cursor-pointer' : ''} ${checked ? 'ring-2 ring-zinc-900 dark:ring-zinc-100' : ''} ${isCopySource ? 'outline outline-2 outline-offset-2 outline-blue-500 dark:outline-blue-400' : ''}`}
+          onClick={onSelect ? (e) => { e.stopPropagation(); onSelect(!checked) } : undefined}
         >
-          <TrashIcon className="w-5 h-5" />
-        </CardOverlayButton>
-        {/* Bottom-left slot — zoom icon, or (KTD4) a paste button on every
-            non-source card while copy mode is active. All four corners of
-            the card are already visually claimed (this slot, delete's
-            bottom-right, the selection checkmark, and the origin badge), so
-            copy mode reuses this slot rather than adding a fifth. Zoom is
-            never needed mid-copy-mode: copy mode is grid-only and the
-            lightbox is unreachable while it's active regardless. The
-            source card itself is excluded (`!isCopySource`) and keeps
-            showing zoom in this slot even while copy mode is active
-            elsewhere on the grid. */}
-        {isCopyModeActive && !isCopySource ? (
+          {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
+          <img
+            src={objectUrl}
+            alt={filename}
+            loading="lazy"
+            className="w-full aspect-square object-cover bg-zinc-100"
+          />
+          {/* Google Photos origin badge */}
+          {entry.source === 'google-photos' && (
+            <div className="absolute top-1.5 left-1.5 bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full leading-none">
+              G
+            </div>
+          )}
+          {/* Selected checkmark overlay */}
+          {checked && (
+            <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-zinc-900 dark:bg-zinc-100 flex items-center justify-center">
+              <svg className="w-3 h-3 text-white dark:text-zinc-900" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
+              </svg>
+            </div>
+          )}
+          {/* Delete icon overlay — always visible, bottom-right. Distinct
+              warning tone (rose) so it reads apart from the neutral zoom icon
+              on the opposite corner. */}
           <CardOverlayButton
-            position="left"
-            ariaLabel="Paste timestamp"
-            colorClassName="text-zinc-100 hover:text-white"
-            onActivate={handlePasteClick}
+            position="right"
+            ariaLabel="Delete photo"
+            colorClassName="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300"
+            onActivate={handleDeleteClick}
           >
-            <PasteIcon className="w-5 h-5" />
+            <TrashIcon className="w-5 h-5" />
           </CardOverlayButton>
-        ) : (
-          <CardOverlayButton
-            position="left"
-            ariaLabel="Zoom photo"
-            colorClassName="text-zinc-100 hover:text-white"
-            onActivate={onZoom}
+          {/* Bottom-left slot — zoom icon, or (KTD4) a paste button on every
+              non-source card while copy mode is active. All four corners of
+              the card are already visually claimed (this slot, delete's
+              bottom-right, the selection checkmark, and the origin badge), so
+              copy mode reuses this slot rather than adding a fifth. Zoom is
+              never needed mid-copy-mode: copy mode is grid-only and the
+              lightbox is unreachable while it's active regardless. The
+              source card itself is excluded (`!isCopySource`) and keeps
+              showing zoom in this slot even while copy mode is active
+              elsewhere on the grid. */}
+          {isCopyModeActive && !isCopySource ? (
+            <CardOverlayButton
+              position="left"
+              ariaLabel="Paste timestamp"
+              colorClassName="text-zinc-100 hover:text-white"
+              onActivate={handlePasteClick}
+            >
+              <PasteIcon className="w-5 h-5" />
+            </CardOverlayButton>
+          ) : (
+            <CardOverlayButton
+              position="left"
+              ariaLabel="Zoom photo"
+              colorClassName="text-zinc-100 hover:text-white"
+              onActivate={onZoom}
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+                <circle cx="5" cy="5" r="3.5" />
+                <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
+              </svg>
+            </CardOverlayButton>
+          )}
+          {/* Copy-timestamp overlay -- bottom-center, between zoom/paste
+              (bottom-left) and delete (bottom-right). Shown only when this
+              card is the sole selected photo and has a timestamp to copy
+              (R1); independent of copy mode itself, so it stays available
+              even while a DIFFERENT card is already the active copy source. */}
+          {isSoleSelected && capturedAt != null && (
+            <CardOverlayButton
+              position="center"
+              ariaLabel="Copy timestamp"
+              colorClassName="text-blue-300 hover:text-blue-100"
+              onActivate={onCopyTimestamp}
+            >
+              <CopyIcon className="w-5 h-5" />
+            </CardOverlayButton>
+          )}
+        </div>
+        {/* "Keep best" floating trigger -- unlike every other overlay above,
+            this acts on the whole selection (2+ photos), not just this card,
+            so it can't live inside the image as a corner icon the way
+            copy-timestamp does. Instead it floats just outside the image's
+            right edge, vertically centered on it, anchored to whichever
+            photo the caller (`PhotoGrid`/`PhotoUploadPage`) determines is
+            most relevant right now (the last-selected one) -- contextual and
+            close to where the user is working, the same goal as the
+            copy-timestamp icon, just solved differently because the action
+            itself is card-spanning rather than single-card. `aria-label`
+            stays fixed so the button keeps one stable accessible name
+            through the whole operation even though its visible text swaps
+            to "Comparing…" mid-flight. */}
+        {showKeepBest && (
+          <button
+            type="button"
+            aria-label="Keep best"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              onKeepBest?.()
+            }}
+            disabled={isComparingBest}
+            className="absolute top-1/2 left-full -translate-y-1/2 ml-2 z-10 whitespace-nowrap px-3 py-1.5 text-xs font-medium bg-white dark:bg-zinc-800 border border-red-300 dark:border-red-700 text-red-700 dark:text-red-400 rounded-full shadow-md hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
-              <circle cx="5" cy="5" r="3.5" />
-              <path strokeLinecap="round" d="M10 10l-2.5-2.5" />
-            </svg>
-          </CardOverlayButton>
-        )}
-        {/* Copy-timestamp overlay -- bottom-center, between zoom/paste
-            (bottom-left) and delete (bottom-right). Shown only when this
-            card is the sole selected photo and has a timestamp to copy
-            (R1); independent of copy mode itself, so it stays available
-            even while a DIFFERENT card is already the active copy source. */}
-        {isSoleSelected && capturedAt != null && (
-          <CardOverlayButton
-            position="center"
-            ariaLabel="Copy timestamp"
-            colorClassName="text-blue-300 hover:text-blue-100"
-            onActivate={onCopyTimestamp}
-          >
-            <CopyIcon className="w-5 h-5" />
-          </CardOverlayButton>
+            {isComparingBest ? 'Comparing…' : 'Keep best'}
+          </button>
         )}
       </div>
 

@@ -117,6 +117,25 @@ type Props = {
    * into the rest of the selection.
    */
   onCopyTimestamp?: (id: string) => void
+  /**
+   * The id of the photo whose card should render the floating "Keep best"
+   * trigger, or `null`/`undefined` when it shouldn't render at all (fewer
+   * than 2 selected). The caller (`PhotoUploadPage`) derives this as
+   * whichever selected photo was most recently added to the selection,
+   * frozen to whatever it was at click time while a comparison is already
+   * running -- `PhotoGrid` itself has no visibility into selection order or
+   * in-flight state, so it just renders on whichever single id it's given.
+   */
+  anchorSelectedId?: string | null
+  /** Whether a "Keep best" comparison is currently in flight. */
+  isComparingBest?: boolean
+  /**
+   * Fires when the "Keep best" trigger is clicked -- zero-arg (unlike
+   * `onDelete`/`onZoom`/`onCopyTimestamp`) because the action targets the
+   * whole current selection, not the specific card the button happens to be
+   * rendered on.
+   */
+  onKeepBest?: () => void
 }
 
 export default function PhotoGrid({
@@ -135,6 +154,9 @@ export default function PhotoGrid({
   onPaste,
   onPasteToCluster,
   onCopyTimestamp,
+  anchorSelectedId,
+  isComparingBest,
+  onKeepBest,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
   const { renderBlocks, photosById, visualOrder, availability, isLoading } = useClusteredPhotos(
@@ -156,6 +178,7 @@ export default function PhotoGrid({
       if (!entry) return null
 
       const isSoleSelected = selectedIds?.size === 1 && selectedIds.has(id)
+      const showKeepBest = anchorSelectedId != null && id === anchorSelectedId
 
       const card = onReorder ? (
         <SortablePhotoCard
@@ -173,6 +196,9 @@ export default function PhotoGrid({
           onPaste={onPaste ? () => onPaste(id) : undefined}
           isSoleSelected={isSoleSelected}
           onCopyTimestamp={onCopyTimestamp ? () => onCopyTimestamp(id) : undefined}
+          showKeepBest={showKeepBest}
+          isComparingBest={isComparingBest}
+          onKeepBest={onKeepBest}
         />
       ) : (
         <PhotoCard
@@ -189,6 +215,9 @@ export default function PhotoGrid({
           onPaste={onPaste ? () => onPaste(id) : undefined}
           isSoleSelected={isSoleSelected}
           onCopyTimestamp={onCopyTimestamp ? () => onCopyTimestamp(id) : undefined}
+          showKeepBest={showKeepBest}
+          isComparingBest={isComparingBest}
+          onKeepBest={onKeepBest}
         />
       )
 
@@ -212,6 +241,9 @@ export default function PhotoGrid({
       isCopyModeActive,
       onPaste,
       onCopyTimestamp,
+      anchorSelectedId,
+      isComparingBest,
+      onKeepBest,
     ]
   )
 
