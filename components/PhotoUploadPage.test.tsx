@@ -3484,6 +3484,152 @@ describe('PhotoUploadPage — copy-mode (U2)', () => {
   })
 })
 
+// U5: confirms group-drag (U1-U4) needs no special-casing for clustering or
+// copy-mode (R11/R12, KTD8). Per KTD8, group-drag and copy-mode
+// (`copySourceId`) are independent state with no new guard between them --
+// these tests exercise that independence and that clustering simply re-forms
+// on its next pass from the updated timestamps, rather than being touched by
+// drag logic itself.
+describe('PhotoUploadPage — U5: cross-cluster and copy-mode regression coverage', () => {
+  function makeEntry(name: string, index: number, capturedAt?: string) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(capturedAt ?? `2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function select(name: string) {
+    fireEvent.click(screen.getByAltText(name))
+  }
+
+  it('R11: dragging a scattered multi-selection that starts partly inside a cluster to a position entirely outside every cluster resolves correct timestamps, with no cluster-specific errors and no cluster-recompute call from drag logic', () => {
+    // a, b, c form a 3-member cluster; d, e are plain singles. Select b
+    // (inside the cluster) and d (already outside it) -- a scattered
+    // selection spanning the cluster boundary -- then drag from b and drop
+    // onto e, landing the whole group past the end of the list, entirely
+    // outside the cluster.
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const d = makeEntry('d.jpg', 3, '2025-01-04T00:00:00Z')
+    const e = makeEntry('e.jpg', 4, '2025-01-05T00:00:00Z')
+    const photos = [a, b, c, d, e]
+    const updatePhotoTimestampsMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamps: updatePhotoTimestampsMock,
+    })
+    mockUseClusteredPhotos.mockImplementation((currentPhotos) =>
+      clusteredResult(currentPhotos, [[a.id, b.id, c.id], [d.id], [e.id]])
+    )
+
+    render(<PhotoUploadPage />)
+
+    // Visual order matches the flat chronological order here (the cluster's
+    // members are already contiguous and chronologically ordered), which
+    // isolates the cross-cluster-membership question from the separate
+    // visual-order-divergence hazard already covered by the U2 tests above.
+    const imgs = screen.getAllByRole('img').map((img) => (img as HTMLImageElement).alt)
+    expect(imgs).toEqual(['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg'])
+
+    select('b.jpg')
+    select('d.jpg')
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    const callsBeforeDrag = mockUseClusteredPhotos.mock.calls.length
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: b.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: b.id }, over: { id: e.id } })
+    })
+
+    // Extracting {b, d} from [a, b, c, d, e] leaves [a, c, e]; dragging
+    // forward (active originally before over) inserts the group right after
+    // e -- true neighbors: e (prev), none (next, edge-offset).
+    const [bDate, dDate] = interpolateTimestamps(e.capturedAt, null, 2)
+    expect(updatePhotoTimestampsMock).toHaveBeenCalledWith([
+      { id: b.id, date: bDate },
+      { id: d.id, date: dDate },
+    ])
+    expect(updatePhotoTimestampsMock).toHaveBeenCalledOnce()
+
+    // No cluster-specific errors, and no special-cased recompute call from
+    // drag logic: `useClusteredPhotos` keeps being invoked with exactly the
+    // same `photos` reference and a plain similarity-percent number on every
+    // render triggered by the drag (start/end) -- never with anything
+    // drag/group-shaped.
+    const callsDuringDrag = mockUseClusteredPhotos.mock.calls.slice(callsBeforeDrag)
+    expect(callsDuringDrag.length).toBeGreaterThan(0)
+    for (const call of callsDuringDrag) {
+      expect(call[0]).toBe(photos)
+      expect(typeof call[1]).toBe('number')
+    }
+  })
+
+  it('copy-mode active during a group drag -- including when the copy source is itself one of the dragged photos -- does not affect the drag, and the drag does not affect copy-mode state', () => {
+    const a = makeEntry('a.jpg', 0, '2025-01-01T00:00:00Z')
+    const b = makeEntry('b.jpg', 1, '2025-01-02T00:00:00Z')
+    const c = makeEntry('c.jpg', 2, '2025-01-03T00:00:00Z')
+    const d = makeEntry('d.jpg', 3, '2025-01-04T00:00:00Z')
+    const photos = [a, b, c, d]
+    const updatePhotoTimestampsMock = vi.fn()
+    const setPhotosTimestampMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamps: updatePhotoTimestampsMock,
+      setPhotosTimestamp: setPhotosTimestampMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    // Enter copy mode with a as the sole selection/source.
+    select('a.jpg')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy timestamp' }))
+    let banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+
+    // Extend the selection to b and c -- copySourceId (a) stays independent
+    // of selectedIds (KTD1) and is untouched by the selection change, so a
+    // ends up itself one of the group-drag's own members.
+    select('b.jpg')
+    select('c.jpg')
+    expect(screen.getByText('3 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: a.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: a.id }, over: { id: d.id } })
+    })
+
+    // The drag completes normally through the ordinary group-drag write path
+    // (`updatePhotoTimestamps`) -- copy-mode's own write path
+    // (`setPhotosTimestamp`) is never touched by it.
+    const [aDate, bDate, cDate] = interpolateTimestamps(d.capturedAt, null, 3)
+    expect(updatePhotoTimestampsMock).toHaveBeenCalledWith([
+      { id: a.id, date: aDate },
+      { id: b.id, date: bDate },
+      { id: c.id, date: cDate },
+    ])
+    expect(setPhotosTimestampMock).not.toHaveBeenCalled()
+
+    // Copy-mode state is unaffected by the group drag: still active, still
+    // sourced from a.jpg.
+    banner = screen.getByRole('button', { name: 'Done' }).parentElement as HTMLElement
+    expect(banner.textContent).toContain('a.jpg')
+  })
+})
+
 // U2: the "Keep best" control, confirmation flow, and result banner.
 // `getPhotoDimensions` is mocked (see top of file); `pickBestPhoto` is kept
 // real, so these tests exercise the actual comparator wired into the
