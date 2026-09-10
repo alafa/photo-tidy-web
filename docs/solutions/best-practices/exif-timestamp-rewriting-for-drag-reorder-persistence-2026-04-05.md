@@ -1,7 +1,7 @@
 ---
 title: "Persist Drag-and-Drop Photo Order by Rewriting EXIF Timestamps with Slot-Based Assignment"
 date: 2026-04-05
-last_updated: 2026-08-17
+last_updated: 2026-09-10
 category: best-practices
 module: photo-reorder
 problem_type: best_practice
@@ -68,7 +68,9 @@ Persisting order in EXIF timestamps rather than application state means the corr
 
 ## Examples
 
-**Current live path** — `computeDroppedTimestamp` (`components/PhotoUploadPage.tsx`) runs the same slotting algorithm shown below against the dragged photo's true visual neighbors (not necessarily its flat-array neighbors — see Related), then applies the result via `updatePhotoTimestamp(id, newDate)`. See `docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md` for why the neighbor pair has to come from the rendered order once similarity clustering is in the picture, and why `reorderPhotos` below is no longer the function that runs on a real drag.
+> **Update (multi-photo drag reorder)**: `computeDroppedTimestamp`, named as the live path just below, has since been deleted. It was generalized from a single dragged photo to a whole frozen drag-group as `interpolateTimestamps` (`lib/drag-timestamp.ts`) — same three-branch slotting shape (midpoint / +1s / -1s / unchanged), just spacing `count` values across the group's true visual boundary neighbors instead of one. The write call changed to match: the single-item `updatePhotoTimestamp(id, newDate)` call this doc describes below is no longer what a real drag triggers — the interactive path now calls the batched `updatePhotoTimestamps(updates)` (`hooks/usePhotos.ts`) once per drag, writing every group member's new timestamp in one call. `computeDroppedTimestamp`/`updatePhotoTimestamp` are kept below only as the algorithm's single-item reference shape, not the live call path.
+
+**Current live path (historical — see the update note above for what actually runs today)** — `computeDroppedTimestamp` (`components/PhotoUploadPage.tsx`) runs the same slotting algorithm shown below against the dragged photo's true visual neighbors (not necessarily its flat-array neighbors — see Related), then applies the result via `updatePhotoTimestamp(id, newDate)`. See `docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md` for why the neighbor pair has to come from the rendered order once similarity clustering is in the picture, and why `reorderPhotos` below is no longer the function that runs on a real drag.
 
 **`slotTimestamp` — reference implementation of the slotting algorithm (`hooks/usePhotos.ts`, still live and tested, no longer the interactive drag-end path):**
 
@@ -154,4 +156,4 @@ export async function writeTimestamp(file: File, newDate: Date): Promise<Blob> {
 ## Related
 
 - [`docs/solutions/ui-bugs/drag-and-drop-upload-missing-event-handlers-2026-04-05.md`](../ui-bugs/drag-and-drop-upload-missing-event-handlers-2026-04-05.md) — covers the file-upload drag surface (distinct from the reorder drag surface handled here); both are drag-and-drop in the same app but use separate mechanisms (HTML5 drop zone vs. dnd-kit sortable).
-- [`docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md`](../logic-errors/cluster-drag-timestamp-visual-order-divergence.md) — once photos can be grouped into similarity clusters that render as visual blocks, the flat array position this doc's original `reorderPhotos`/`slotTimestamp` path used to find "new neighbors" can diverge from what the user actually sees and drops onto. That doc covers the resulting bug and the fix (`computeDroppedTimestamp`, resolving neighbors from the true rendered order); this doc's core slotting algorithm is unaffected and still the right approach — only which neighbor pair feeds it had to change.
+- [`docs/solutions/logic-errors/cluster-drag-timestamp-visual-order-divergence.md`](../logic-errors/cluster-drag-timestamp-visual-order-divergence.md) — once photos can be grouped into similarity clusters that render as visual blocks, the flat array position this doc's original `reorderPhotos`/`slotTimestamp` path used to find "new neighbors" can diverge from what the user actually sees and drops onto. That doc covers the resulting bug and the fix (`computeDroppedTimestamp`, resolving neighbors from the true rendered order); this doc's core slotting algorithm is unaffected and still the right approach — only which neighbor pair feeds it had to change. `computeDroppedTimestamp` itself has since been superseded by the N-item `interpolateTimestamps` (`lib/drag-timestamp.ts`) — see the update note in Examples above.

@@ -10,8 +10,7 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
-import { usePhotos, compareByCapturedAt } from '@/hooks/usePhotos'
-import type { PhotoEntry } from '@/hooks/usePhotos'
+import { usePhotos } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
@@ -19,12 +18,14 @@ import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
 import { chunkArray } from '@/lib/chunk-array'
 import { getPhotoDimensions, pickBestPhoto } from '@/lib/photo-quality'
+import { interpolateTimestamps, computeDragGroupIds } from '@/lib/drag-timestamp'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import PhotoLightbox from './PhotoLightbox'
 import BatchEditPanel from './BatchEditPanel'
 import GoogleAuthStatus from './GoogleAuthStatus'
 import GooglePhotosUploadPanel from './GooglePhotosUploadPanel'
+import DragGroupOverlay from './DragGroupOverlay'
 import { formatDate } from '@/lib/datetime-local'
 import {
   buildPhotoZipBlob,
@@ -32,96 +33,6 @@ import {
   buildZipFilename,
   triggerDownload,
 } from '@/lib/download'
-
-/**
- * Computes `count` new timestamps for a whole dragged group dropped between
- * `prevTs` and `nextTs` — the group's TRUE final visual boundary neighbors
- * after the drop, not neighbors resolved from the flat, purely-chronological
- * `photos` array (which can disagree with visual order whenever a cluster
- * isn't array-contiguous; see `hooks/useClusteredPhotos.ts`'s `visualOrder`
- * doc). `handleDragEnd` below feeds it `effectiveGroupIds.length` for
- * `count` and zips the result 1:1 against `effectiveGroupIds`, which is
- * already in the group's pre-drag chronological order (`computeDragGroupIds`,
- * U1) — so index 0 of the returned array is the earliest-moving photo.
- *
- * N-item generalization (U3, KTD3) of the single-item algorithm
- * `hooks/usePhotos.ts`'s `slotTimestamp` (and this file's own prior
- * `computeDroppedTimestamp`) already used, generalizing its exact 3-branch
- * shape rather than inventing a new scheme:
- *
- * - Both boundaries present: evenly space `count` values strictly inside the
- *   open interval `(prevTs, nextTs)`. Reduces to byte-identical output at
- *   `count === 1` (the single midpoint). Because the values are strictly
- *   inside an open interval and evenly spaced, they come out distinct even
- *   when the interval is as tight as 1 second and `count` is 10 or more
- *   (R7) — no special-casing needed.
- * - Only `prevTs` present ("moved to the end"): `count` values spaced 1
- *   second apart starting just after `prevTs`, preserving relative order —
- *   generalizing the single-item `prevTs + 1000ms` edge offset the same way
- *   `hooks/usePhotos.ts`'s `batchSetTimestamps` staggers its own per-id
- *   writes by `rank * 1000ms`.
- * - Only `nextTs` present ("moved to the start"): the mirror image, ending
- *   1 second before `nextTs`.
- * - Neither boundary present: returns `null` for every slot. Unlike the
- *   single-item version (which had a `currentCapturedAt` parameter to fall
- *   back to), this function has no per-item "current" value to return —
- *   `null` is a sentinel `handleDragEnd` resolves back to each photo's own
- *   existing `capturedAt`, which reproduces the exact same "keep as-is"
- *   end result.
- */
-export function interpolateTimestamps(
-  prevTs: Date | null,
-  nextTs: Date | null,
-  count: number
-): (Date | null)[] {
-  if (prevTs !== null && nextTs !== null) {
-    const step = (nextTs.getTime() - prevTs.getTime()) / (count + 1)
-    return Array.from({ length: count }, (_, i) =>
-      new Date(Math.round(prevTs.getTime() + step * (i + 1)))
-    )
-  }
-  if (prevTs !== null) {
-    return Array.from({ length: count }, (_, i) => new Date(prevTs.getTime() + (i + 1) * 1000))
-  }
-  if (nextTs !== null) {
-    return Array.from({ length: count }, (_, i) => new Date(nextTs.getTime() - (count - i) * 1000))
-  }
-  return Array(count).fill(null)
-}
-
-/**
- * Computes the frozen drag-group membership for a drag that just started
- * (U1, KTD1). Called exactly once, synchronously, from `handleDragStart`, and
- * its result is stored in `dragGroupIds` state rather than re-derived later —
- * so a selection change mid-drag (Esc, deselect) can't retroactively change
- * which photos move (R1/R2/R3).
- *
- * - If the dragged photo is itself part of a >=2-member selection (R1), the
- *   WHOLE selection moves together, ordered by current chronological order
- *   (`compareByCapturedAt`, `hooks/usePhotos.ts`) -- deliberately NOT `Set`
- *   iteration order, which is click/selection order and is exactly what R5
- *   says the post-drop relative order must NOT follow.
- * - Otherwise (dragging a photo outside the selection, R2; or 0/1 photos
- *   selected, R3) -- today's single-photo drag: only the dragged photo
- *   moves.
- *
- * Pure and side-effect-free: mutating the `selectedIds` Set passed in after
- * this returns has no effect on the array already returned (arrays are
- * returned by value, not as a live view over the Set).
- */
-export function computeDragGroupIds(
-  activeId: string,
-  selectedIds: Set<string>,
-  photos: PhotoEntry[]
-): string[] {
-  if (selectedIds.has(activeId) && selectedIds.size >= 2) {
-    return photos
-      .filter((p) => selectedIds.has(p.id))
-      .sort(compareByCapturedAt)
-      .map((p) => p.id)
-  }
-  return [activeId]
-}
 
 // A small fixed concurrency bound for decoding selected photos' dimensions,
 // mirroring `UPLOAD_CONCURRENCY` in `hooks/useGooglePhotosUpload.ts` — not an
@@ -383,6 +294,23 @@ export default function PhotoUploadPage() {
     setDragGroupIds(computeDragGroupIds(id, selectedIds, photos))
   }
 
+  // dnd-kit's `PointerSensor` fires its own internal cancel -- resetting
+  // its OWN state -- on Escape, window resize, and `visibilitychange`
+  // (tab switch), regardless of whether an app-level `onDragCancel` handler
+  // is wired up at all. `dragGroupIds`/`activeId` are this component's OWN
+  // React state, though, reset only inside `handleDragEnd` -- so without
+  // this handler wired to `onDragCancel` below, any of those events would
+  // leave the frozen group permanently dimmed (`isInDragGroup` in
+  // `SortablePhotoCard` depends purely on `dragGroupIds`) until the user
+  // started and finished an unrelated full drag (doc-review finding).
+  // Purely a reset, mirroring only the top of `handleDragEnd` -- never
+  // drop-resolution or timestamp-write logic, since a cancelled drag never
+  // reaches a valid drop.
+  function handleDragCancel() {
+    setActiveId(null)
+    setDragGroupIds([])
+  }
+
   // Resolves from/to against the TRUE visual order (`visualOrder` state),
   // not the flat, purely-chronological `photos` array — dnd-kit's `over.id` is
   // resolved from actual DOM hit-testing (i.e. visual order), and a
@@ -413,13 +341,17 @@ export default function PhotoUploadPage() {
   // active photo out of the resolved order.
   //
   // Direction (insert the block right after `over.id` vs. right before it)
-  // is decided from where the actively-grabbed card itself (`active.id`,
-  // not just any group member) sat relative to `over.id` in the ORIGINAL
-  // visual order -- exactly mirroring `arrayMove(visualOrder, from, to)`'s
-  // own behavior (it lands the moved item immediately after `over.id`'s
-  // post-removal position when `from < to`, immediately before it when
-  // `from > to`). Because of that, this reduces to byte-identical
-  // single-item behavior whenever the group has exactly one member (the
+  // is decided from where the GROUP's own earliest member (`groupMinIndex`,
+  // the min across every `effectiveGroupIds` member's original index -- not
+  // just the actively-grabbed card) sat relative to `over.id` in the
+  // ORIGINAL visual order (doc-review fix: using only `active.id`'s own
+  // position let grabbing a different scattered-selection member for the
+  // identical drop target flip the group to the opposite side of that same
+  // target). This mirrors `arrayMove(visualOrder, from, to)`'s own behavior
+  // (it lands the moved item immediately after `over.id`'s post-removal
+  // position when `from < to`, immediately before it when `from > to`), and
+  // reduces to byte-identical single-item behavior whenever the group has
+  // exactly one member -- `groupMinIndex` is then exactly `activeIndex` (the
   // existing single-drag regression suite covers this).
   //
   // U3: every member of `effectiveGroupIds` gets its own interpolated
@@ -456,9 +388,20 @@ export default function PhotoUploadPage() {
     const overIndex = visualOrder.indexOf(overId)
     if (activeIndex === -1 || overIndex === -1) return
 
+    // Direction is decided from the GROUP's own aggregate position in the
+    // original `visualOrder` -- specifically its earliest member's index --
+    // not from whichever single member happened to be physically grabbed
+    // (doc-review finding: for a scattered selection, grabbing a different
+    // member for the identical drop target could otherwise flip the group
+    // to the opposite side of the same target). `groupMinIndex` reduces to
+    // exactly `activeIndex` whenever the group has just one member, so this
+    // stays byte-identical to the prior single-item behavior.
+    const groupIndices = effectiveGroupIds.map((id) => visualOrder.indexOf(id))
+    const groupMinIndex = Math.min(...groupIndices)
+
     const withoutGroup = visualOrder.filter((id) => !groupIdSet.has(id))
     const overIndexInRest = withoutGroup.indexOf(overId)
-    const insertAt = activeIndex < overIndex ? overIndexInRest + 1 : overIndexInRest
+    const insertAt = groupMinIndex < overIndex ? overIndexInRest + 1 : overIndexInRest
 
     const reordered = [
       ...withoutGroup.slice(0, insertAt),
@@ -967,6 +910,7 @@ export default function PhotoUploadPage() {
               collisionDetection={closestCenter}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
+              onDragCancel={handleDragCancel}
             >
               <PhotoGrid
                 photos={photos}
@@ -991,60 +935,17 @@ export default function PhotoUploadPage() {
               />
               <DragOverlay>
                 {activeEntry && (
+                  // U4 (KTD7): a multi-photo drag renders a stacked-thumbnail
+                  // preview (`DragGroupOverlay`) instead of the bare
+                  // single-card overlay below (R9). A single-item drag (the
+                  // `else` branch) is completely unchanged from before this
+                  // unit.
                   dragGroupIds.length >= 2 ? (
-                    // U4 (KTD7): a multi-photo drag renders a stacked-
-                    // thumbnail preview instead of the bare single-card
-                    // overlay below (R9) -- capped at 3 rendered layers
-                    // regardless of group size (plan-review decision), with
-                    // the count badge always showing the TRUE total. A
-                    // single-item drag (the `else` branch) is completely
-                    // unchanged from before this unit.
-                    // `aria-hidden` + empty `alt`s throughout: this whole
-                    // stack is a decorative, purely-visual drag preview --
-                    // every underlying photo already has its own accessible
-                    // `<img alt="filename">` in the live grid, so giving
-                    // these previews the same alt text would put duplicate,
-                    // ambiguous accessible names in the tree for no benefit
-                    // (and would make `getByAltText`-style lookups of a
-                    // grid card ambiguous while a group drag is in flight).
-                    <div
-                      className="relative w-28 aspect-square"
-                      data-testid="drag-group-overlay"
-                      aria-hidden="true"
-                    >
-                      {dragGroupIds.slice(0, 3).map((id, indexFromFront) => {
-                        const stackEntry = photosById.get(id)
-                        if (!stackEntry) return null
-                        // Back-to-front depth: the LAST rendered layer (index
-                        // 2, or fewer when the group has only 2 members) sits
-                        // at the back with the largest offset/lowest z-index;
-                        // index 0 is frontmost, unoffset, matching the bare
-                        // single-card overlay's own position.
-                        const depth = Math.min(dragGroupIds.length, 3) - 1 - indexFromFront
-                        return (
-                          <div
-                            key={id}
-                            className="absolute inset-0 rounded-md overflow-hidden ring-2 ring-white dark:ring-zinc-900"
-                            style={{
-                              transform: `translate(${depth * 6}px, ${depth * 6}px)`,
-                              zIndex: 3 - depth,
-                            }}
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element -- blob: URLs are incompatible with next/image optimizer */}
-                            <img
-                              src={getObjectUrl(stackEntry.file)}
-                              alt=""
-                              className="w-full aspect-square object-cover bg-zinc-100"
-                            />
-                          </div>
-                        )
-                      })}
-                      {/* Count badge -- always the true group size (R9), even
-                          when the stack above is capped at 3 layers. */}
-                      <div className="absolute -top-2 -right-2 z-10 whitespace-nowrap bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium px-2 py-0.5 rounded-full leading-none">
-                        {dragGroupIds.length} photos
-                      </div>
-                    </div>
+                    <DragGroupOverlay
+                      ids={dragGroupIds}
+                      photosById={photosById}
+                      getObjectUrl={getObjectUrl}
+                    />
                   ) : (
                     <PhotoCard
                       entry={activeEntry}

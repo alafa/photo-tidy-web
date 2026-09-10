@@ -4,7 +4,8 @@ import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
 import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
 import { formatDate } from '@/lib/datetime-local'
-import PhotoUploadPage, { computeDragGroupIds, interpolateTimestamps } from './PhotoUploadPage'
+import PhotoUploadPage from './PhotoUploadPage'
+import { computeDragGroupIds, interpolateTimestamps } from '@/lib/drag-timestamp'
 
 afterEach(cleanup)
 
@@ -110,6 +111,7 @@ vi.mock('@/lib/photo-quality', async (importOriginal) => {
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
+let capturedOnDragCancel: (() => void) | null = null
 
 // Capture the exact `onBatchDelete` prop PhotoUploadPage hands to
 // BatchEditPanel, so tests can invoke it directly without going through a
@@ -135,13 +137,16 @@ vi.mock('@dnd-kit/core', () => ({
     children,
     onDragStart,
     onDragEnd,
+    onDragCancel,
   }: {
     children: React.ReactNode
     onDragStart: (e: { active: { id: string } }) => void
     onDragEnd: (e: { active: { id: string }; over: { id: string } | null }) => void
+    onDragCancel?: () => void
   }) => {
     capturedOnDragStart = onDragStart
     capturedOnDragEnd = onDragEnd
+    capturedOnDragCancel = onDragCancel ?? null
     return <>{children}</>
   },
   DragOverlay: ({ children }: { children: React.ReactNode }) => (
@@ -194,6 +199,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   capturedOnDragStart = null
   capturedOnDragEnd = null
+  capturedOnDragCancel = null
   capturedOnBatchDelete = null
   // Default: no clustering (every photo its own singleton) -- matches the
   // pre-U6 "no metrics -> no clustering" baseline most tests below rely on.
@@ -808,6 +814,59 @@ describe('PhotoUploadPage — U2: generalize drop resolution to N-item groups', 
     ])
   })
 
+  it('grabbing an EXTREME scattered-selection member (not the middle one) for the identical drop target resolves the SAME boundary as grabbing the middle member does -- proving the result is independent of which member was physically grabbed', () => {
+    // Same fixture and drop target as the previous test (a..g, select
+    // b, d, f, drop onto e), but grab b (an extreme/edge member of the
+    // group in visual order) instead of d (the middle member). A buggy
+    // implementation that decided insertion direction from only the
+    // physically-grabbed card's own original index -- rather than the
+    // group's aggregate position -- could flip which side of e the group
+    // lands on depending on which member was grabbed. This test asserts
+    // grabbing b yields the exact same (e, g) boundary the previous test
+    // got from grabbing d.
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const d = makeEntry('d.jpg', 3)
+    const e = makeEntry('e.jpg', 4)
+    const f = makeEntry('f.jpg', 5)
+    const g = makeEntry('g.jpg', 6)
+    const photos = [a, b, c, d, e, f, g]
+    const updatePhotoTimestampsMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamps: updatePhotoTimestampsMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    select('b.jpg')
+    select('d.jpg')
+    select('f.jpg')
+    expect(screen.getByText('3 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: b.id } })
+    })
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: b.id }, over: { id: e.id } })
+    })
+
+    // Same true boundary (e, g) as grabbing d gave in the previous test --
+    // the group (b, d, f -- chronological freeze order) each get their own
+    // interpolated timestamp inside that same boundary regardless of which
+    // member was grabbed.
+    const [bDate, dDate, fDate] = interpolateTimestamps(e.capturedAt, g.capturedAt, 3)
+    expect(updatePhotoTimestampsMock).toHaveBeenCalledWith([
+      { id: b.id, date: bDate },
+      { id: d.id, date: dDate },
+      { id: f.id, date: fDate },
+    ])
+    expect(updatePhotoTimestampsMock).toHaveBeenCalledOnce()
+  })
+
   it('visual-order-divergence hazard, generalized to a group: dragging a group across a non-array-contiguous cluster resolves neighbors matching visualOrder, not the flat-array-based (wrong) resolution', () => {
     // a and c are reported as a cluster by the mocked useClusteredPhotos
     // below; b and d are not. b's capturedAt sits strictly between a's and
@@ -863,6 +922,16 @@ describe('PhotoUploadPage — U2: generalize drop resolution to N-item groups', 
       { id: a.id, date: aDate },
       { id: d.id, date: dDate },
     ])
+    // Independent of the computation above (which is tautological on its
+    // own -- it calls the very function under test to build its "expected"
+    // value, so it would just as happily pass against a buggy
+    // implementation): assert the group's post-drop relative order actually
+    // matches its pre-drag chronological order (R5). `a` is chronologically
+    // earlier than `d` in this fixture, and the boundary pair fed to
+    // `interpolateTimestamps` here is inverted (`c`, Jan 3, before `b`,
+    // Jan 2) -- exactly the case a direction-unaware implementation gets
+    // backwards.
+    expect(aDate!.getTime()).toBeLessThan(dDate!.getTime())
 
     // Prove the fix: resolving from the flat [a, b, c, d] instead would
     // extract {a, d} leaving [b, c], insert the group after c (still index
@@ -1121,6 +1190,50 @@ describe('PhotoUploadPage — U4: multi-select drag visual feedback', () => {
     const bWrapperAfterDrop = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
     expect(bWrapperAfterDrop.style.opacity).toBe('1')
   })
+
+  it('non-grabbed selected cards return to full opacity after the drag is CANCELLED (Escape/resize/tab-switch), not just after a completed drop -- onDragCancel resets dragGroupIds/activeId the same way handleDragEnd does', () => {
+    const photos = [
+      makeEntry('a.jpg', 0),
+      makeEntry('b.jpg', 1),
+      makeEntry('c.jpg', 2),
+    ]
+    const updatePhotoTimestampsMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamps: updatePhotoTimestampsMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    select('a.jpg')
+    select('b.jpg')
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    const bWrapperDuringDrag = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(bWrapperDuringDrag.style.opacity).toBe('0.4')
+
+    // Invoke the cancel path instead of a drop -- dnd-kit's PointerSensor
+    // fires this on Escape, window resize, or a visibilitychange (tab
+    // switch), independent of whatever app-level onDragEnd wiring exists.
+    expect(capturedOnDragCancel).not.toBeNull()
+    act(() => {
+      capturedOnDragCancel?.()
+    })
+
+    // Re-query after the cancel: dragGroupIds must reset to [] here too,
+    // exactly like a completed drop does -- otherwise b's card would stay
+    // dimmed indefinitely with no way to clear it short of another full
+    // drag. No timestamp write should have happened either (a cancel is
+    // never a drop).
+    const bWrapperAfterCancel = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(bWrapperAfterCancel.style.opacity).toBe('1')
+    expect(updatePhotoTimestampsMock).not.toHaveBeenCalled()
+  })
 })
 
 // U3 (KTD3): direct unit tests of the pure N-item interpolation helper --
@@ -1201,6 +1314,26 @@ describe('interpolateTimestamps (pure function, U3/KTD3)', () => {
     const expectedMidpoint = new Date(Math.round((prevTs.getTime() + nextTs.getTime()) / 2))
 
     expect(interpolateTimestamps(prevTs, nextTs, 1)).toEqual([expectedMidpoint])
+  })
+
+  it('R5/R6/R11: when prevTs is chronologically LATER than nextTs (an inverted boundary pair, routine when a group drag crosses a non-array-contiguous cluster), the output is still strictly ascending and falls within the pair\'s true [min, max] range -- never reversed', () => {
+    const prevTs = new Date('2025-01-03T00:00:00.000Z') // later
+    const nextTs = new Date('2025-01-02T00:00:00.000Z') // earlier
+    const result = interpolateTimestamps(prevTs, nextTs, 3)
+
+    expect(result).toHaveLength(3)
+    const lo = Math.min(prevTs.getTime(), nextTs.getTime())
+    const hi = Math.max(prevTs.getTime(), nextTs.getTime())
+    for (const d of result) {
+      expect(d).not.toBeNull()
+      expect(d!.getTime()).toBeGreaterThan(lo)
+      expect(d!.getTime()).toBeLessThan(hi)
+    }
+    // Strictly ascending -- a direction-unaware implementation (naive
+    // `prevTs + step * i` with a negative step) would instead produce a
+    // descending sequence here.
+    expect(result[0]!.getTime()).toBeLessThan(result[1]!.getTime())
+    expect(result[1]!.getTime()).toBeLessThan(result[2]!.getTime())
   })
 })
 
