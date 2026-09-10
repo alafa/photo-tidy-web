@@ -34,36 +34,59 @@ import {
 } from '@/lib/download'
 
 /**
- * Computes the new timestamp for a photo dropped between `prevCapturedAt`
- * and `nextCapturedAt` — its TRUE final visual neighbors after the drop, not
- * neighbors resolved from the flat, purely-chronological `photos` array
- * (which can disagree with visual order whenever a cluster isn't
- * array-contiguous; see `hooks/useClusteredPhotos.ts`'s `visualOrder` doc).
+ * Computes `count` new timestamps for a whole dragged group dropped between
+ * `prevTs` and `nextTs` — the group's TRUE final visual boundary neighbors
+ * after the drop, not neighbors resolved from the flat, purely-chronological
+ * `photos` array (which can disagree with visual order whenever a cluster
+ * isn't array-contiguous; see `hooks/useClusteredPhotos.ts`'s `visualOrder`
+ * doc). `handleDragEnd` below feeds it `effectiveGroupIds.length` for
+ * `count` and zips the result 1:1 against `effectiveGroupIds`, which is
+ * already in the group's pre-drag chronological order (`computeDragGroupIds`,
+ * U1) — so index 0 of the returned array is the earliest-moving photo.
  *
- * Ports the exact same midpoint/edge-offset algorithm
- * `hooks/usePhotos.ts`'s `slotTimestamp` already uses, rather than
- * reinventing it, so a drop's resulting timestamp is computed identically
- * regardless of which neighbor set (flat-array vs. true-visual) it's fed.
+ * N-item generalization (U3, KTD3) of the single-item algorithm
+ * `hooks/usePhotos.ts`'s `slotTimestamp` (and this file's own prior
+ * `computeDroppedTimestamp`) already used, generalizing its exact 3-branch
+ * shape rather than inventing a new scheme:
+ *
+ * - Both boundaries present: evenly space `count` values strictly inside the
+ *   open interval `(prevTs, nextTs)`. Reduces to byte-identical output at
+ *   `count === 1` (the single midpoint). Because the values are strictly
+ *   inside an open interval and evenly spaced, they come out distinct even
+ *   when the interval is as tight as 1 second and `count` is 10 or more
+ *   (R7) — no special-casing needed.
+ * - Only `prevTs` present ("moved to the end"): `count` values spaced 1
+ *   second apart starting just after `prevTs`, preserving relative order —
+ *   generalizing the single-item `prevTs + 1000ms` edge offset the same way
+ *   `hooks/usePhotos.ts`'s `batchSetTimestamps` staggers its own per-id
+ *   writes by `rank * 1000ms`.
+ * - Only `nextTs` present ("moved to the start"): the mirror image, ending
+ *   1 second before `nextTs`.
+ * - Neither boundary present: returns `null` for every slot. Unlike the
+ *   single-item version (which had a `currentCapturedAt` parameter to fall
+ *   back to), this function has no per-item "current" value to return —
+ *   `null` is a sentinel `handleDragEnd` resolves back to each photo's own
+ *   existing `capturedAt`, which reproduces the exact same "keep as-is"
+ *   end result.
  */
-function computeDroppedTimestamp(
-  prevCapturedAt: Date | null,
-  nextCapturedAt: Date | null,
-  currentCapturedAt: Date | null
-): Date | null {
-  if (prevCapturedAt !== null && nextCapturedAt !== null) {
-    // Midpoint between neighbours
-    return new Date(Math.round((prevCapturedAt.getTime() + nextCapturedAt.getTime()) / 2))
+export function interpolateTimestamps(
+  prevTs: Date | null,
+  nextTs: Date | null,
+  count: number
+): (Date | null)[] {
+  if (prevTs !== null && nextTs !== null) {
+    const step = (nextTs.getTime() - prevTs.getTime()) / (count + 1)
+    return Array.from({ length: count }, (_, i) =>
+      new Date(Math.round(prevTs.getTime() + step * (i + 1)))
+    )
   }
-  if (prevCapturedAt !== null) {
-    // Moved to the end — one second after the previous photo
-    return new Date(prevCapturedAt.getTime() + 1000)
+  if (prevTs !== null) {
+    return Array.from({ length: count }, (_, i) => new Date(prevTs.getTime() + (i + 1) * 1000))
   }
-  if (nextCapturedAt !== null) {
-    // Moved to the start — one second before the next photo
-    return new Date(nextCapturedAt.getTime() - 1000)
+  if (nextTs !== null) {
+    return Array.from({ length: count }, (_, i) => new Date(nextTs.getTime() - (count - i) * 1000))
   }
-  // Only photo, or all neighbours have null timestamps — keep as-is
-  return currentCapturedAt
+  return Array(count).fill(null)
 }
 
 /**
@@ -142,6 +165,7 @@ export default function PhotoUploadPage() {
     reorderPhotos,
     updatePhotoName,
     updatePhotoTimestamp,
+    updatePhotoTimestamps,
     batchUpdateNames,
     batchSetTimestamps,
     setPhotosTimestamp,
@@ -370,9 +394,11 @@ export default function PhotoUploadPage() {
   // Deliberately does NOT call `reorderPhotos` (`hooks/usePhotos.ts`) — that
   // machinery computes a dropped photo's new timestamp from ITS OWN
   // flat-array neighbors, which is exactly the wrong thing here. Instead,
-  // the true final visual neighbors are resolved locally and the same
-  // midpoint/edge-offset algorithm (`computeDroppedTimestamp`, ported from
-  // `slotTimestamp`) is applied directly via `updatePhotoTimestamp`.
+  // the true final visual neighbors are resolved locally and the N-item
+  // interpolation algorithm (`interpolateTimestamps`, ported from
+  // `slotTimestamp`/the old single-item `computeDroppedTimestamp`) is
+  // applied across the whole group and written in one batched call via
+  // `updatePhotoTimestamps` (U3, KTD3/KTD4).
   //
   // U2 (KTD2): generalized from a single dragged photo to the whole frozen
   // `dragGroupIds` (U1). "Extract every group member out of `visualOrder`,
@@ -396,12 +422,11 @@ export default function PhotoUploadPage() {
   // single-item behavior whenever the group has exactly one member (the
   // existing single-drag regression suite covers this).
   //
-  // U3 (not yet landed) will replace the single `updatePhotoTimestamp`
-  // write below with an N-item interpolation across the whole group; for
-  // now only the actively-grabbed photo's own timestamp is written, fed
-  // the group's TRUE boundary neighbors resolved here -- no other photo,
-  // in or out of the group, has its timestamp touched by this function
-  // (R8).
+  // U3: every member of `effectiveGroupIds` gets its own interpolated
+  // timestamp (`interpolateTimestamps`), fed the group's TRUE boundary
+  // neighbors resolved here, written in exactly one batched
+  // `updatePhotoTimestamps` call -- no other photo, in or out of the group,
+  // has its timestamp touched by this function (R8).
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     setActiveId(null)
@@ -437,14 +462,27 @@ export default function PhotoUploadPage() {
     const blockEnd = insertAt + effectiveGroupIds.length - 1
     const prevEntry = photosById.get(reordered[insertAt - 1])
     const nextEntry = photosById.get(reordered[blockEnd + 1])
-    const currentEntry = photosById.get(activeId)
 
-    const newTimestamp = computeDroppedTimestamp(
+    // N-item interpolation across the whole group (U3, KTD3/KTD4).
+    // `effectiveGroupIds` is already in the group's pre-drag chronological
+    // order (`computeDragGroupIds`, U1), so zipping it 1:1 against
+    // `interpolateTimestamps`' output assigns each dragged photo a new
+    // timestamp that preserves that same relative order. A `null` slot (the
+    // "neither boundary has a usable timestamp" branch) is resolved back to
+    // that photo's OWN current `capturedAt` -- exactly reproducing the old
+    // single-item `computeDroppedTimestamp`'s "keep as-is" behavior, which
+    // `interpolateTimestamps` itself can't do since it has no per-item
+    // "current" value to fall back to.
+    const interpolated = interpolateTimestamps(
       prevEntry?.capturedAt ?? null,
       nextEntry?.capturedAt ?? null,
-      currentEntry?.capturedAt ?? null
+      effectiveGroupIds.length
     )
-    updatePhotoTimestamp(activeId, newTimestamp)
+    const updates = effectiveGroupIds.map((id, i) => ({
+      id,
+      date: interpolated[i] ?? photosById.get(id)?.capturedAt ?? null,
+    }))
+    updatePhotoTimestamps(updates)
   }
 
   function toggleSelect(id: string, checked: boolean) {

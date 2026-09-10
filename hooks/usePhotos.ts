@@ -119,6 +119,31 @@ export function usePhotos() {
     )
   }, [])
 
+  /**
+   * Batched multi-id timestamp write (U3, KTD4): sets each `{id, date}`
+   * pair's `capturedAt` to its own independently-computed target date --
+   * unlike `batchSetTimestamps`/`setPhotosTimestamp`, which apply one
+   * shared anchor/date across every id, this is for a caller (drag-drop
+   * group reorder, `components/PhotoUploadPage.tsx`) that already computed
+   * a distinct date per id against its own single pre-drop snapshot.
+   *
+   * Issues exactly ONE `setPhotos` call for the whole batch, mirroring
+   * `setPhotosTimestamp`'s single-pass shape -- deliberately NOT a loop of
+   * N calls to the single-id `updatePhotoTimestamp`, which re-sorts and
+   * renumbers `uploadIndex` on every call and would shift later-processed
+   * ids' positions mid-loop before they're each read/written.
+   */
+  const updatePhotoTimestamps = useCallback((updates: { id: string; date: Date | null }[]) => {
+    const dateById = new Map(updates.map((u) => [u.id, u.date]))
+    setPhotos((prev) =>
+      sortPhotos(
+        renumberByPosition(prev).map((p) =>
+          dateById.has(p.id) ? { ...p, capturedAt: dateById.get(p.id)! } : p
+        )
+      )
+    )
+  }, [])
+
   const batchUpdateNames = useCallback((ids: string[], baseName: string) => {
     const idSet = new Set(ids)
     const padLen = String(ids.length).length
@@ -218,6 +243,7 @@ export function usePhotos() {
     reorderPhotos,
     updatePhotoName,
     updatePhotoTimestamp,
+    updatePhotoTimestamps,
     batchUpdateNames,
     batchSetTimestamps,
     setPhotosTimestamp,
