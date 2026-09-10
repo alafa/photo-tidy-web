@@ -430,6 +430,12 @@ export default function PhotoUploadPage() {
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     setActiveId(null)
+    // Reset unconditionally (including this early-return branch), mirroring
+    // `setActiveId(null)` above -- otherwise a non-grabbed selected card's
+    // dimmed treatment (U4) would survive a completed or cancelled drag
+    // until the next drag-start overwrites `dragGroupIds` (doc-review
+    // finding, U1/U4).
+    setDragGroupIds([])
     if (!over) return
 
     const activeId = active.id as string
