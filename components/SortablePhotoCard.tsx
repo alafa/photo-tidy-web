@@ -29,6 +29,16 @@ type Props = {
   showKeepBest?: boolean
   isComparingBest?: boolean
   onKeepBest?: () => void
+  /**
+   * Whether this card is a member of the frozen multi-photo drag group
+   * (U4, KTD6) currently in flight -- `components/PhotoUploadPage.tsx`'s
+   * `dragGroupIds`, threaded per-card through `PhotoGrid.tsx`'s `renderCard`
+   * (mirroring `isCopySource`'s `id === copySourceId` derivation). Only the
+   * actively-grabbed card gets `isDragging` from its own `useSortable`
+   * instance above; every OTHER dragged-group member needs this prop
+   * instead to pick up the same dimmed treatment (R10).
+   */
+  isInDragGroup?: boolean
 }
 
 export default function SortablePhotoCard({
@@ -49,6 +59,7 @@ export default function SortablePhotoCard({
   showKeepBest,
   isComparingBest,
   onKeepBest,
+  isInDragGroup,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -56,7 +67,7 @@ export default function SortablePhotoCard({
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.4 : 1,
+    opacity: isDragging || isInDragGroup ? 0.4 : 1,
   }
 
   return (

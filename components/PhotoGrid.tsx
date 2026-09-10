@@ -136,6 +136,15 @@ type Props = {
    * rendered on.
    */
   onKeepBest?: () => void
+  /**
+   * The frozen multi-photo drag group currently in flight (U4, KTD6) --
+   * `components/PhotoUploadPage.tsx`'s `dragGroupIds` state, forwarded
+   * as-is so `renderCard` below can derive each card's own `isInDragGroup`
+   * (mirroring how `copySourceId` is forwarded so each card can derive its
+   * own `isCopySource`). `undefined`/empty outside of an in-flight group
+   * drag, exactly like `dragGroupIds`'s own default state.
+   */
+  dragGroupIds?: string[]
 }
 
 export default function PhotoGrid({
@@ -157,6 +166,7 @@ export default function PhotoGrid({
   anchorSelectedId,
   isComparingBest,
   onKeepBest,
+  dragGroupIds,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
   const { renderBlocks, photosById, visualOrder, availability, isLoading } = useClusteredPhotos(
@@ -179,6 +189,7 @@ export default function PhotoGrid({
 
       const isSoleSelected = selectedIds?.size === 1 && selectedIds.has(id)
       const showKeepBest = anchorSelectedId != null && id === anchorSelectedId
+      const isInDragGroup = dragGroupIds?.includes(id) ?? false
 
       const card = onReorder ? (
         <SortablePhotoCard
@@ -199,6 +210,7 @@ export default function PhotoGrid({
           showKeepBest={showKeepBest}
           isComparingBest={isComparingBest}
           onKeepBest={onKeepBest}
+          isInDragGroup={isInDragGroup}
         />
       ) : (
         <PhotoCard
@@ -244,6 +256,7 @@ export default function PhotoGrid({
       anchorSelectedId,
       isComparingBest,
       onKeepBest,
+      dragGroupIds,
     ]
   )
 

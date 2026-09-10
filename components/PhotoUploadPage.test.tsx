@@ -984,6 +984,145 @@ describe('PhotoUploadPage — U2: generalize drop resolution to N-item groups', 
   // green, unmodified, through this unit's change (see verification run).
 })
 
+// U4: extends the drag-visual treatment (dimming, DragOverlay) to the whole
+// frozen `dragGroupIds` group (R9/R10, KTD6/KTD7). The pre-existing
+// single-drag overlay tests above
+// ('renders a floating PhotoCard in DragOverlay when drag is active' and
+// 'DragOverlay renders correctly for a card that started inside a cluster
+// section') needed NO changes for this unit -- both drag with nothing
+// selected, so `dragGroupIds` freezes to a 1-element array
+// (`computeDragGroupIds`'s `<= 1` fallback), which KTD7 requires renders
+// today's bare `<PhotoCard>` overlay, byte-for-byte unchanged.
+describe('PhotoUploadPage — U4: multi-select drag visual feedback', () => {
+  function makeEntry(name: string, index: number) {
+    const file = makeFile(name)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-01-${String(index + 1).padStart(2, '0')}T10:00:00Z`),
+      uploadIndex: index,
+    }
+  }
+
+  function select(name: string) {
+    fireEvent.click(screen.getByAltText(name))
+  }
+
+  it('a group drag of 4 renders a stacked overlay with a "4 photos" badge, capped at 3 rendered thumbnail layers', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2), makeEntry('d.jpg', 3)]
+    mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    select('a.jpg')
+    select('b.jpg')
+    select('c.jpg')
+    select('d.jpg')
+    expect(screen.getByText('4 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    const overlay = document.querySelector('[data-testid="drag-group-overlay"]') as HTMLElement
+    expect(overlay).not.toBeNull()
+    expect(overlay.textContent).toContain('4 photos')
+    expect(overlay.querySelectorAll('img')).toHaveLength(3)
+  })
+
+  it('a group drag of 12 (large selection) still caps at 3 rendered layers, with the badge correctly showing "12 photos" (not "3")', () => {
+    const photos = Array.from({ length: 12 }, (_, i) => makeEntry(`p${i}.jpg`, i))
+    mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    for (const p of photos) select(p.filename)
+    expect(screen.getByText('12 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    const overlay = document.querySelector('[data-testid="drag-group-overlay"]') as HTMLElement
+    expect(overlay).not.toBeNull()
+    expect(overlay.textContent).toContain('12 photos')
+    expect(overlay.textContent).not.toContain('3 photos')
+    expect(overlay.querySelectorAll('img')).toHaveLength(3)
+  })
+
+  it('a single-photo drag (no multi-selection) never renders the stacked drag-group overlay -- regression baseline for the pre-existing bare-PhotoCard overlay tests', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    expect(document.querySelector('[data-testid="drag-group-overlay"]')).toBeNull()
+    const overlay = document.querySelector('[data-testid="drag-overlay"]') as HTMLElement
+    expect(overlay.textContent).toContain('a.jpg')
+  })
+
+  it('non-grabbed selected cards show the dimmed treatment during an in-flight group drag', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    mockUsePhotos.mockReturnValue({ photos, processFiles: vi.fn(), reorderPhotos: vi.fn() })
+
+    render(<PhotoUploadPage />)
+
+    select('a.jpg')
+    select('b.jpg')
+    expect(screen.getByText('2 photos selected')).toBeDefined()
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    // b is a non-grabbed member of the frozen group (a, b) -- dimmed.
+    const bWrapper = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(bWrapper.style.opacity).toBe('0.4')
+
+    // c is not part of the group at all -- full opacity.
+    const cWrapper = screen.getByAltText('c.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(cWrapper.style.opacity).toBe('1')
+  })
+
+  it('non-grabbed selected cards return to full opacity after a completed drop, since dragGroupIds resets to [] in handleDragEnd', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1), makeEntry('c.jpg', 2)]
+    const updatePhotoTimestampsMock = vi.fn()
+    mockUsePhotos.mockReturnValue({
+      photos,
+      processFiles: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoTimestamps: updatePhotoTimestampsMock,
+    })
+
+    render(<PhotoUploadPage />)
+
+    select('a.jpg')
+    select('b.jpg')
+
+    act(() => {
+      capturedOnDragStart?.({ active: { id: photos[0].id } })
+    })
+
+    const bWrapperDuringDrag = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(bWrapperDuringDrag.style.opacity).toBe('0.4')
+
+    act(() => {
+      capturedOnDragEnd?.({ active: { id: photos[0].id }, over: { id: photos[2].id } })
+    })
+
+    // Re-query after the drop: `dragGroupIds` reset to [] unconditionally in
+    // `handleDragEnd`, so b's card should be back to full opacity end-to-end
+    // in the actual rendered output, not just in state.
+    const bWrapperAfterDrop = screen.getByAltText('b.jpg').closest('.flex.flex-col.gap-1')!.parentElement as HTMLElement
+    expect(bWrapperAfterDrop.style.opacity).toBe('1')
+  })
+})
+
 // U3 (KTD3): direct unit tests of the pure N-item interpolation helper --
 // `handleDragEnd`'s wiring (covered by the U2 describe block's real-value
 // assertions above) is exercised separately from this function's own
