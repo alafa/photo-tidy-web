@@ -182,6 +182,13 @@ export default function PhotoGrid({
     onVisualOrderChange?.(visualOrder)
   }, [visualOrder, onVisualOrderChange])
 
+  // A Set for O(1) membership checks in `renderCard` below, which runs once
+  // per photo in the grid -- `dragGroupIds` stays an ordered array at its
+  // source (`PhotoUploadPage.tsx`) since callers there need order (zipping
+  // against `interpolateTimestamps`, the `DragOverlay` stack), but checking
+  // membership per-card with `Array.includes` would be O(N*M) here.
+  const dragGroupIdSet = useMemo(() => new Set(dragGroupIds ?? []), [dragGroupIds])
+
   const renderCard = useCallback(
     (id: string) => {
       const entry = photosById.get(id)
@@ -189,7 +196,7 @@ export default function PhotoGrid({
 
       const isSoleSelected = selectedIds?.size === 1 && selectedIds.has(id)
       const showKeepBest = anchorSelectedId != null && id === anchorSelectedId
-      const isInDragGroup = dragGroupIds?.includes(id) ?? false
+      const isInDragGroup = dragGroupIdSet.has(id)
 
       const card = onReorder ? (
         <SortablePhotoCard
@@ -256,7 +263,7 @@ export default function PhotoGrid({
       anchorSelectedId,
       isComparingBest,
       onKeepBest,
-      dragGroupIds,
+      dragGroupIdSet,
     ]
   )
 
