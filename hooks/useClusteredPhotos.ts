@@ -62,11 +62,15 @@ export function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, P
 
 /**
  * Latest `capturedAt` (in ms) among a cluster's members — the counterpart to
- * `earliestCapturedAtMs` above, used to establish a cluster's own temporal
- * span for the non-contiguous-cluster check below. Null timestamps are
- * excluded from the max, and the result falls back to `-Infinity` when every
- * member is null, mirroring `earliestCapturedAtMs`'s `Infinity` fallback (so
- * an all-null cluster never produces a finite, checkable interval).
+ * `earliestCapturedAtMs` above. Null timestamps are excluded from the max,
+ * and the result falls back to `-Infinity` when every member is null,
+ * mirroring `earliestCapturedAtMs`'s `Infinity` fallback (so an all-null
+ * cluster never produces a finite, checkable interval). Exported for the
+ * same reason `earliestCapturedAtMs` is — the non-contiguous-cluster check
+ * below calls the shared `capturedAtBoundsMs` directly instead (it needs
+ * both bounds per cluster in one pass), so this named single-value function
+ * exists for any future caller that only needs the latest bound, the same
+ * role `earliestCapturedAtMs` already serves for day-bucketing.
  */
 export function latestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
   return capturedAtBoundsMs(cluster, photosById).latestMs

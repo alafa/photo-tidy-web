@@ -550,6 +550,23 @@ describe('PhotoGrid — timestamp suspect highlight wiring (R5/R6/KTD6)', () => 
       expect(el.className).not.toContain('text-red-600')
     }
   })
+
+  it('flags a cluster member with the red timestamp style through the SortablePhotoCard branch too (onReorder provided -- the real app\'s always-active drag path)', () => {
+    const p1 = makeEntry('p1.jpg', 0, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 1, '2025-01-03T00:00:00Z')
+    const photos = [p1, p2]
+
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[p1.id, p2.id]], {
+        nonContiguousMemberIds: new Set([p1.id, p2.id]),
+      })
+    )
+
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />)
+
+    const p1Date = screen.getByText(/Jan 1, 2025/)
+    expect(p1Date.className).toContain('text-red-600')
+  })
 })
 
 describe('PhotoGrid — U2: delete icon overlay', () => {

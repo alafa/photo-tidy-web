@@ -153,6 +153,17 @@ export default function PhotoCard({
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
+  // Single source of truth for the read-only timestamp's color/hover pair
+  // (KTD5) -- computed together here, once, rather than as separate
+  // conditionals inline in the className template, so a future edit can't
+  // silently split the base color from its hover shade and reintroduce the
+  // exact "hover cancels the red flag" bug this pairing exists to prevent.
+  const timestampColorClasses = isTimestampSuspect
+    ? 'text-red-600 dark:text-red-400'
+    : 'text-zinc-500 dark:text-zinc-400'
+  const timestampHoverClasses = isTimestampSuspect
+    ? 'hover:text-red-700 dark:hover:text-red-300'
+    : 'hover:text-zinc-700 dark:hover:text-zinc-300'
 
   const [isEditingName, setIsEditingName] = useState(false)
   const [nameValue, setNameValue] = useState(filename)
@@ -404,9 +415,7 @@ export default function PhotoCard({
         />
       ) : (
         <p
-          className={`text-xs ${
-            isTimestampSuspect ? 'text-red-600 dark:text-red-400' : 'text-zinc-500 dark:text-zinc-400'
-          } ${onTimestampChange ? `cursor-text ${isTimestampSuspect ? 'hover:text-red-700 dark:hover:text-red-300' : 'hover:text-zinc-700 dark:hover:text-zinc-300'}` : ''}`}
+          className={`text-xs ${timestampColorClasses} ${onTimestampChange ? `cursor-text ${timestampHoverClasses}` : ''}`}
           onClick={startEditTimestamp}
           title={
             isTimestampSuspect
