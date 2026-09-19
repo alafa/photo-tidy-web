@@ -67,6 +67,24 @@ export function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, P
 }
 
 /**
+ * Latest `capturedAt` (in ms) among a cluster's members — the counterpart to
+ * `earliestCapturedAtMs` above, used to establish a cluster's own temporal
+ * span for the non-contiguous-cluster check below. Null timestamps are
+ * excluded from the max, and the result falls back to `-Infinity` when every
+ * member is null, mirroring `earliestCapturedAtMs`'s `Infinity` fallback (so
+ * an all-null cluster never produces a finite, checkable interval).
+ */
+export function latestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
+  let latest = -Infinity
+  for (const id of cluster.members) {
+    const capturedAt = photosById.get(id)?.capturedAt ?? null
+    if (capturedAt === null) continue
+    latest = Math.max(latest, capturedAt.getTime())
+  }
+  return latest
+}
+
+/**
  * Sorts a cluster's members chronologically by `capturedAt`, reusing
  * `hooks/usePhotos.ts`'s `compareByCapturedAt` (a null `capturedAt` sorts
  * after every dated photo; ties, including all-null ties, break by
@@ -116,6 +134,16 @@ export interface UseClusteredPhotosResult {
   availability: ClusterApiAvailability
   /** Passed through from `useClusterApi` — true while a cluster request (including its per-photo-rejection retry) is in flight. `renderBlocks` still reflects the last successful result while this is true (R9). */
   isLoading: boolean
+  /**
+   * Every member id belonging to a temporally non-contiguous cluster: a 2+
+   * member cluster where some other photo outside the cluster has a
+   * non-null `capturedAt` strictly between the cluster's own earliest and
+   * latest member `capturedAt` (both endpoints excluded) — usually a sign
+   * one of those timestamps is wrong. A `Set` rather than a per-cluster
+   * boolean map, since the only thing a consumer needs is an O(1) "is my own
+   * id flagged" membership check.
+   */
+  nonContiguousMemberIds: Set<string>
 }
 
 /**
@@ -210,6 +238,58 @@ export function useClusteredPhotos(photos: PhotoEntry[], similarityPercent: numb
     return blocks
   }, [displayClusters])
 
+  // Every member id belonging to a temporally non-contiguous cluster (R1-R4,
+  // KTD1-KTD4): a 2+-member cluster where some photo outside it has a
+  // non-null capturedAt strictly between the cluster's own earliest and
+  // latest member capturedAt (open interval — KTD2's boundary ties don't
+  // count). Walks the already-globally-sorted `photos` array (ascending by
+  // capturedAt, nulls last — see hooks/usePhotos.ts's
+  // sortPhotos/compareByCapturedAt) instead of comparing every cluster
+  // against every other photo pairwise: since `photos` is sorted, every
+  // photo whose timestamp falls in a cluster's open interval forms one
+  // contiguous slice of `sortedDated`, located here via a binary search for
+  // the interval's lower bound rather than a full per-cluster scan.
+  const nonContiguousMemberIds = useMemo(() => {
+    const sortedDated = photos.filter((p) => p.capturedAt !== null)
+    const flagged = new Set<string>()
+
+    for (const cluster of displayClusters) {
+      if (cluster.members.length < 2) continue
+
+      const earliest = earliestCapturedAtMs(cluster, photosById)
+      const latest = latestCapturedAtMs(cluster, photosById)
+      if (!Number.isFinite(earliest) || !Number.isFinite(latest)) continue
+
+      const memberSet = new Set(cluster.members)
+
+      // Binary search for the first entry strictly greater than `earliest`
+      // — the start of the cluster's open interval slice.
+      let lo = 0
+      let hi = sortedDated.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (sortedDated[mid].capturedAt!.getTime() <= earliest) lo = mid + 1
+        else hi = mid
+      }
+
+      let isNonContiguous = false
+      for (let i = lo; i < sortedDated.length; i++) {
+        const ts = sortedDated[i].capturedAt!.getTime()
+        if (ts >= latest) break
+        if (!memberSet.has(sortedDated[i].id)) {
+          isNonContiguous = true
+          break
+        }
+      }
+
+      if (isNonContiguous) {
+        for (const id of cluster.members) flagged.add(id)
+      }
+    }
+
+    return flagged
+  }, [displayClusters, photos, photosById])
+
   // The true flattened visual order `renderBlocks` renders in: for a
   // 'cluster' block, its members (already chronologically sorted within the
   // cluster, per sortMembersChronologically above); for a 'singles' block,
@@ -231,5 +311,5 @@ export function useClusteredPhotos(photos: PhotoEntry[], similarityPercent: numb
     return order
   }, [renderBlocks])
 
-  return { renderBlocks, photosById, visualOrder, availability, isLoading }
+  return { renderBlocks, photosById, visualOrder, availability, isLoading, nonContiguousMemberIds }
 }

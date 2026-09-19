@@ -44,6 +44,7 @@ export function clusteredResult(
     renderBlocks,
     photosById,
     visualOrder,
+    nonContiguousMemberIds: new Set(),
     availability: 'available',
     isLoading: false,
     ...overrides,
