@@ -57,13 +57,7 @@ export function clusterKey(cluster: Cluster): string {
  * drag-and-drop resolves against.
  */
 export function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
-  let earliest = Infinity
-  for (const id of cluster.members) {
-    const capturedAt = photosById.get(id)?.capturedAt ?? null
-    if (capturedAt === null) continue
-    earliest = Math.min(earliest, capturedAt.getTime())
-  }
-  return earliest
+  return capturedAtBoundsMs(cluster, photosById).earliestMs
 }
 
 /**
@@ -75,13 +69,31 @@ export function earliestCapturedAtMs(cluster: Cluster, photosById: Map<string, P
  * an all-null cluster never produces a finite, checkable interval).
  */
 export function latestCapturedAtMs(cluster: Cluster, photosById: Map<string, PhotoEntry>): number {
-  let latest = -Infinity
+  return capturedAtBoundsMs(cluster, photosById).latestMs
+}
+
+/**
+ * Shared single-pass implementation behind `earliestCapturedAtMs` and
+ * `latestCapturedAtMs` above: one loop over `cluster.members` computing both
+ * bounds at once (instead of two separate loops), since the non-contiguous-
+ * cluster check below needs both per cluster. Not exported — external
+ * callers that only need one bound keep using the named single-value
+ * functions above.
+ */
+function capturedAtBoundsMs(
+  cluster: Cluster,
+  photosById: Map<string, PhotoEntry>
+): { earliestMs: number; latestMs: number } {
+  let earliestMs = Infinity
+  let latestMs = -Infinity
   for (const id of cluster.members) {
     const capturedAt = photosById.get(id)?.capturedAt ?? null
     if (capturedAt === null) continue
-    latest = Math.max(latest, capturedAt.getTime())
+    const ms = capturedAt.getTime()
+    earliestMs = Math.min(earliestMs, ms)
+    latestMs = Math.max(latestMs, ms)
   }
-  return latest
+  return { earliestMs, latestMs }
 }
 
 /**
@@ -256,8 +268,7 @@ export function useClusteredPhotos(photos: PhotoEntry[], similarityPercent: numb
     for (const cluster of displayClusters) {
       if (cluster.members.length < 2) continue
 
-      const earliest = earliestCapturedAtMs(cluster, photosById)
-      const latest = latestCapturedAtMs(cluster, photosById)
+      const { earliestMs: earliest, latestMs: latest } = capturedAtBoundsMs(cluster, photosById)
       if (!Number.isFinite(earliest) || !Number.isFinite(latest)) continue
 
       const memberSet = new Set(cluster.members)

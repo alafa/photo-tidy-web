@@ -405,10 +405,8 @@ export default function PhotoCard({
       ) : (
         <p
           className={`text-xs ${
-            isTimestampSuspect
-              ? `text-red-600 dark:text-red-400 ${onTimestampChange ? 'cursor-text hover:text-red-700 dark:hover:text-red-300' : ''}`
-              : `text-zinc-500 dark:text-zinc-400 ${onTimestampChange ? 'cursor-text hover:text-zinc-700 dark:hover:text-zinc-300' : ''}`
-          }`}
+            isTimestampSuspect ? 'text-red-600 dark:text-red-400' : 'text-zinc-500 dark:text-zinc-400'
+          } ${onTimestampChange ? `cursor-text ${isTimestampSuspect ? 'hover:text-red-700 dark:hover:text-red-300' : 'hover:text-zinc-700 dark:hover:text-zinc-300'}` : ''}`}
           onClick={startEditTimestamp}
           title={
             isTimestampSuspect
