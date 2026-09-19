@@ -159,10 +159,8 @@ export default function PhotoGrid({
   onKeepBest,
 }: Props) {
   const [similarityPercent, setSimilarityPercent] = useState(DEFAULT_SIMILARITY_PERCENT)
-  const { renderBlocks, photosById, visualOrder, availability, isLoading } = useClusteredPhotos(
-    photos,
-    similarityPercent
-  )
+  const { renderBlocks, photosById, visualOrder, nonContiguousMemberIds, availability, isLoading } =
+    useClusteredPhotos(photos, similarityPercent)
 
   // Reports the true visual order up to the parent only when it actually
   // changes (not on every render) — `onVisualOrderChange` is expected to
@@ -179,6 +177,7 @@ export default function PhotoGrid({
 
       const isSoleSelected = selectedIds?.size === 1 && selectedIds.has(id)
       const showKeepBest = anchorSelectedId != null && id === anchorSelectedId
+      const isTimestampSuspect = nonContiguousMemberIds.has(id)
 
       const card = onReorder ? (
         <SortablePhotoCard
@@ -199,6 +198,7 @@ export default function PhotoGrid({
           showKeepBest={showKeepBest}
           isComparingBest={isComparingBest}
           onKeepBest={onKeepBest}
+          isTimestampSuspect={isTimestampSuspect}
         />
       ) : (
         <PhotoCard
@@ -218,6 +218,7 @@ export default function PhotoGrid({
           showKeepBest={showKeepBest}
           isComparingBest={isComparingBest}
           onKeepBest={onKeepBest}
+          isTimestampSuspect={isTimestampSuspect}
         />
       )
 
@@ -244,6 +245,7 @@ export default function PhotoGrid({
       anchorSelectedId,
       isComparingBest,
       onKeepBest,
+      nonContiguousMemberIds,
     ]
   )
 

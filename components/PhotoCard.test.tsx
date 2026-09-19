@@ -562,6 +562,81 @@ describe('copy-timestamp overlay button', () => {
   })
 })
 
+describe('PhotoCard — timestamp suspect highlight (R5/R6/R7/KTD5/KTD7/KTD8)', () => {
+  const SUSPECT_TITLE =
+    "Part of a temporally fragmented cluster — another photo's timestamp falls between this cluster's earliest and latest, which usually means a timestamp is wrong"
+
+  it('renders the read-only timestamp in red with the explanatory title when isTimestampSuspect is true', () => {
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" isTimestampSuspect />)
+
+    const dateEl = screen.getByText(/Jan 3, 2025/)
+    expect(dateEl.className).toContain('text-red-600')
+    expect(dateEl.className).toContain('dark:text-red-400')
+    expect(dateEl.getAttribute('title')).toBe(SUSPECT_TITLE)
+  })
+
+  it('renders the read-only timestamp with the normal muted color and the default title when isTimestampSuspect is false/omitted', () => {
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" onTimestampChange={vi.fn()} />)
+
+    const dateEl = screen.getByText(/Jan 3, 2025/)
+    expect(dateEl.className).toContain('text-zinc-500')
+    expect(dateEl.className).not.toContain('text-red-600')
+    expect(dateEl.getAttribute('title')).toBe('Click to edit date')
+  })
+
+  it('does not apply the red styling or suspect title to the datetime-local input while editing -- only the display <p> is ever styled', () => {
+    const onTimestampChange = vi.fn()
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        onTimestampChange={onTimestampChange}
+        isTimestampSuspect
+      />
+    )
+
+    fireEvent.click(screen.getByText(/Jan 3, 2025/))
+    const input = document.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    expect(input.className).not.toContain('text-red-600')
+    expect(input.getAttribute('title')).toBeNull()
+  })
+
+  it('applies the red-family hover class instead of the plain zinc hover class when isTimestampSuspect is true and the card is editable (does not silently cancel the flag on hover)', () => {
+    const capturedAt = new Date('2025-01-03T14:32:00Z')
+    const entry = makeEntry({ capturedAt })
+    render(
+      <PhotoCard
+        entry={entry}
+        objectUrl="blob:test"
+        onTimestampChange={vi.fn()}
+        isTimestampSuspect
+      />
+    )
+
+    const dateEl = screen.getByText(/Jan 3, 2025/)
+    expect(dateEl.className).toContain('hover:text-red-700')
+    expect(dateEl.className).toContain('dark:hover:text-red-300')
+    expect(dateEl.className).not.toContain('hover:text-zinc-700')
+    expect(dateEl.className).not.toContain('dark:hover:text-zinc-300')
+  })
+
+  it('still applies the red highlight and title to a null-capturedAt ("No date") label when isTimestampSuspect is true', () => {
+    const entry = makeEntry({ capturedAt: null })
+    render(<PhotoCard entry={entry} objectUrl="blob:test" isTimestampSuspect />)
+
+    const dateEl = screen.getByText('No date')
+    expect(dateEl.className).toContain('text-red-600')
+    expect(dateEl.getAttribute('title')).toBe(SUSPECT_TITLE)
+  })
+})
+
 // A `describe('PhotoGrid', ...)` block used to live here, exercising
 // PhotoGrid directly against its pre-refactor Props (`{photos, getObjectUrl}`
 // only, no `metrics`). PhotoGrid's contract changed when clustering/debug

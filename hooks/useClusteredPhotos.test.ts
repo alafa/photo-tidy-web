@@ -12,7 +12,7 @@ vi.mock('@/hooks/useClusterApi', () => ({
   useClusterApi: (photos: PhotoEntry[], similarityPercent: number) => mockUseClusterApi(photos, similarityPercent),
 }))
 
-import { useClusteredPhotos, earliestCapturedAtMs } from './useClusteredPhotos'
+import { useClusteredPhotos, earliestCapturedAtMs, latestCapturedAtMs } from './useClusteredPhotos'
 
 afterEach(cleanup)
 
@@ -290,5 +290,173 @@ describe('earliestCapturedAtMs (exported for PhotoGrid.tsx day-bucketing)', () =
     const cluster = { id: 'c1', members: ['solo'] }
 
     expect(earliestCapturedAtMs(cluster, photosById)).toBe(solo.capturedAt!.getTime())
+  })
+})
+
+// U1: `latestCapturedAtMs` mirrors `earliestCapturedAtMs` exactly but with
+// Math.max / a -Infinity fallback, feeding the non-contiguous-cluster
+// detection below.
+describe('latestCapturedAtMs', () => {
+  it('returns the maximum capturedAt (in ms) among a cluster\'s members, ignoring member order', () => {
+    const early = makeEntry('early', 'early.jpg', '2024-01-01T00:00:00Z', 0)
+    const late = makeEntry('late', 'late.jpg', '2024-06-01T00:00:00Z', 1)
+    const middle = makeEntry('middle', 'middle.jpg', '2024-03-01T00:00:00Z', 2)
+    const photosById = new Map([
+      ['early', early],
+      ['late', late],
+      ['middle', middle],
+    ])
+
+    const cluster = { id: 'c1', members: ['late', 'early', 'middle'] }
+
+    expect(latestCapturedAtMs(cluster, photosById)).toBe(late.capturedAt!.getTime())
+  })
+
+  it('excludes null-capturedAt members from the max when the cluster has a mix of dated and undated members', () => {
+    const dated = makeEntry('dated', 'dated.jpg', '2024-05-01T00:00:00Z', 0)
+    const undated = makeEntry('undated', 'undated.jpg', null, 1)
+    const photosById = new Map([
+      ['dated', dated],
+      ['undated', undated],
+    ])
+    const cluster = { id: 'c1', members: ['undated', 'dated'] }
+
+    expect(latestCapturedAtMs(cluster, photosById)).toBe(dated.capturedAt!.getTime())
+  })
+
+  it('falls back to -Infinity when every member has a null capturedAt', () => {
+    const null1 = makeEntry('null1', 'null1.jpg', null, 0)
+    const null2 = makeEntry('null2', 'null2.jpg', null, 1)
+    const photosById = new Map([
+      ['null1', null1],
+      ['null2', null2],
+    ])
+    const cluster = { id: 'c1', members: ['null1', 'null2'] }
+
+    expect(latestCapturedAtMs(cluster, photosById)).toBe(-Infinity)
+  })
+
+  it('for a single-member "cluster", returns exactly that photo\'s own capturedAt', () => {
+    const solo = makeEntry('solo', 'solo.jpg', '2024-07-04T12:00:00Z', 0)
+    const photosById = new Map([['solo', solo]])
+    const cluster = { id: 'c1', members: ['solo'] }
+
+    expect(latestCapturedAtMs(cluster, photosById)).toBe(solo.capturedAt!.getTime())
+  })
+})
+
+// U1: nonContiguousMemberIds -- flags every member of a temporally
+// non-contiguous cluster (R1-R4, KTD1-KTD4).
+describe('useClusteredPhotos: nonContiguousMemberIds', () => {
+  it('flags a cluster whose members straddle an unclustered photo\'s timestamp (CONCEPTS.md example)', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const b = makeEntry('b', 'b.jpg', '2024-01-01T12:00:00Z', 1) // not in any cluster
+    const c = makeEntry('c', 'c.jpg', '2024-01-01T14:30:00Z', 2)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['a', 'c'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([a, b, c], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set(['a', 'c']))
+    expect(result.current.nonContiguousMemberIds.has('b')).toBe(false)
+  })
+
+  it('does not flag a contiguous cluster (no outside photo falls inside its span)', () => {
+    const before = makeEntry('before', 'before.jpg', '2024-01-01T09:00:00Z', 0)
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 1)
+    const b = makeEntry('b', 'b.jpg', '2024-01-01T10:02:00Z', 2)
+    const after = makeEntry('after', 'after.jpg', '2024-01-01T10:05:00Z', 3)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['a', 'b'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([before, a, b, after], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set())
+  })
+
+  it('never flags a cluster with only one dated member (a null-capturedAt member plus one dated member)', () => {
+    const undated = makeEntry('undated', 'undated.jpg', null, 0)
+    const dated = makeEntry('dated', 'dated.jpg', '2024-01-01T10:00:00Z', 1)
+    const other = makeEntry('other', 'other.jpg', '2024-01-01T09:00:00Z', 2) // outside, chronologically before
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['undated', 'dated'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([other, undated, dated], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set())
+  })
+
+  it('is never broken by an outside photo whose own capturedAt is null', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const undatedOutside = makeEntry('undatedOutside', 'undatedOutside.jpg', null, 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-01T14:00:00Z', 2)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['a', 'c'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([a, c, undatedOutside], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set())
+  })
+
+  it('does not flag when an outside photo\'s capturedAt exactly ties the cluster\'s earliest or latest bound (exclusive bounds, KTD2)', () => {
+    const tiesEarliest = makeEntry('tiesEarliest', 'tiesEarliest.jpg', '2024-01-01T10:00:00Z', 0)
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-01T14:00:00Z', 2)
+    const tiesLatest = makeEntry('tiesLatest', 'tiesLatest.jpg', '2024-01-01T14:00:00Z', 3)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['a', 'c'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([tiesEarliest, a, c, tiesLatest], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set())
+  })
+
+  it('never flags a single-member cluster (unclustered photo), even alongside a flagged cluster', () => {
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const solo = makeEntry('solo', 'solo.jpg', '2024-01-01T12:00:00Z', 1) // unclustered, sits between a and c
+    const c = makeEntry('c', 'c.jpg', '2024-01-01T14:00:00Z', 2)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({ clusters: [{ clusterIndex: 0, photoIds: ['a', 'c'] }] })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([a, solo, c], 40))
+
+    expect(result.current.nonContiguousMemberIds.has('solo')).toBe(false)
+  })
+
+  it('flags only the non-contiguous cluster when multiple clusters are present in the same batch', () => {
+    // Cluster 1 (a, c): non-contiguous -- 'gap' sits strictly between them.
+    const a = makeEntry('a', 'a.jpg', '2024-01-01T10:00:00Z', 0)
+    const gap = makeEntry('gap', 'gap.jpg', '2024-01-01T12:00:00Z', 1)
+    const c = makeEntry('c', 'c.jpg', '2024-01-01T14:00:00Z', 2)
+    // Cluster 2 (d, e): contiguous -- nothing falls between them.
+    const d = makeEntry('d', 'd.jpg', '2024-02-01T10:00:00Z', 3)
+    const e = makeEntry('e', 'e.jpg', '2024-02-01T10:02:00Z', 4)
+
+    mockUseClusterApi.mockReturnValue(
+      apiResult({
+        clusters: [
+          { clusterIndex: 0, photoIds: ['a', 'c'] },
+          { clusterIndex: 1, photoIds: ['d', 'e'] },
+        ],
+      })
+    )
+
+    const { result } = renderHook(() => useClusteredPhotos([a, gap, c, d, e], 40))
+
+    expect(result.current.nonContiguousMemberIds).toEqual(new Set(['a', 'c']))
+    expect(result.current.nonContiguousMemberIds.has('d')).toBe(false)
+    expect(result.current.nonContiguousMemberIds.has('e')).toBe(false)
   })
 })

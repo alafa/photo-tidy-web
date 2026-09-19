@@ -515,6 +515,60 @@ describe('PhotoGrid — U4: unified selection and inline editing across cluster 
   })
 })
 
+describe('PhotoGrid — timestamp suspect highlight wiring (R5/R6/KTD6)', () => {
+  it('flags every member of a cluster reported via nonContiguousMemberIds with the red timestamp style, and leaves a non-member photo (chronologically between the cluster\'s members) unstyled', () => {
+    const p1 = makeEntry('p1.jpg', 0, '2025-01-01T00:00:00Z')
+    const between = makeEntry('between.jpg', 1, '2025-01-02T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 2, '2025-01-03T00:00:00Z')
+    const photos = [p1, between, p2]
+
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[p1.id, p2.id], [between.id]], {
+        nonContiguousMemberIds: new Set([p1.id, p2.id]),
+      })
+    )
+
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
+
+    const p1Date = screen.getByText(/Jan 1, 2025/)
+    const p2Date = screen.getByText(/Jan 3, 2025/)
+    const betweenDate = screen.getByText(/Jan 2, 2025/)
+
+    expect(p1Date.className).toContain('text-red-600')
+    expect(p2Date.className).toContain('text-red-600')
+    expect(betweenDate.className).not.toContain('text-red-600')
+    expect(betweenDate.className).toContain('text-zinc-500')
+  })
+
+  it('applies no red styling to any timestamp when nonContiguousMemberIds is empty (default)', () => {
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUseClusteredPhotos.mockReturnValue(flatResult(photos))
+
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} />)
+
+    for (const el of document.querySelectorAll('p.text-xs')) {
+      expect(el.className).not.toContain('text-red-600')
+    }
+  })
+
+  it('flags a cluster member with the red timestamp style through the SortablePhotoCard branch too (onReorder provided -- the real app\'s always-active drag path)', () => {
+    const p1 = makeEntry('p1.jpg', 0, '2025-01-01T00:00:00Z')
+    const p2 = makeEntry('p2.jpg', 1, '2025-01-03T00:00:00Z')
+    const photos = [p1, p2]
+
+    mockUseClusteredPhotos.mockReturnValue(
+      clusteredResult(photos, [[p1.id, p2.id]], {
+        nonContiguousMemberIds: new Set([p1.id, p2.id]),
+      })
+    )
+
+    render(<PhotoGrid photos={photos} getObjectUrl={getObjectUrl} onReorder={vi.fn()} />)
+
+    const p1Date = screen.getByText(/Jan 1, 2025/)
+    expect(p1Date.className).toContain('text-red-600')
+  })
+})
+
 describe('PhotoGrid — U2: delete icon overlay', () => {
   const solo = makeEntry('solo.jpg', 0, '2024-12-01T00:00:00Z')
   const p1 = makeEntry('p1.jpg', 1, '2025-01-01T00:00:00Z')

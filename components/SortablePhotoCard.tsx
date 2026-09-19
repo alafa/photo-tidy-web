@@ -29,6 +29,7 @@ type Props = {
   showKeepBest?: boolean
   isComparingBest?: boolean
   onKeepBest?: () => void
+  isTimestampSuspect?: boolean
 }
 
 export default function SortablePhotoCard({
@@ -49,6 +50,7 @@ export default function SortablePhotoCard({
   showKeepBest,
   isComparingBest,
   onKeepBest,
+  isTimestampSuspect,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id })
@@ -79,6 +81,7 @@ export default function SortablePhotoCard({
         showKeepBest={showKeepBest}
         isComparingBest={isComparingBest}
         onKeepBest={onKeepBest}
+        isTimestampSuspect={isTimestampSuspect}
       />
     </div>
   )
