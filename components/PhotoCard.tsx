@@ -120,6 +120,16 @@ type Props = {
    * specific card, so there's no per-card id to bind.
    */
   onKeepBest?: () => void
+  /**
+   * Whether this card's timestamp belongs to a temporally non-contiguous
+   * cluster -- some other photo's timestamp falls between this cluster's
+   * own earliest and latest member, which usually means a timestamp is
+   * wrong (see `hooks/useClusteredPhotos.ts`'s `nonContiguousMemberIds`).
+   * Drives a red highlight + explanatory `title` on the read-only
+   * timestamp label only -- the `isEditingTimestamp` `<input>` branch below
+   * is never touched by this.
+   */
+  isTimestampSuspect?: boolean
 }
 
 export default function PhotoCard({
@@ -139,6 +149,7 @@ export default function PhotoCard({
   showKeepBest,
   isComparingBest,
   onKeepBest,
+  isTimestampSuspect,
 }: Props) {
   const { filename, capturedAt } = entry
   const dateLabel = capturedAt ? formatDate(capturedAt) : 'No date'
@@ -393,9 +404,19 @@ export default function PhotoCard({
         />
       ) : (
         <p
-          className={`text-xs text-zinc-500 dark:text-zinc-400 ${onTimestampChange ? 'cursor-text hover:text-zinc-700 dark:hover:text-zinc-300' : ''}`}
+          className={`text-xs ${
+            isTimestampSuspect
+              ? `text-red-600 dark:text-red-400 ${onTimestampChange ? 'cursor-text hover:text-red-700 dark:hover:text-red-300' : ''}`
+              : `text-zinc-500 dark:text-zinc-400 ${onTimestampChange ? 'cursor-text hover:text-zinc-700 dark:hover:text-zinc-300' : ''}`
+          }`}
           onClick={startEditTimestamp}
-          title={onTimestampChange ? 'Click to edit date' : undefined}
+          title={
+            isTimestampSuspect
+              ? "Part of a temporally fragmented cluster — another photo's timestamp falls between this cluster's earliest and latest, which usually means a timestamp is wrong"
+              : onTimestampChange
+                ? 'Click to edit date'
+                : undefined
+          }
         >
           {dateLabel}
         </p>
