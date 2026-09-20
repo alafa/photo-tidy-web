@@ -11,14 +11,14 @@ import {
 } from '@dnd-kit/core'
 import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core'
 import { arrayMove } from '@dnd-kit/sortable'
-import { usePhotos } from '@/hooks/usePhotos'
+import { usePhotos, type PhotoEntry } from '@/hooks/usePhotos'
 import { useObjectUrls } from '@/hooks/useObjectUrls'
 import { useGoogleAuth } from '@/hooks/useGoogleAuth'
 import { useGooglePhotosPicker } from '@/hooks/useGooglePhotosPicker'
 import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
 import { chunkArray } from '@/lib/chunk-array'
-import { getPhotoDimensions, pickBestPhoto } from '@/lib/photo-quality'
+import { getPhotoDimensions, pickBestPhoto, type PhotoQualityCandidate } from '@/lib/photo-quality'
 import { scanForExactDuplicateGroups } from '@/lib/duplicate-scan'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
@@ -99,6 +99,63 @@ async function decodeDimensionsWithConcurrency(
     }
   }
   return result
+}
+
+/**
+ * Builds one `pickBestPhoto` candidate from a decoded dimensions map --
+ * shared by `handleKeepBest` and `handleRemoveDuplicates`, which both decode
+ * a set of ids via `decodeDimensionsWithConcurrency` and then need the exact
+ * same `{id, width, height, size, uploadIndex}` shape per id before calling
+ * `pickBestPhoto`. A missing decode entry (id removed mid-comparison, or its
+ * own decode failed) falls back to `{width: 0, height: 0}` -- callers don't
+ * need to special-case it further, `pickBestPhoto` already treats a genuine
+ * 0x0 as the lowest possible resolution.
+ */
+function buildQualityCandidate(
+  id: string,
+  photosById: Map<string, PhotoEntry>,
+  dimensionsById: Map<string, { width: number; height: number }>
+): PhotoQualityCandidate {
+  const photo = photosById.get(id)!
+  const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
+  return {
+    id,
+    width: dims.width,
+    height: dims.height,
+    size: photo.file.size,
+    uploadIndex: photo.uploadIndex,
+  }
+}
+
+/**
+ * Shared shape for this file's independently-gated, dismissible result
+ * banners (`zipWarning`, `keepBestResult`, `duplicateScanResult`) -- each is
+ * its own sibling block, never nested inside a `photos.length > 0`-style
+ * conditional, since each action can reduce `photos.length` down to its own
+ * minimum survivor count and a banner nested that way has previously gone
+ * silently invisible once its gate went false mid-operation.
+ */
+function DismissibleBanner({
+  tone,
+  message,
+  onDismiss,
+}: {
+  tone: 'red' | 'blue'
+  message: string
+  onDismiss: () => void
+}) {
+  const toneClasses =
+    tone === 'red'
+      ? 'bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300'
+      : 'bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300'
+  return (
+    <div className={`${toneClasses} border rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3`}>
+      <span>{message}</span>
+      <button onClick={onDismiss} className="text-xs underline shrink-0">
+        Dismiss
+      </button>
+    </div>
+  )
 }
 
 export default function PhotoUploadPage() {
@@ -562,17 +619,7 @@ export default function PhotoUploadPage() {
         return
       }
 
-      const candidates = ids.map((id) => {
-        const photo = photosByIdRef.current.get(id)!
-        const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
-        return {
-          id,
-          width: dims.width,
-          height: dims.height,
-          size: photo.file.size,
-          uploadIndex: photo.uploadIndex,
-        }
-      })
+      const candidates = ids.map((id) => buildQualityCandidate(id, photosByIdRef.current, dimensionsById))
 
       const { winnerId, loserIds } = pickBestPhoto(candidates)
       const winnerPhoto = photosByIdRef.current.get(winnerId)!
@@ -648,17 +695,7 @@ export default function PhotoUploadPage() {
 
       const allLoserIds: string[] = []
       for (const group of validGroups) {
-        const candidates = group.map((id) => {
-          const photo = photosByIdRef.current.get(id)!
-          const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
-          return {
-            id,
-            width: dims.width,
-            height: dims.height,
-            size: photo.file.size,
-            uploadIndex: photo.uploadIndex,
-          }
-        })
+        const candidates = group.map((id) => buildQualityCandidate(id, photosByIdRef.current, dimensionsById))
         const { loserIds } = pickBestPhoto(candidates)
         allLoserIds.push(...loserIds)
       }
@@ -999,15 +1036,7 @@ export default function PhotoUploadPage() {
         )}
 
         {zipWarning && (
-          <div className="bg-red-50 border border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
-            <span>{zipWarning}</span>
-            <button
-              onClick={() => setZipWarning(null)}
-              className="text-xs underline shrink-0"
-            >
-              Dismiss
-            </button>
-          </div>
+          <DismissibleBanner tone="red" message={zipWarning} onDismiss={() => setZipWarning(null)} />
         )}
 
         {/* Keep-best result banner -- an independent, own-gated sibling,
@@ -1019,15 +1048,7 @@ export default function PhotoUploadPage() {
             slot carries both the completion message and the
             "selection changed" abort message. */}
         {keepBestResult && (
-          <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
-            <span>{keepBestResult}</span>
-            <button
-              onClick={() => setKeepBestResult(null)}
-              className="text-xs underline shrink-0"
-            >
-              Dismiss
-            </button>
-          </div>
+          <DismissibleBanner tone="blue" message={keepBestResult} onDismiss={() => setKeepBestResult(null)} />
         )}
 
         {/* Remove-duplicates result banner (U2, KTD7/R10) -- an
@@ -1036,15 +1057,11 @@ export default function PhotoUploadPage() {
             own established pattern above: this action can reduce
             `photos.length` to 0. */}
         {duplicateScanResult && (
-          <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
-            <span>{duplicateScanResult}</span>
-            <button
-              onClick={() => setDuplicateScanResult(null)}
-              className="text-xs underline shrink-0"
-            >
-              Dismiss
-            </button>
-          </div>
+          <DismissibleBanner
+            tone="blue"
+            message={duplicateScanResult}
+            onDismiss={() => setDuplicateScanResult(null)}
+          />
         )}
       </div>
 

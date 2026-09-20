@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react'
 import type { PhotoEntry } from '@/hooks/usePhotos'
 import type { UseClusteredPhotosResult } from '@/hooks/useClusteredPhotos'
+import type { DuplicateScanResult } from '@/lib/duplicate-scan'
 import { clusteredResult, flatResult } from '@/lib/test-helpers/cluster-render-blocks'
 import { formatDate } from '@/lib/datetime-local'
 import PhotoUploadPage from './PhotoUploadPage'
@@ -115,9 +116,7 @@ vi.mock('@/lib/photo-quality', async (importOriginal) => {
 // lib/duplicate-scan.test.ts). `pickBestPhoto` (imported separately, kept
 // real above) is exercised for real here too.
 const mockScanForExactDuplicateGroups =
-  vi.fn<
-    (photos: PhotoEntry[]) => Promise<{ ok: true; groups: string[][] } | { ok: false }>
-  >()
+  vi.fn<(photos: PhotoEntry[]) => Promise<DuplicateScanResult>>()
 vi.mock('@/lib/duplicate-scan', () => ({
   scanForExactDuplicateGroups: (photos: PhotoEntry[]) => mockScanForExactDuplicateGroups(photos),
 }))
