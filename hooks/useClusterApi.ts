@@ -109,7 +109,7 @@ type AttemptResult =
   | { ok: false; rejectedId: string | null }
 
 /** Posts one `/api/cluster` request excluding `excludeIds`, built from `thumbnailsByFile`. */
-async function postCluster(
+export async function postCluster(
   photos: PhotoEntry[],
   excludeIds: Set<string>,
   thumbnailsByFile: Map<File, string | null>,
