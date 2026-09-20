@@ -693,8 +693,27 @@ export default function PhotoUploadPage() {
         (id) => photosByIdRef.current.get(id)?.file
       )
 
+      // Re-validate again immediately before use, not just before the decode
+      // above: `decodeDimensionsWithConcurrency` spans real async decode
+      // work, during which a group member can be deleted by some other
+      // action (per-card delete, Keep Best, "Clear all" -- none of which
+      // are blocked while `isScanningDuplicates` is true). Mirrors
+      // `handleKeepBest`'s own re-check, which runs after its decode and
+      // before building candidates for the same reason -- without this,
+      // `buildQualityCandidate`'s `photosById.get(id)!` would throw for a
+      // since-deleted id, and that single throw would abort every group's
+      // losers, not just the affected group's.
+      const stillValidGroups = validGroups
+        .map((group) => group.filter((id) => photosByIdRef.current.has(id)))
+        .filter((group) => group.length >= 2)
+
+      if (stillValidGroups.length === 0) {
+        setDuplicateScanResult('No duplicate photos found.')
+        return
+      }
+
       const allLoserIds: string[] = []
-      for (const group of validGroups) {
+      for (const group of stillValidGroups) {
         const candidates = group.map((id) => buildQualityCandidate(id, photosByIdRef.current, dimensionsById))
         const { loserIds } = pickBestPhoto(candidates)
         allLoserIds.push(...loserIds)

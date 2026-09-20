@@ -63,7 +63,8 @@ export async function scanForExactDuplicateGroups(photos: PhotoEntry[]): Promise
   let result
   try {
     result = await postCluster(photos, excludeIds, thumbnailsByFile, EXACT_DUPLICATE_THRESHOLD)
-  } catch {
+  } catch (err) {
+    console.warn('scanForExactDuplicateGroups: cluster request failed', err)
     return { ok: false }
   }
 
@@ -71,7 +72,8 @@ export async function scanForExactDuplicateGroups(photos: PhotoEntry[]): Promise
     excludeIds.add(result.rejectedId)
     try {
       result = await postCluster(photos, excludeIds, thumbnailsByFile, EXACT_DUPLICATE_THRESHOLD)
-    } catch {
+    } catch (err) {
+      console.warn('scanForExactDuplicateGroups: cluster retry request failed', err)
       return { ok: false }
     }
   }
