@@ -107,6 +107,21 @@ vi.mock('@/lib/photo-quality', async (importOriginal) => {
   }
 })
 
+// U2 (Remove duplicates): `scanForExactDuplicateGroups` is mocked the same
+// closure-capture technique as `getPhotoDimensions` above -- a fresh
+// `vi.fn()` each test controls directly, since the real implementation
+// makes an actual network call via `postCluster`/`useClusterApi`, which
+// this file has no interest in exercising (covered by
+// lib/duplicate-scan.test.ts). `pickBestPhoto` (imported separately, kept
+// real above) is exercised for real here too.
+const mockScanForExactDuplicateGroups =
+  vi.fn<
+    (photos: PhotoEntry[]) => Promise<{ ok: true; groups: string[][] } | { ok: false }>
+  >()
+vi.mock('@/lib/duplicate-scan', () => ({
+  scanForExactDuplicateGroups: (photos: PhotoEntry[]) => mockScanForExactDuplicateGroups(photos),
+}))
+
 // Capture dnd-kit callbacks so tests can invoke them directly
 let capturedOnDragStart: ((e: { active: { id: string } }) => void) | null = null
 let capturedOnDragEnd: ((e: { active: { id: string }; over: { id: string } | null }) => void) | null = null
@@ -238,6 +253,9 @@ beforeEach(() => {
   // overrides this with its own per-file mapping.
   mockGetPhotoDimensions.mockReset()
   mockGetPhotoDimensions.mockResolvedValue({ width: 0, height: 0 })
+  // Default: no duplicate groups found, unless a test overrides this.
+  mockScanForExactDuplicateGroups.mockReset()
+  mockScanForExactDuplicateGroups.mockResolvedValue({ ok: true, groups: [] })
 })
 
 describe('PhotoUploadPage', () => {
@@ -3320,5 +3338,381 @@ describe('PhotoUploadPage — Keep best', () => {
     // Once the operation ends, the anchor is live again -- c is now the
     // most recently selected of the three.
     expect(keepBestAnchorFilename()).toBe('c.jpg')
+  })
+})
+
+// U2: "Remove duplicates" -- an always-visible whole-batch action with no
+// selection input at all (R1/R2), distinct from "Keep best" above (which
+// requires a 2+ selection). These mirror the "Keep best" describe block's
+// conventions: same helper shapes, same stateful removePhotos mock so
+// deletions are actually reflected on the next render.
+describe('PhotoUploadPage — Remove duplicates', () => {
+  function makeFileWithSize(name: string, size: number): File {
+    return new File([new Uint8Array(size)], name, { type: 'image/jpeg' })
+  }
+
+  function makeEntry(
+    name: string,
+    index: number,
+    overrides: Partial<PhotoEntry> = {}
+  ): PhotoEntry {
+    const file = overrides.file ?? makeFileWithSize(name, 10)
+    return {
+      id: `${name}-${index}`,
+      file,
+      filename: name,
+      capturedAt: new Date(`2025-0${index + 1}-01T10:00:00Z`),
+      uploadIndex: index,
+      source: 'local',
+      ...overrides,
+    }
+  }
+
+  function basePhotosReturn(photos: PhotoEntry[], removePhotos = vi.fn()) {
+    return {
+      photos,
+      processFiles: vi.fn(),
+      addPhotos: vi.fn(),
+      reorderPhotos: vi.fn(),
+      updatePhotoName: vi.fn(),
+      updatePhotoTimestamp: vi.fn(),
+      batchUpdateNames: vi.fn(),
+      batchSetTimestamps: vi.fn(),
+      removePhotos,
+    }
+  }
+
+  // Mirrors the stateful mock pattern from "Keep best" above -- removePhotos
+  // filters a mutable local list, so the next render (triggered by any state
+  // change) reflects the deletion.
+  function makeStatefulPhotosMock(initialPhotos: PhotoEntry[]) {
+    let current = initialPhotos
+    const removePhotosMock = vi.fn((ids: string[]) => {
+      const idSet = new Set(ids)
+      current = current.filter((p) => !idSet.has(p.id))
+    })
+    mockUsePhotos.mockImplementation(() => basePhotosReturn(current, removePhotosMock))
+    return removePhotosMock
+  }
+
+  function configureDims(map: Map<File, { width: number; height: number }>) {
+    mockGetPhotoDimensions.mockImplementation(async (file: File) => map.get(file) ?? { width: 0, height: 0 })
+  }
+
+  function removeDuplicatesButton(): HTMLButtonElement | null {
+    return screen.queryByRole('button', {
+      name: /^(Remove duplicates|Scanning for duplicates…)$/,
+    }) as HTMLButtonElement | null
+  }
+
+  it('is present whenever photos.length > 0, absent at 0 with no scan in flight and no result pending, and unaffected by selectedIds', () => {
+    mockUsePhotos.mockReturnValue(basePhotosReturn([]))
+    const { rerender } = render(<PhotoUploadPage />)
+    expect(removeDuplicatesButton()).toBeNull()
+
+    const photos = [makeEntry('a.jpg', 0), makeEntry('b.jpg', 1)]
+    mockUsePhotos.mockReturnValue(basePhotosReturn(photos))
+    rerender(<PhotoUploadPage />)
+    expect(removeDuplicatesButton()).not.toBeNull()
+
+    // 0 selected (just above), then 1, then many -- the button is unaffected
+    // by selectedIds in any way.
+    fireEvent.click(screen.getByAltText('a.jpg'))
+    expect(removeDuplicatesButton()).not.toBeNull()
+    fireEvent.click(screen.getByAltText('b.jpg'))
+    expect(removeDuplicatesButton()).not.toBeNull()
+  })
+
+  it('a successful scan finding one 2-member duplicate group: confirming deletes the lower-quality photo via handleBatchDelete, called with exactly its id, and reports the correct count', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2) // untouched bystander, not part of any group
+    const removePhotosMock = makeStatefulPhotosMock([a, b, c])
+    mockScanForExactDuplicateGroups.mockResolvedValue({ ok: true, groups: [[a.id, b.id]] })
+    configureDims(
+      new Map([
+        [a.file, { width: 100, height: 100 }],
+        [b.file, { width: 400, height: 300 }],
+      ])
+    )
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+    expect(confirmSpy).toHaveBeenCalledWith('Found 1 duplicate photo(s) to remove. Continue?')
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    expect(removePhotosMock).toHaveBeenCalledWith([a.id])
+
+    await waitFor(() => expect(screen.getByText('Removed 1 duplicate(s).')).toBeDefined())
+  })
+
+  it('the button and its "Scanning for duplicates…" label remain visible even if every photo is deleted (via per-card delete) while the scan is still in flight', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const removePhotosMock = makeStatefulPhotosMock([a, b])
+
+    let resolveScan: (result: { ok: true; groups: string[][] }) => void = () => {}
+    const pendingScan = new Promise<{ ok: true; groups: string[][] }>((resolve) => {
+      resolveScan = resolve
+    })
+    mockScanForExactDuplicateGroups.mockReturnValue(pendingScan)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(screen.getByText('Scanning for duplicates…')).toBeDefined())
+
+    // Delete every photo via its own per-card delete icon while the scan is
+    // still pending -- the row does not unmount out from under the
+    // in-progress action.
+    while (screen.queryAllByRole('button', { name: 'Delete photo' }).length > 0) {
+      fireEvent.click(screen.getAllByRole('button', { name: 'Delete photo' })[0])
+    }
+    expect(removePhotosMock).toHaveBeenCalled()
+    expect(screen.queryAllByRole('img')).toHaveLength(0)
+
+    expect(removeDuplicatesButton()).not.toBeNull()
+    expect(screen.getByText('Scanning for duplicates…')).toBeDefined()
+
+    await act(async () => {
+      resolveScan({ ok: true, groups: [] })
+      await pendingScan
+    })
+
+    await waitFor(() => expect(screen.getByText('No duplicate photos found.')).toBeDefined())
+  })
+
+  it('two independent duplicate groups found in the same scan: confirming deletes both groups\' losers in one handleBatchDelete call, with the combined total reflected in both the confirm and result text', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const d = makeEntry('d.jpg', 3)
+    const removePhotosMock = makeStatefulPhotosMock([a, b, c, d])
+    mockScanForExactDuplicateGroups.mockResolvedValue({
+      ok: true,
+      groups: [
+        [a.id, b.id],
+        [c.id, d.id],
+      ],
+    })
+    configureDims(
+      new Map([
+        [a.file, { width: 100, height: 100 }],
+        [b.file, { width: 400, height: 300 }],
+        [c.file, { width: 100, height: 100 }],
+        [d.file, { width: 400, height: 300 }],
+      ])
+    )
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+    expect(confirmSpy).toHaveBeenCalledWith('Found 2 duplicate photo(s) to remove. Continue?')
+
+    expect(removePhotosMock).toHaveBeenCalledOnce()
+    const removedIds = removePhotosMock.mock.calls[0][0] as string[]
+    expect(new Set(removedIds)).toEqual(new Set([a.id, c.id]))
+
+    await waitFor(() => expect(screen.getByText('Removed 2 duplicate(s).')).toBeDefined())
+  })
+
+  it('declining the confirm dialog calls handleBatchDelete with nothing, and no result message is set', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const removePhotosMock = makeStatefulPhotosMock([a, b])
+    mockScanForExactDuplicateGroups.mockResolvedValue({ ok: true, groups: [[a.id, b.id]] })
+    configureDims(
+      new Map([
+        [a.file, { width: 100, height: 100 }],
+        [b.file, { width: 400, height: 300 }],
+      ])
+    )
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(window.confirm).toHaveBeenCalled())
+    expect(removePhotosMock).not.toHaveBeenCalled()
+    expect(screen.queryByText(/^Removed /)).toBeNull()
+    expect(screen.queryByText('No duplicate photos found.')).toBeNull()
+  })
+
+  it('a scan resolving { ok: true, groups: [] } shows "No duplicate photos found." with no confirm dialog', async () => {
+    const a = makeEntry('a.jpg', 0)
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+    mockScanForExactDuplicateGroups.mockResolvedValue({ ok: true, groups: [] })
+    const confirmSpy = vi.spyOn(window, 'confirm')
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(screen.getByText('No duplicate photos found.')).toBeDefined())
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('a scan whose groups are entirely invalidated by re-validation (referencing ids no longer present) also shows "No duplicate photos found." with no confirm dialog', async () => {
+    const a = makeEntry('a.jpg', 0)
+    mockUsePhotos.mockReturnValue(basePhotosReturn([a]))
+    mockScanForExactDuplicateGroups.mockResolvedValue({
+      ok: true,
+      groups: [['missing-1', 'missing-2']],
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm')
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(screen.getByText('No duplicate photos found.')).toBeDefined())
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('a scan resolving { ok: false } shows the scan-failure message with no confirm dialog and no deletion', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const removePhotosMock = makeStatefulPhotosMock([a, b])
+    mockScanForExactDuplicateGroups.mockResolvedValue({ ok: false })
+    const confirmSpy = vi.spyOn(window, 'confirm')
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't scan for duplicates — try again.")).toBeDefined()
+    )
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(removePhotosMock).not.toHaveBeenCalled()
+  })
+
+  it('if a member of a found 2-member duplicate group is deleted (via its own per-card delete) while the scan is still in flight, the group falls under 2 and is dropped before the confirm dialog is shown', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const removePhotosMock = makeStatefulPhotosMock([a, b])
+
+    let resolveScan: (result: { ok: true; groups: string[][] }) => void = () => {}
+    const pendingScan = new Promise<{ ok: true; groups: string[][] }>((resolve) => {
+      resolveScan = resolve
+    })
+    mockScanForExactDuplicateGroups.mockReturnValue(pendingScan)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+    await waitFor(() => expect(screen.getByText('Scanning for duplicates…')).toBeDefined())
+
+    // Delete b via its own per-card delete icon while the scan is pending.
+    const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+    fireEvent.click(deleteButtons[1])
+    expect(removePhotosMock).toHaveBeenCalledWith([b.id])
+
+    await act(async () => {
+      resolveScan({ ok: true, groups: [[a.id, b.id]] })
+      await pendingScan
+    })
+
+    await waitFor(() => expect(screen.getByText('No duplicate photos found.')).toBeDefined())
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('if a member of a found 3-member duplicate group is deleted while the scan is still in flight, the group shrinks to its remaining 2 ids before the confirm dialog is shown', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    const removePhotosMock = makeStatefulPhotosMock([a, b, c])
+
+    let resolveScan: (result: { ok: true; groups: string[][] }) => void = () => {}
+    const pendingScan = new Promise<{ ok: true; groups: string[][] }>((resolve) => {
+      resolveScan = resolve
+    })
+    mockScanForExactDuplicateGroups.mockReturnValue(pendingScan)
+    configureDims(
+      new Map([
+        [a.file, { width: 100, height: 100 }],
+        [c.file, { width: 400, height: 300 }],
+      ])
+    )
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+    await waitFor(() => expect(screen.getByText('Scanning for duplicates…')).toBeDefined())
+
+    // Delete b via its own per-card delete icon while the scan is pending --
+    // a and c (still present) remain a valid 2-member group.
+    const deleteButtons = screen.getAllByRole('button', { name: 'Delete photo' })
+    fireEvent.click(deleteButtons[1])
+    expect(removePhotosMock).toHaveBeenCalledWith([b.id])
+
+    await act(async () => {
+      resolveScan({ ok: true, groups: [[a.id, b.id, c.id]] })
+      await pendingScan
+    })
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled())
+    expect(confirmSpy).toHaveBeenCalledWith('Found 1 duplicate photo(s) to remove. Continue?')
+    // a (lower resolution of the surviving {a, c} pair) is the loser.
+    expect(removePhotosMock).toHaveBeenCalledWith([a.id])
+  })
+
+  it('while isScanningDuplicates is true, the button is disabled and shows "Scanning for duplicates…"; both clear once the flow reaches the confirm dialog', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    makeStatefulPhotosMock([a, b])
+
+    let resolveScan: (result: { ok: true; groups: string[][] }) => void = () => {}
+    const pendingScan = new Promise<{ ok: true; groups: string[][] }>((resolve) => {
+      resolveScan = resolve
+    })
+    mockScanForExactDuplicateGroups.mockReturnValue(pendingScan)
+    mockGetPhotoDimensions.mockResolvedValue({ width: 100, height: 100 })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<PhotoUploadPage />)
+    fireEvent.click(removeDuplicatesButton()!)
+
+    await waitFor(() => expect(screen.getByText('Scanning for duplicates…')).toBeDefined())
+    expect(removeDuplicatesButton()!.disabled).toBe(true)
+
+    await act(async () => {
+      resolveScan({ ok: true, groups: [[a.id, b.id]] })
+      await pendingScan
+    })
+
+    await waitFor(() => expect(window.confirm).toHaveBeenCalled())
+    expect(screen.queryByText('Scanning for duplicates…')).toBeNull()
+    expect(removeDuplicatesButton()!.disabled).toBe(false)
+  })
+
+  it('after a completed remove-duplicates action, the Keep Best button and keepBestResult banner are unaffected -- reflecting only their own independent state', async () => {
+    const a = makeEntry('a.jpg', 0)
+    const b = makeEntry('b.jpg', 1)
+    const c = makeEntry('c.jpg', 2)
+    makeStatefulPhotosMock([a, b, c])
+    mockScanForExactDuplicateGroups.mockResolvedValue({ ok: true, groups: [[a.id, b.id]] })
+    configureDims(
+      new Map([
+        [a.file, { width: 100, height: 100 }],
+        [b.file, { width: 400, height: 300 }],
+      ])
+    )
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<PhotoUploadPage />)
+
+    // Keep Best is hidden with 0 selected, before the action runs.
+    expect(screen.queryByRole('button', { name: 'Keep best' })).toBeNull()
+
+    fireEvent.click(removeDuplicatesButton()!)
+    await waitFor(() => expect(screen.getByText('Removed 1 duplicate(s).')).toBeDefined())
+
+    // Keep Best's own state is untouched by this unrelated action: still
+    // hidden (no selection was ever made), and no keepBestResult banner
+    // ever appeared.
+    expect(screen.queryByRole('button', { name: 'Keep best' })).toBeNull()
+    expect(screen.queryByText(/^Kept /)).toBeNull()
   })
 })

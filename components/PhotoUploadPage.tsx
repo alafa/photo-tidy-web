@@ -19,6 +19,7 @@ import { useGooglePhotosUpload } from '@/hooks/useGooglePhotosUpload'
 import { usePhotoPersistence } from '@/hooks/usePhotoPersistence'
 import { chunkArray } from '@/lib/chunk-array'
 import { getPhotoDimensions, pickBestPhoto } from '@/lib/photo-quality'
+import { scanForExactDuplicateGroups } from '@/lib/duplicate-scan'
 import PhotoCard from './PhotoCard'
 import PhotoGrid from './PhotoGrid'
 import PhotoLightbox from './PhotoLightbox'
@@ -173,6 +174,15 @@ export default function PhotoUploadPage() {
   // decode (that change itself is what the operation's own re-validation
   // later aborts on), rather than jumping to a different card or vanishing.
   const [comparingAnchorId, setComparingAnchorId] = useState<string | null>(null)
+
+  // Remove-duplicates state (U2, KTD7). Own independent pair, not a reuse
+  // of isComparingBest/keepBestResult -- this action has no selection
+  // input at all (R2), so it needs neither an anchor card nor a
+  // selection-changed re-check, just its own in-flight flag and its own
+  // dismissible result banner (rendered as its own gated sibling, same
+  // convention as keepBestResult below).
+  const [isScanningDuplicates, setIsScanningDuplicates] = useState(false)
+  const [duplicateScanResult, setDuplicateScanResult] = useState<string | null>(null)
 
   // Add distance constraint so short clicks don't trigger drag (allows checkboxes + inputs to work)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
@@ -593,6 +603,81 @@ export default function PhotoUploadPage() {
     }
   }
 
+  // Remove-duplicates action (U2, R1/R2): scans the WHOLE loaded batch
+  // (never `selectedIds` -- this action takes no selection input at all)
+  // for exact-duplicate groups via `scanForExactDuplicateGroups`, then
+  // mirrors `handleKeepBest`'s async shape above with one key difference:
+  // re-validation here is per-group, not per-selection, since there's no
+  // selection to invalidate. Right when the scan resolves, each group's
+  // ids are filtered against the live `photosByIdRef` (a photo deleted by
+  // some other action during the scan's async window can't remain a
+  // duplicate-group member), and any group that falls under 2 remaining
+  // ids is dropped entirely. Dimension decoding then runs once across the
+  // flattened set of every remaining group's members (KTD5) -- not once
+  // per group -- and `pickBestPhoto` is called once per group on its own
+  // candidate subset, with every group's losers concatenated into one
+  // flat list before a single combined-count confirm() and a single
+  // `handleBatchDelete` call. Wrapped in try/finally, matching
+  // `handleKeepBest`'s shape, so a thrown rejection can't strand
+  // `isScanningDuplicates` true with no way to retry.
+  async function handleRemoveDuplicates() {
+    const snapshotPhotos = photos
+    setIsScanningDuplicates(true)
+
+    try {
+      const result = await scanForExactDuplicateGroups(snapshotPhotos)
+      if (!result.ok) {
+        setDuplicateScanResult("Couldn't scan for duplicates — try again.")
+        return
+      }
+
+      const validGroups = result.groups
+        .map((group) => group.filter((id) => photosByIdRef.current.has(id)))
+        .filter((group) => group.length >= 2)
+
+      if (validGroups.length === 0) {
+        setDuplicateScanResult('No duplicate photos found.')
+        return
+      }
+
+      const allIds = validGroups.flat()
+      const dimensionsById = await decodeDimensionsWithConcurrency(
+        allIds,
+        (id) => photosByIdRef.current.get(id)?.file
+      )
+
+      const allLoserIds: string[] = []
+      for (const group of validGroups) {
+        const candidates = group.map((id) => {
+          const photo = photosByIdRef.current.get(id)!
+          const dims = dimensionsById.get(id) ?? { width: 0, height: 0 }
+          return {
+            id,
+            width: dims.width,
+            height: dims.height,
+            size: photo.file.size,
+            uploadIndex: photo.uploadIndex,
+          }
+        })
+        const { loserIds } = pickBestPhoto(candidates)
+        allLoserIds.push(...loserIds)
+      }
+
+      const confirmed = window.confirm(
+        `Found ${allLoserIds.length} duplicate photo(s) to remove. Continue?`
+      )
+      if (!confirmed) return
+
+      handleBatchDelete(allLoserIds)
+      setDuplicateScanResult(`Removed ${allLoserIds.length} duplicate(s).`)
+    } catch (err) {
+      console.error('Duplicate scan failed', err)
+      setDuplicateScanResult("Couldn't scan for duplicates — try again.")
+    } finally {
+      setIsScanningDuplicates(false)
+    }
+  }
+
   // Builds a single ZIP of every currently-loaded photo (R1), ordered by the
   // TRUE visual order (KTD2, KTD9) rather than the flat `photos` array, and
   // triggers its download. The entry list is snapshotted once here -- see
@@ -869,13 +954,32 @@ export default function PhotoUploadPage() {
             would call setZipWarning into an unmounted banner and the
             failure would be silently invisible, contradicting handleDownloadAll's
             own KTD7 guarantee ("never an uncaught rejection or a silent
-            no-op"). */}
-        {(photos.length > 0 || isGeneratingZip || zipWarning) && (
+            no-op"). Widened (U2, KTD8) to also include
+            isScanningDuplicates/duplicateScanResult, so "Remove duplicates"
+            gets the same stays-mounted-through-its-own-in-flight/result-
+            window guarantee even if `photos.length` hits 0 in the
+            meantime. */}
+        {(photos.length > 0 || isGeneratingZip || zipWarning || isScanningDuplicates || duplicateScanResult) && (
           <div className="mt-6 flex items-center justify-end gap-3">
             {isGeneratingZip && (
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
                 Zipping {zipDoneCount} of {zipTotal}…
               </span>
+            )}
+            {/* R1: visible whenever photos.length > 0, regardless of
+                selection/slider/cluster state, and stays visible for the
+                rest of its own scan/decode window or while its own result
+                banner is showing, even if photos.length drops to 0
+                meantime -- distinct from, but consistent with, the row's
+                own widened outer gate above. */}
+            {(photos.length > 0 || isScanningDuplicates || duplicateScanResult) && (
+              <button
+                onClick={handleRemoveDuplicates}
+                disabled={isRestoring || isScanningDuplicates}
+                className="px-4 py-2 text-sm font-medium bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isScanningDuplicates ? 'Scanning for duplicates…' : 'Remove duplicates'}
+              </button>
             )}
             <button
               onClick={handleClearAll}
@@ -919,6 +1023,23 @@ export default function PhotoUploadPage() {
             <span>{keepBestResult}</span>
             <button
               onClick={() => setKeepBestResult(null)}
+              className="text-xs underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Remove-duplicates result banner (U2, KTD7/R10) -- an
+            independent, own-gated sibling, never nested inside a
+            `photos.length > 0`-style conditional, matching keepBestResult's
+            own established pattern above: this action can reduce
+            `photos.length` to 0. */}
+        {duplicateScanResult && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/20 dark:border-blue-700 dark:text-blue-300 rounded-lg px-3 py-2 text-sm mt-3 flex items-center justify-between gap-3">
+            <span>{duplicateScanResult}</span>
+            <button
+              onClick={() => setDuplicateScanResult(null)}
               className="text-xs underline shrink-0"
             >
               Dismiss
